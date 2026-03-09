@@ -847,20 +847,12 @@ Only the claude binary reads it. No other process touches it.
 ### Environment Variables (set in Coolify)
 
 ```
-# Supabase (keys auto-derived from JWT_SECRET during build)
-POSTGRES_PASSWORD=
-JWT_SECRET=
-
-# Admin Auth
-ADMIN_USER=
-ADMIN_PASS=
-
-# Domains
-ADMIN_DOMAIN=admin.titanclaws.com
-PUBLIC_DOMAIN=titanclaws.com         # leave empty to skip
 
 # Telegram (optional)
 TELEGRAM_BOT_TOKEN=
+
+# Admin/public domains are configured per service in Coolify's Domains UI.
+# Remaining secrets and admin credentials are auto-generated on first boot.
 
 # Agent auth is managed through admin panel → stored in Claude Code's
 # own config directory on the VPS. Not an env var.

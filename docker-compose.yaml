@@ -1,7 +1,6 @@
 # ============================================================================
 # MANUAL CONFIGURATION (set in Coolify):
-#   ADMIN_DOMAIN    — e.g. admin.titanclaws.com
-#   PUBLIC_DOMAIN   — e.g. titanclaws.com (optional, leave empty to skip)
+#   Domains for admin/public services are configured in Coolify's Domains UI
 #   TELEGRAM_BOT_TOKEN — optional
 #
 # Everything else (passwords, JWT, Supabase keys, admin credentials)
@@ -53,11 +52,11 @@ services:
     command: ["gotrue"]
     environment:
       GOTRUE_DB_DRIVER: postgres
-      GOTRUE_SITE_URL: https://${ADMIN_DOMAIN:-localhost}
+      GOTRUE_SITE_URL: http://admin:3000
       GOTRUE_JWT_EXP: 3600
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
       GOTRUE_DISABLE_SIGNUP: "true"
-      API_EXTERNAL_URL: https://${ADMIN_DOMAIN:-localhost}
+      API_EXTERNAL_URL: http://admin:3000
     volumes:
       - config:/config:ro
       - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
@@ -160,6 +159,7 @@ services:
     command: ["node", "apps/mcp/dist/index.js"]
     environment:
       POSTGREST_URL: http://rest:3000
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro
       - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro

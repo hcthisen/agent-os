@@ -73,7 +73,7 @@ Do NOT modify without explicit architect approval:
 
 ## Environment Variables (set in Coolify)
 
-Only 3 values need manual configuration: `ADMIN_DOMAIN`, `PUBLIC_DOMAIN` (optional), `TELEGRAM_BOT_TOKEN` (optional). Everything else - `POSTGRES_PASSWORD`, `JWT_SECRET`, `ADMIN_USER`, `ADMIN_PASS`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` - is auto-generated on first boot by the `init` service (`scripts/init-secrets.sh`) and stored in a `config` Docker volume at `/config/.env.generated`. All services source this file via `scripts/entrypoint.sh`. Agent auth is managed through admin panel (Claude Code's own session). External API keys stored encrypted in `service_registry` table.
+Coolify domains are configured in the platform's Domains UI per service, not through env vars. The only manual env var exposed for this stack is `TELEGRAM_BOT_TOKEN` (optional). Everything else - `POSTGRES_PASSWORD`, `JWT_SECRET`, `ADMIN_USER`, `ADMIN_PASS`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` - is auto-generated on first boot by the `init` service (`scripts/init-secrets.sh`) and stored in a `config` Docker volume at `/config/.env.generated`. All services source this file via `scripts/entrypoint.sh`. Agent auth is managed through admin panel (Claude Code's own session). External API keys stored encrypted in `service_registry` table.
 
 **Docker Compose file**: `docker-compose.yaml` (not `.yml` - Coolify convention).
 

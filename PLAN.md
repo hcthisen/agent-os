@@ -38,7 +38,7 @@ Phase audit: partial. The scaffold exists and now builds/runs locally, but deplo
 - [x] **1.5** Create `Dockerfile` for MCP server `[CHECKED: ok] [TESTED: stack]`
 - [x] **1.6** Create `Dockerfile` for admin app (React SPA build + static serve) `[CHECKED: ok] [TESTED: stack]`
 - [x] **1.7** Create `Dockerfile` for browser service (headless Chromium via agent-browser) `[CHECKED: partial] [TESTED: stack]`
-- [x] **1.8** Create `.env.example` with all required Coolify env vars (`POSTGRES_PASSWORD`, `JWT_SECRET`, `ADMIN_USER`, `ADMIN_PASS`, `ADMIN_DOMAIN`, `PUBLIC_DOMAIN`, `TELEGRAM_BOT_TOKEN`) `[CHECKED: partial] [TESTED: static]`
+- [x] **1.8** Create `.env.example` with operator-set Coolify env vars (currently `TELEGRAM_BOT_TOKEN`; domains are configured in Coolify's Domains UI) `[CHECKED: partial] [TESTED: static]`
 - [x] **1.9** Create `.gitignore` (node_modules, .env, dist, supabase data volumes) `[CHECKED: ok] [TESTED: static]`
 - [x] **1.10** Add shared TypeScript config and common types (enums for task states, priorities, scopes, severities, memory layers) used across supervisor, MCP, and admin `[CHECKED: ok] [TESTED: build]`
 
