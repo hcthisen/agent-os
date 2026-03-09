@@ -18,6 +18,6 @@ FROM node:20-bookworm-slim
 COPY --from=build /app/apps/admin/dist /app/dist
 COPY apps/admin/server.mjs /app/server.mjs
 
-EXPOSE 3000
+EXPOSE 80
 
 CMD ["node", "/app/server.mjs"]

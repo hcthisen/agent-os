@@ -52,11 +52,11 @@ services:
     command: ["gotrue"]
     environment:
       GOTRUE_DB_DRIVER: postgres
-      GOTRUE_SITE_URL: http://admin:3000
+      GOTRUE_SITE_URL: http://admin
       GOTRUE_JWT_EXP: 3600
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
       GOTRUE_DISABLE_SIGNUP: "true"
-      API_EXTERNAL_URL: http://admin:3000
+      API_EXTERNAL_URL: http://admin
     volumes:
       - config:/config:ro
       - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
@@ -119,6 +119,15 @@ services:
       - agent-net
 
   # --- Application Services ---
+  public:
+    build:
+      context: ./sites/public
+      dockerfile: Dockerfile
+    expose:
+      - "80"
+    networks:
+      - agent-net
+
   supervisor:
     build:
       context: .
@@ -176,9 +185,9 @@ services:
     entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
     command: ["node", "/app/server.mjs"]
     ports:
-      - "3000:3000"
+      - "3000:80"
     environment:
-      PORT: 3000
+      PORT: 80
       POSTGREST_URL: http://rest:3000
       SUPERVISOR_HEALTH_URL: http://supervisor:3001/health
     volumes:
