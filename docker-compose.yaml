@@ -1,0 +1,207 @@
+# ============================================================================
+# MANUAL CONFIGURATION (set in Coolify):
+#   ADMIN_DOMAIN    — e.g. admin.titanclaws.com
+#   PUBLIC_DOMAIN   — e.g. titanclaws.com (optional, leave empty to skip)
+#   TELEGRAM_BOT_TOKEN — optional
+#
+# Everything else (passwords, JWT, Supabase keys, admin credentials)
+# is auto-generated on first boot by the init service.
+# ============================================================================
+
+services:
+
+  # --- Init: generates all secrets on first boot ---
+  init:
+    image: alpine:3.19
+    command: sh -c "apk add --no-cache openssl > /dev/null 2>&1 && sh /scripts/init-secrets.sh"
+    volumes:
+      - config:/config
+      - ./scripts/init-secrets.sh:/scripts/init-secrets.sh:ro
+    networks:
+      - agent-net
+
+  # --- Supabase Stack ---
+  db:
+    image: supabase/postgres:15.6.1.143
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
+    command: ["docker-entrypoint.sh", "postgres", "-c", "listen_addresses=*"]
+    environment:
+      POSTGRES_DB: agent_os
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - config:/config:ro
+      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
+      - ./supabase/migrations:/migrations:ro
+      - ./scripts/zzz-run-migrations.sh:/docker-entrypoint-initdb.d/zzz-run-migrations.sh:ro
+    networks:
+      - agent-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth:
+    image: supabase/gotrue:v2.158.1
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
+    command: ["gotrue"]
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_SITE_URL: https://${ADMIN_DOMAIN:-localhost}
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
+      GOTRUE_DISABLE_SIGNUP: "true"
+      API_EXTERNAL_URL: https://${ADMIN_DOMAIN:-localhost}
+    volumes:
+      - config:/config:ro
+      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
+    networks:
+      - agent-net
+
+  rest:
+    image: postgrest/postgrest:v12.2.3
+    depends_on:
+      db:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    command: ["postgrest", "/config/postgrest.conf"]
+    volumes:
+      - config:/config:ro
+    networks:
+      - agent-net
+
+  realtime:
+    image: supabase/realtime:v2.30.34
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "set -a && . /config/.env.generated && set +a && exec /app/bin/realtime start"]
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_NAME: agent_os
+      DB_SSL: "false"
+      PORT: 4000
+      SECURE_COOKIE_FLAG: "false"
+      APP_NAME: realtime
+      SLOT_NAME: realtime_rls
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+    volumes:
+      - config:/config:ro
+    networks:
+      - agent-net
+
+  storage:
+    image: supabase/storage-api:v1.11.13
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/storage-entrypoint.sh"]
+    command: ["node", "dist/start/server.js"]
+    environment:
+      POSTGREST_URL: http://rest:3000
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+    volumes:
+      - storage-data:/var/lib/storage
+      - config:/config:ro
+      - ./scripts/storage-entrypoint.sh:/scripts/storage-entrypoint.sh:ro
+    networks:
+      - agent-net
+
+  # --- Application Services ---
+  supervisor:
+    build:
+      context: .
+      dockerfile: apps/supervisor/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
+    command: ["node", "apps/supervisor/dist/index.js"]
+    environment:
+      POSTGREST_URL: http://rest:3000
+      MCP_CONFIG_PATH: /app/mcp-config.json
+      CLAUDE_HOME_DIR: /home/node
+      CLAUDE_RUN_AS_UID: 1000
+      CLAUDE_RUN_AS_GID: 1000
+      CONCURRENCY_LIMIT: 5
+    volumes:
+      - config:/config:ro
+      - type: bind
+        source: ${USERPROFILE}/.claude
+        target: /home/node/.claude
+      - workspaces:/app/workspaces
+      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
+      - ./AGENTS.md:/app/AGENTS.md:ro
+      - ./AGENTS_INSCTRUCTIONS.md:/app/AGENTS_INSCTRUCTIONS.md:ro
+    networks:
+      - agent-net
+
+  mcp:
+    build:
+      context: .
+      dockerfile: apps/mcp/Dockerfile
+    profiles: ["manual"]
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
+    command: ["node", "apps/mcp/dist/index.js"]
+    environment:
+      POSTGREST_URL: http://rest:3000
+    volumes:
+      - config:/config:ro
+      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
+    networks:
+      - agent-net
+
+  admin:
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
+    command: ["node", "/app/server.mjs"]
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      POSTGREST_URL: http://rest:3000
+      SUPERVISOR_HEALTH_URL: http://supervisor:3001/health
+    volumes:
+      - config:/config:ro
+      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
+    networks:
+      - agent-net
+
+  browser:
+    build:
+      context: .
+      dockerfile: apps/browser/Dockerfile
+    environment:
+      CHROMIUM_PATH: /usr/bin/chromium
+    networks:
+      - agent-net
+
+volumes:
+  config:
+  db-data:
+  storage-data:
+  workspaces:
+
+networks:
+  agent-net:
+    driver: bridge

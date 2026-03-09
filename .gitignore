@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+# Supabase data volumes
+supabase/volumes/
+
+# Build artifacts
+apps/admin/dist/
+apps/supervisor/dist/
+apps/mcp/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

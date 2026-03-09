@@ -1,0 +1,26 @@
+{
+  "name": "agent-os",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/supervisor",
+    "apps/mcp",
+    "apps/admin",
+    "apps/browser",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev:supervisor": "npm run dev -w apps/supervisor",
+    "dev:mcp": "npm run dev -w apps/mcp",
+    "dev:admin": "npm run dev -w apps/admin",
+    "build": "npm run build -w packages/shared && npm run build -w apps/mcp && npm run build -w apps/supervisor && npm run build -w apps/admin && npm run build -w apps/browser",
+    "build:supervisor": "npm run build -w apps/supervisor",
+    "build:mcp": "npm run build -w apps/mcp",
+    "build:admin": "npm run build -w apps/admin",
+    "build:browser": "npm run build -w apps/browser"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
