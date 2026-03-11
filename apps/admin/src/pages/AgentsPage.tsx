@@ -100,6 +100,8 @@ const ROLE_NOTES: Record<string, string> = {
   sentinel: "Recurring watchdog. Keep it cheap and provider-aware.",
 };
 
+const BASE_TIER_LABEL = "Base role preset";
+
 const OPENAI_AUTH_STATUS_LABELS: Record<OpenAiDeviceAuthResponse["status"], string> = {
   canceled: "Canceled",
   complete: "Connected",
@@ -225,10 +227,10 @@ export function AgentsPage() {
   function activeProviderLabel(roleId: string, model: string, effort: string) {
     if (runtimeProvider?.activeProvider === "openai") {
       const resolved = resolveOpenAiRole(roleId, model, effort);
-      return `Runtime: ${PROVIDER_LABELS.openai.runtime} ${resolved.model} / ${resolved.effort}`;
+      return `Active runtime: ${PROVIDER_LABELS.openai.runtime} ${resolved.model} / ${resolved.effort}`;
     }
 
-    return `Runtime: ${PROVIDER_LABELS.anthropic.runtime} ${model} / ${effort}`;
+    return `Active runtime: ${PROVIDER_LABELS.anthropic.runtime} ${model} / ${effort}`;
   }
 
   function updateRoleConfig(
@@ -585,6 +587,7 @@ export function AgentsPage() {
           </h4>
           <p style={{ color: "#8b8b96", fontSize: 12, marginBottom: 12 }}>
             These per-role settings apply when the active runtime provider is OpenAI Codex.
+            The label below shows the stored role preset, not the live runtime selection.
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             {sortedRoles.map((role) => {
@@ -611,7 +614,7 @@ export function AgentsPage() {
                       {role.display_name}
                     </div>
                     <div style={{ color: "#777", fontSize: 11, marginTop: 4 }}>
-                      Anthropic default: {role.model} / {role.effort}
+                      {BASE_TIER_LABEL}: {role.model} / {role.effort}
                     </div>
                     {ROLE_NOTES[role.id] && (
                       <div style={{ color: "#8b8b96", fontSize: 11, marginTop: 6 }}>
@@ -656,11 +659,11 @@ export function AgentsPage() {
           }}
         >
           <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
-            Anthropic Tier Fallback Mapping
+            Base Tier Fallback Mapping
           </h4>
           <p style={{ color: "#8b8b96", fontSize: 12, marginBottom: 12 }}>
-            Maps the stored Anthropic tier defaults (`opus`, `sonnet`, `haiku`) onto
-            OpenAI models when a role does not have an explicit override above.
+            Maps the stored base role tiers (`opus`, `sonnet`, `haiku`) onto OpenAI
+            models when a role does not have an explicit override above.
           </p>
           <div style={{ display: "grid", gap: 8 }}>
             {(["opus", "sonnet", "haiku"] as const).map((tier) => (
@@ -749,8 +752,8 @@ export function AgentsPage() {
                 }}
               >
                 <span>Role: {a.role_id}</span>
-                <span>Anthropic default: {model} / {effort}</span>
-                <span>OpenAI override: {openai.model} / {openai.effort}</span>
+                <span>{BASE_TIER_LABEL}: {model} / {effort}</span>
+                <span>Resolved OpenAI override: {openai.model} / {openai.effort}</span>
                 <span>{activeProviderLabel(a.role_id, model, effort)}</span>
                 <span>Max concurrent: {role?.max_concurrent_tasks ?? "?"}</span>
                 <span>
@@ -768,9 +771,9 @@ export function AgentsPage() {
         <thead>
           <tr style={{ borderBottom: "1px solid #2a2a3a", textAlign: "left" }}>
             <th style={thStyle}>Role</th>
-            <th style={thStyle}>Anthropic Default</th>
-            <th style={thStyle}>OpenAI Override</th>
-            <th style={thStyle}>Runtime</th>
+            <th style={thStyle}>Base Preset</th>
+            <th style={thStyle}>Resolved OpenAI</th>
+            <th style={thStyle}>Active Runtime</th>
             <th style={thStyle}>Max Tasks</th>
           </tr>
         </thead>

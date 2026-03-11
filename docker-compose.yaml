@@ -30,6 +30,7 @@ services:
     build:
       context: .
       dockerfile: docker/db.Dockerfile
+    restart: unless-stopped
     depends_on:
       init:
         condition: service_completed_successfully
@@ -52,6 +53,7 @@ services:
     build:
       context: .
       dockerfile: docker/gotrue.Dockerfile
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -71,6 +73,7 @@ services:
 
   rest:
     image: postgrest/postgrest:v12.2.3
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -84,6 +87,7 @@ services:
 
   realtime:
     image: supabase/realtime:v2.30.34
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -110,9 +114,12 @@ services:
     build:
       context: .
       dockerfile: docker/storage.Dockerfile
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+      rest:
+        condition: service_started
     entrypoint: ["/bin/sh", "/scripts/storage-entrypoint.sh"]
     command: ["node", "dist/start/server.js"]
     environment:
@@ -130,20 +137,30 @@ services:
     build:
       context: ./sites/public
       dockerfile: Dockerfile
+    restart: unless-stopped
     expose:
       - "80"
     volumes:
       - public-live:/usr/share/nginx/html
     networks:
       - agent-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
 
   supervisor:
     build:
       context: .
       dockerfile: apps/supervisor/Dockerfile
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+      rest:
+        condition: service_started
     entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
     command: ["node", "apps/supervisor/dist/index.js"]
     environment:
@@ -163,6 +180,12 @@ services:
       - workspaces:/app/workspaces
     networks:
       - agent-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   mcp:
     build:
@@ -186,9 +209,14 @@ services:
     build:
       context: .
       dockerfile: apps/admin/Dockerfile
+    restart: unless-stopped
     depends_on:
       init:
         condition: service_completed_successfully
+      rest:
+        condition: service_started
+      supervisor:
+        condition: service_started
     entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
     command: ["node", "/app/server.mjs"]
     ports:
@@ -206,11 +234,18 @@ services:
       - config:/config:ro
     networks:
       - agent-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   browser:
     build:
       context: .
       dockerfile: apps/browser/Dockerfile
+    restart: unless-stopped
     environment:
       CHROMIUM_PATH: /usr/bin/chromium
     networks:

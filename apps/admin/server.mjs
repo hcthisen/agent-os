@@ -64,6 +64,14 @@ const MIME_TYPES = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+const TRANSIENT_FETCH_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+]);
+
 if (!SERVICE_KEY) {
   console.warn(
     "[admin] SUPABASE_SERVICE_KEY is missing; API routes will fail until init secrets are loaded."
@@ -184,6 +192,37 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientFetchError(error) {
+  const code = error?.cause?.code || error?.code;
+  return typeof code === "string" && TRANSIENT_FETCH_ERROR_CODES.has(code);
+}
+
+async function fetchWithRetry(url, options = {}, retryOptions = {}) {
+  const attempts = retryOptions.attempts || 4;
+  const baseDelayMs = retryOptions.baseDelayMs || 250;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetch(url, options);
+    } catch (error) {
+      lastError = error;
+
+      if (!isTransientFetchError(error) || attempt === attempts) {
+        throw error;
+      }
+
+      await sleep(baseDelayMs * attempt);
+    }
+  }
+
+  throw lastError || new Error("Fetch failed");
+}
+
 async function postgrest(path, options = {}) {
   const {
     body,
@@ -200,7 +239,7 @@ async function postgrest(path, options = {}) {
     }
   }
 
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     method,
     headers: {
       apikey: SERVICE_KEY,
@@ -378,7 +417,7 @@ async function createRelayTaskForInboundMessage(message) {
 
 async function callSupervisor(path, options = {}) {
   const { body, method = "GET" } = options;
-  const response = await fetch(`${SUPERVISOR_API_URL}${path}`, {
+  const response = await fetchWithRetry(`${SUPERVISOR_API_URL}${path}`, {
     method,
     headers:
       body === undefined
@@ -1017,6 +1056,11 @@ async function serveStatic(res, pathname) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
+
+    if (url.pathname === "/health") {
+      sendJson(res, 200, { status: "ok" });
+      return;
+    }
 
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
