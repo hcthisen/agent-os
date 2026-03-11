@@ -1,12 +1,16 @@
 FROM node:20-bookworm-slim
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-# Pre-configure Claude Code for headless operation
-RUN mkdir -p /home/node/.claude && \
+# Install both supported coding CLIs.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
+
+# Pre-configure the shared agent home for both providers.
+RUN mkdir -p /home/node/.claude /home/node/.codex && \
     echo '{"skipDangerousModePermissionPrompt": true}' > /home/node/.claude/settings.json && \
-    chown -R 1000:1000 /home/node/.claude
+    chown -R 1000:1000 /home/node/.claude /home/node/.codex
 
 WORKDIR /app
 
@@ -28,9 +32,9 @@ RUN npm run build -w packages/shared && npm run build -w apps/mcp && npm run bui
 COPY AGENTS.md /app/AGENTS.md
 COPY AGENTS_INSCTRUCTIONS.md /app/AGENTS_INSCTRUCTIONS.md
 
-ENV CLAUDE_HOME_DIR=/home/node
-ENV CLAUDE_RUN_AS_UID=1000
-ENV CLAUDE_RUN_AS_GID=1000
+ENV AGENT_HOME_DIR=/home/node
+ENV AGENT_RUN_AS_UID=1000
+ENV AGENT_RUN_AS_GID=1000
 
 EXPOSE 3001
 

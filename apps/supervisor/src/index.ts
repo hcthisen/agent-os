@@ -5,6 +5,7 @@ import { routeMessages } from "./message-router.js";
 import { checkSchedules } from "./scheduler.js";
 import { getActiveCount } from "./process-manager.js";
 import { startAsyncWorkers, stopAsyncWorkers } from "./async-workers.js";
+import { getRuntimeProviderStatus } from "./runtime-provider.js";
 import http from "node:http";
 
 let running = true;
@@ -48,14 +49,16 @@ async function main() {
   startAsyncWorkers();
 
   // Health endpoint for Docker healthchecks
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     if (req.url === "/health") {
+      const runtimeProvider = await getRuntimeProviderStatus(config.agentHomeDir);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
           status: "ok",
           active_processes: getActiveCount(),
           concurrency_limit: config.concurrencyLimit,
+          runtime_provider: runtimeProvider,
         })
       );
     } else {

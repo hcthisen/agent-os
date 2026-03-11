@@ -18,6 +18,19 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "";
 const SESSION_SECRET = process.env.JWT_SECRET || "agent-os-admin";
 const SESSION_COOKIE = "agent_os_admin_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const DEFAULT_OPENAI_MODEL_MAP = {
+  haiku: "gpt-5.4",
+  opus: "gpt-5.4",
+  sonnet: "gpt-5.4",
+};
+const DEFAULT_OPENAI_ROLE_CONFIG = {
+  architect: { effort: "high", model: "gpt-5.4" },
+  builder: { effort: "high", model: "gpt-5.4" },
+  relay: { effort: "low", model: "gpt-5.4" },
+  reviewer: { effort: "high", model: "gpt-5.4" },
+  sage: { effort: "xhigh", model: "gpt-5.4" },
+  sentinel: { effort: "medium", model: "gpt-5.3-codex" },
+};
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -185,6 +198,120 @@ async function requireAuth(req, res) {
     return false;
   }
   return true;
+}
+
+function normalizeRuntimeProviderValue(value) {
+  const openaiModelMap =
+    value?.openaiModelMap && typeof value.openaiModelMap === "object"
+      ? value.openaiModelMap
+      : {};
+  const openaiRoleConfig =
+    value?.openaiRoleConfig && typeof value.openaiRoleConfig === "object"
+      ? value.openaiRoleConfig
+      : {};
+
+  return {
+    activeProvider: value?.activeProvider === "openai" ? "openai" : "anthropic",
+    openaiModelMap: {
+      ...DEFAULT_OPENAI_MODEL_MAP,
+      ...Object.fromEntries(
+        Object.entries(openaiModelMap).filter(
+          ([, mappedModel]) =>
+            typeof mappedModel === "string" && mappedModel.trim()
+        ).map(([tier, mappedModel]) => [tier.toLowerCase(), mappedModel.trim()])
+      ),
+    },
+    openaiRoleConfig: {
+      ...DEFAULT_OPENAI_ROLE_CONFIG,
+      ...Object.fromEntries(
+        Object.entries(openaiRoleConfig)
+          .map(([roleId, entry]) => {
+            const model =
+              typeof entry?.model === "string" ? entry.model.trim() : "";
+            const effort = normalizeReasoningEffort(entry?.effort);
+
+            if (!model) return null;
+            return [roleId.toLowerCase(), { effort, model }];
+          })
+          .filter(Boolean)
+      ),
+    },
+  };
+}
+
+function normalizeReasoningEffort(value) {
+  const normalized =
+    typeof value === "string" ? value.trim().toLowerCase() : "medium";
+
+  if (
+    normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high" ||
+    normalized === "xhigh"
+  ) {
+    return normalized;
+  }
+
+  return "medium";
+}
+
+async function getRuntimeProviderSetting() {
+  const rows = await postgrest("/system_settings", {
+    query: {
+      key: "eq.runtime_provider",
+      limit: "1",
+      select: "key,value,updated_at",
+    },
+  }).catch(() => []);
+
+  return rows?.[0]
+    ? {
+        updated_at: rows[0].updated_at || null,
+        ...normalizeRuntimeProviderValue(rows[0].value || {}),
+      }
+    : normalizeRuntimeProviderValue({});
+}
+
+async function saveRuntimeProviderSetting(nextValue) {
+  const current = await postgrest("/system_settings", {
+    query: {
+      key: "eq.runtime_provider",
+      limit: "1",
+      select: "key",
+    },
+  }).catch(() => []);
+
+  if (current?.[0]?.key) {
+    await postgrest("/system_settings", {
+      body: {
+        updated_at: new Date().toISOString(),
+        value: nextValue,
+      },
+      method: "PATCH",
+      query: { key: "eq.runtime_provider" },
+    });
+    return;
+  }
+
+  await postgrest("/system_settings", {
+    body: {
+      key: "runtime_provider",
+      updated_at: new Date().toISOString(),
+      value: nextValue,
+    },
+    method: "POST",
+  });
+}
+
+async function getSupervisorRuntimeProvider() {
+  try {
+    const response = await fetch(SUPERVISOR_HEALTH_URL);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return payload.runtime_provider || null;
+  } catch {
+    return null;
+  }
 }
 
 async function handleApi(req, res, url) {
@@ -430,6 +557,32 @@ async function handleApi(req, res, url) {
       query: { id: `eq.${serviceId}` },
     });
     sendNoContent(res);
+    return;
+  }
+
+  if (pathname === "/api/runtime/provider" && req.method === "GET") {
+    const [setting, supervisorRuntime] = await Promise.all([
+      getRuntimeProviderSetting(),
+      getSupervisorRuntimeProvider(),
+    ]);
+
+    sendJson(res, 200, {
+      activeProvider: setting.activeProvider,
+      openaiModelMap: setting.openaiModelMap,
+      openaiRoleConfig: setting.openaiRoleConfig,
+      providerStatus: supervisorRuntime?.providers || null,
+      supervisorActiveProvider:
+        supervisorRuntime?.activeProvider || setting.activeProvider,
+      updatedAt: setting.updated_at || null,
+    });
+    return;
+  }
+
+  if (pathname === "/api/runtime/provider" && req.method === "POST") {
+    const body = await readJson(req);
+    const nextValue = normalizeRuntimeProviderValue(body || {});
+    await saveRuntimeProviderSetting(nextValue);
+    sendJson(res, 200, nextValue);
     return;
   }
 

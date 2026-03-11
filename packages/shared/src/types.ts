@@ -84,8 +84,8 @@ export interface TaskRun {
   context_pack: Record<string, unknown>;
   outcome: Record<string, unknown> | null;
   handoff_note: string | null;
-  model_used: ClaudeModel;
-  effort_used: ClaudeEffort;
+  model_used: string;
+  effort_used: string;
   error_message: string | null;
   started_at: string;
   finished_at: string | null;

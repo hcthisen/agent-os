@@ -63,6 +63,7 @@ export const api = {
   getMessages: (): Promise<any[]> =>
     apiGet<any[]>("/messages?channel=admin_chat&limit=100"),
   getRoles: (): Promise<any[]> => apiGet<any[]>("/roles"),
+  getRuntimeProvider: (): Promise<any> => apiGet<any>("/runtime/provider"),
   getSchedules: (): Promise<any[]> => apiGet<any[]>("/schedules"),
   getServices: (): Promise<any[]> => apiGet<any[]>("/services"),
   getSession: (): Promise<any> => apiGet<any>("/auth/session"),
@@ -75,6 +76,16 @@ export const api = {
       decision: "rejected",
     }),
   retryTask: (taskId: string) => apiPost<void>(`/tasks/${taskId}/retry`),
+  saveRuntimeProvider: (
+    activeProvider: string,
+    openaiModelMap: Record<string, string>,
+    openaiRoleConfig: Record<string, { effort: string; model: string }>
+  ) =>
+    apiPost<any>("/runtime/provider", {
+      activeProvider,
+      openaiModelMap,
+      openaiRoleConfig,
+    }),
   saveServiceCredential: (serviceId: string, credential: string) =>
     apiPost<void>(`/services/${serviceId}/credential`, { credential }),
   sendMessage: (content: string) =>

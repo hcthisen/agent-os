@@ -140,15 +140,13 @@ services:
     environment:
       POSTGREST_URL: http://rest:3000
       MCP_CONFIG_PATH: /app/mcp-config.json
-      CLAUDE_HOME_DIR: /home/node
-      CLAUDE_RUN_AS_UID: 1000
-      CLAUDE_RUN_AS_GID: 1000
+      AGENT_HOME_DIR: /home/node
+      AGENT_RUN_AS_UID: 1000
+      AGENT_RUN_AS_GID: 1000
       CONCURRENCY_LIMIT: 5
     volumes:
       - config:/config:ro
-      - type: bind
-        source: ${USERPROFILE}/.claude
-        target: /home/node/.claude
+      - provider-home:/home/node
       - workspaces:/app/workspaces
       - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
       - ./AGENTS.md:/app/AGENTS.md:ro
@@ -208,6 +206,7 @@ services:
 volumes:
   config:
   db-data:
+  provider-home:
   storage-data:
   workspaces:
 

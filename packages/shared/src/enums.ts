@@ -81,6 +81,7 @@ export const ClaudeEffort = {
   LOW: "low",
   MEDIUM: "medium",
   HIGH: "high",
+  XHIGH: "xhigh",
 } as const;
 export type ClaudeEffort = (typeof ClaudeEffort)[keyof typeof ClaudeEffort];
 

@@ -4,9 +4,16 @@ export const config = {
   agentsMdPath: process.env.AGENTS_MD_PATH || "/app/AGENTS.md",
   agentsInstructionsPath:
     process.env.AGENTS_INSTRUCTIONS_PATH || "/app/AGENTS_INSCTRUCTIONS.md",
-  claudeHomeDir: process.env.CLAUDE_HOME_DIR || "/home/node",
-  claudeRunAsUid: parseInt(process.env.CLAUDE_RUN_AS_UID || "1000", 10),
-  claudeRunAsGid: parseInt(process.env.CLAUDE_RUN_AS_GID || "1000", 10),
+  agentHomeDir:
+    process.env.AGENT_HOME_DIR || process.env.CLAUDE_HOME_DIR || "/home/node",
+  agentRunAsUid: parseInt(
+    process.env.AGENT_RUN_AS_UID || process.env.CLAUDE_RUN_AS_UID || "1000",
+    10
+  ),
+  agentRunAsGid: parseInt(
+    process.env.AGENT_RUN_AS_GID || process.env.CLAUDE_RUN_AS_GID || "1000",
+    10
+  ),
   workspacesDir: process.env.WORKSPACES_DIR || "/app/workspaces",
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || "5000", 10),
   scheduleCheckIntervalMs: parseInt(process.env.SCHEDULE_CHECK_MS || "30000", 10),
