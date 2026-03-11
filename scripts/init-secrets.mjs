@@ -17,8 +17,8 @@ console.log("[init] First boot detected. Generating secrets...");
 
 const POSTGRES_PASSWORD = randomBytes(24).toString("hex");
 const JWT_SECRET = randomBytes(32).toString("hex");
-const ADMIN_USER = "admin";
-const ADMIN_PASS = generateAdminPassword();
+const ADMIN_USER = process.env.ADMIN_USER?.trim() || "admin";
+const ADMIN_PASS = process.env.ADMIN_PASS?.trim() || generateAdminPassword();
 
 const SUPABASE_ANON_KEY = makeJwt(
   '{"role":"anon","iss":"supabase","iat":1700000000,"exp":2000000000}',

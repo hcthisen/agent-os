@@ -2,6 +2,7 @@
 # MANUAL CONFIGURATION (set in Coolify):
 #   Domains for admin/public services are configured in Coolify's Domains UI
 #   TELEGRAM_BOT_TOKEN — optional
+#   ADMIN_USER / ADMIN_PASS — optional; if unset, generated on first boot
 #
 # Everything else (passwords, JWT, Supabase keys, admin credentials)
 # is auto-generated on first boot by the init service.
@@ -16,6 +17,9 @@ services:
       dockerfile: docker/init.Dockerfile
     restart: "no"
     command: ["node", "/scripts/init-secrets.mjs"]
+    environment:
+      ADMIN_PASS: ${ADMIN_PASS:-}
+      ADMIN_USER: ${ADMIN_USER:-}
     volumes:
       - config:/config
     networks:
@@ -184,6 +188,9 @@ services:
     ports:
       - "3000:80"
     environment:
+      ADMIN_PASS: ${ADMIN_PASS:-}
+      ADMIN_USER: ${ADMIN_USER:-}
+      ENV_OVERRIDE_KEYS: "ADMIN_USER ADMIN_PASS"
       PORT: 80
       POSTGREST_URL: http://rest:3000
       SUPERVISOR_HEALTH_URL: http://supervisor:3001/health
