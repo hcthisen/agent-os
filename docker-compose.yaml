@@ -11,11 +11,11 @@ services:
 
   # --- Init: generates all secrets on first boot ---
   init:
-    image: alpine:3.19
-    command: sh -c "apk add --no-cache openssl > /dev/null 2>&1 && sh /scripts/init-secrets.sh"
+    image: node:20-alpine
+    command: ["node", "/scripts/init-secrets.mjs"]
     volumes:
       - config:/config
-      - ./scripts/init-secrets.sh:/scripts/init-secrets.sh:ro
+      - ./scripts/init-secrets.mjs:/scripts/init-secrets.mjs:ro
     networks:
       - agent-net
 
