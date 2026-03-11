@@ -124,14 +124,14 @@ export async function getRuntimeProviderStatus(
         authPath: anthropicAuthPath,
         cli: "claude",
         cliInstalled: commandAvailable("claude"),
-        label: "Anthropic subscription",
+        label: "Claude (Anthropic)",
       },
       openai: {
         authDetected: await pathExists(openAiAuthPath),
         authPath: openAiAuthPath,
         cli: "codex",
         cliInstalled: commandAvailable("codex"),
-        label: "ChatGPT subscription",
+        label: "OpenAI Codex (ChatGPT)",
       },
     },
   };

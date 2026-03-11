@@ -33,6 +33,10 @@ import {
   scheduleUpdateDef,
   scheduleUpdate,
 } from "./tools/schedule_update.js";
+import {
+  scheduleCreateDef,
+  scheduleCreate,
+} from "./tools/schedule_create.js";
 
 const tools = [
   taskClaimDef,
@@ -48,6 +52,7 @@ const tools = [
   contextRefreshDef,
   messageSendDef,
   scheduleUpdateDef,
+  scheduleCreateDef,
 ];
 
 const handlers: Record<string, (args: any) => Promise<unknown>> = {
@@ -64,6 +69,7 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   context_refresh: contextRefresh,
   message_send: messageSend,
   schedule_update: scheduleUpdate,
+  schedule_create: scheduleCreate,
 };
 
 async function extractPolicyAction(
@@ -117,6 +123,22 @@ async function extractPolicyAction(
       type: "system.modify",
       taskId,
       desc: `Update schedule: ${target}`,
+    };
+  }
+
+  if (name === "schedule_create") {
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    const target =
+      (typeof args?.name === "string" && args.name.trim()) || "new schedule";
+
+    return {
+      type: "system.modify",
+      taskId,
+      desc: `Create schedule: ${target}`,
     };
   }
 

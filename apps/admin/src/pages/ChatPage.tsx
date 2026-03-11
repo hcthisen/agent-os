@@ -12,7 +12,18 @@ interface Message {
 export function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const messagesRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
+
+  function updateStickiness() {
+    const container = messagesRef.current;
+    if (!container) return;
+
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldStickToBottomRef.current = distanceFromBottom < 80;
+  }
 
   async function loadMessages() {
     const data = await api.getMessages();
@@ -39,7 +50,11 @@ export function ChatPage() {
   }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!shouldStickToBottomRef.current) {
+      return;
+    }
+
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages]);
 
   async function sendMessage(e: React.FormEvent) {
@@ -54,7 +69,11 @@ export function ChatPage() {
   return (
     <div style={styles.container}>
       <h2 style={styles.heading}>Chat</h2>
-      <div style={styles.messages}>
+      <div
+        ref={messagesRef}
+        onScroll={updateStickiness}
+        style={styles.messages}
+      >
         {messages.map((msg) => (
           <div
             key={msg.id}
