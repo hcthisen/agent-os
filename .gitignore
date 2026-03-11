@@ -20,3 +20,5 @@ apps/mcp/dist/
 .DS_Store
 Thumbs.db
 Screenshots/
+.tmp/
+tmp/

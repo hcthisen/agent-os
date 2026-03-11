@@ -1,5 +1,5 @@
 #!/bin/sh
-# Entrypoint wrapper: sources generated secrets, then runs the actual command.
+# Entrypoint wrapper: source generated secrets, then run the actual command.
 set -eu
 
 ENV_FILE="/config/.env.generated"
@@ -17,7 +17,7 @@ while [ ! -f "$ENV_FILE" ]; do
   ELAPSED=$((ELAPSED + 1))
 done
 
-# Source the generated environment (all vars including derived ones)
+# Source the generated environment, including derived values.
 set -a
 . "$ENV_FILE"
 set +a

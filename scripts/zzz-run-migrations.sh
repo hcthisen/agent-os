@@ -6,7 +6,7 @@ set -eu
 MIGRATIONS_DIR="/migrations"
 
 if [ ! -d "$MIGRATIONS_DIR" ]; then
-  echo "[migrations] No migrations directory found at $MIGRATIONS_DIR — skipping."
+  echo "[migrations] No migrations directory found at $MIGRATIONS_DIR - skipping."
   exit 0
 fi
 

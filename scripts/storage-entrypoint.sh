@@ -1,6 +1,6 @@
 #!/bin/sh
-# Storage-specific entrypoint: sources secrets, then overrides DATABASE_URL
-# to use supabase_storage_admin role instead of postgres.
+# Storage-specific entrypoint: source secrets, then override DATABASE_URL
+# to use supabase_storage_admin instead of postgres.
 set -eu
 
 ENV_FILE="/config/.env.generated"
