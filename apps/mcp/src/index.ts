@@ -17,6 +17,10 @@ import { eventLogDef, eventLog } from "./tools/event_log.js";
 import { artifactPutDef, artifactPut } from "./tools/artifact_put.js";
 import { handoffCreateDef, handoffCreate } from "./tools/handoff_create.js";
 import {
+  publicSitePublishDef,
+  publicSitePublish,
+} from "./tools/public_site_publish.js";
+import {
   approvalRequestDef,
   approvalRequest,
 } from "./tools/approval_request.js";
@@ -35,6 +39,7 @@ const tools = [
   eventLogDef,
   artifactPutDef,
   handoffCreateDef,
+  publicSitePublishDef,
   approvalRequestDef,
   contextRefreshDef,
   messageSendDef,
@@ -49,6 +54,7 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   event_log: eventLog,
   artifact_put: artifactPut,
   handoff_create: handoffCreate,
+  public_site_publish: publicSitePublish,
   approval_request: approvalRequest,
   context_refresh: contextRefresh,
   message_send: messageSend,

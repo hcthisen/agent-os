@@ -44,5 +44,10 @@ if [ -n "$OVERRIDE_FILE" ]; then
   rm -f "$OVERRIDE_FILE"
 fi
 
+if [ -n "${PUBLIC_LIVE_DIR:-}" ]; then
+  mkdir -p "$PUBLIC_LIVE_DIR"
+  chmod -R 0777 "$PUBLIC_LIVE_DIR" || true
+fi
+
 # Run the actual command
 exec "$@"

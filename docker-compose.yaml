@@ -132,6 +132,8 @@ services:
       dockerfile: Dockerfile
     expose:
       - "80"
+    volumes:
+      - public-live:/usr/share/nginx/html
     networks:
       - agent-net
 
@@ -151,9 +153,12 @@ services:
       AGENT_RUN_AS_UID: 1000
       AGENT_RUN_AS_GID: 1000
       CONCURRENCY_LIMIT: 5
+      PUBLIC_LIVE_DIR: /app/public-live
+      PUBLIC_SITE_URL: ${SERVICE_URL_PUBLIC:-}
     volumes:
       - config:/config:ro
       - provider-home:/home/node
+      - public-live:/app/public-live
       - workspaces:/app/workspaces
     networks:
       - agent-net
@@ -212,6 +217,7 @@ volumes:
   config:
   db-data:
   provider-home:
+  public-live:
   storage-data:
   workspaces:
 

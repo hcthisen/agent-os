@@ -318,6 +318,30 @@ async function getSupervisorRuntimeProvider() {
   }
 }
 
+async function createRelayTaskForInboundMessage(message) {
+  const title = `Process message: ${message.content.slice(0, 50)}...`;
+  const objective = `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.\n\nMessage: ${message.content}`;
+
+  const rows = await postgrest("/tasks", {
+    body: {
+      acceptance_criteria: [
+        "Message classified",
+        "Appropriate action taken or task created",
+        "Response sent",
+      ],
+      assigned_role: "relay",
+      objective,
+      priority: "high",
+      state: "ready",
+      title,
+    },
+    method: "POST",
+    preferRepresentation: true,
+  });
+
+  return rows?.[0] || null;
+}
+
 async function callSupervisor(path, options = {}) {
   const { body, method = "GET" } = options;
   const response = await fetch(`${SUPERVISOR_API_URL}${path}`, {
@@ -390,17 +414,65 @@ async function handleApi(req, res, url) {
 
   if (pathname === "/api/messages" && req.method === "POST") {
     const body = await readJson(req);
-    await postgrest("/messages", {
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+
+    if (!content) {
+      sendJson(res, 400, { error: "Message content is required" });
+      return;
+    }
+
+    let relayTask = null;
+
+    try {
+      relayTask = await createRelayTaskForInboundMessage({
+        channel: "admin_chat",
+        content,
+        sender: "operator",
+      });
+    } catch (taskError) {
+      await postgrest("/messages", {
+        body: {
+          channel: "admin_chat",
+          content,
+          direction: "inbound",
+          metadata: {
+            routing: "fallback_poll",
+            routing_error:
+              taskError instanceof Error ? taskError.message : String(taskError),
+          },
+          processed: false,
+          sender: "operator",
+        },
+        method: "POST",
+      });
+      sendJson(res, 202, {
+        queuedForPolling: true,
+        relayTaskId: null,
+      });
+      return;
+    }
+
+    const rows = await postgrest("/messages", {
       body: {
         channel: "admin_chat",
-        content: body.content,
+        content,
         direction: "inbound",
-        metadata: {},
+        metadata: {
+          relay_task_id: relayTask?.id || null,
+          routing: "direct_relay_task",
+        },
+        processed: true,
         sender: "operator",
+        task_id: relayTask?.id || null,
       },
       method: "POST",
+      preferRepresentation: true,
     });
-    sendNoContent(res);
+
+    sendJson(res, 200, {
+      messageId: rows?.[0]?.id || null,
+      relayTaskId: relayTask?.id || null,
+    });
     return;
   }
 

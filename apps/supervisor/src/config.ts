@@ -15,10 +15,16 @@ export const config = {
     10
   ),
   workspacesDir: process.env.WORKSPACES_DIR || "/app/workspaces",
+  publicLiveDir: process.env.PUBLIC_LIVE_DIR || "/app/public-live",
+  publicSiteUrl: process.env.PUBLIC_SITE_URL || "",
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || "5000", 10),
   scheduleCheckIntervalMs: parseInt(process.env.SCHEDULE_CHECK_MS || "30000", 10),
   taskAttentionCheckIntervalMs: parseInt(
     process.env.TASK_ATTENTION_CHECK_MS || "30000",
+    10
+  ),
+  completionNotificationLookbackMs: parseInt(
+    process.env.COMPLETION_NOTIFICATION_LOOKBACK_MS || "900000",
     10
   ),
   readyTaskAlertMs: parseInt(process.env.READY_TASK_ALERT_MS || "300000", 10),

@@ -7,6 +7,7 @@ import { getActiveCount } from "./process-manager.js";
 import { startAsyncWorkers, stopAsyncWorkers } from "./async-workers.js";
 import { getRuntimeProviderStatus } from "./runtime-provider.js";
 import { monitorTaskAttention } from "./task-attention.js";
+import { monitorTaskOutcomes } from "./task-outcomes.js";
 import {
   cancelOpenAiDeviceAuth,
   getOpenAiDeviceAuthState,
@@ -55,8 +56,9 @@ async function main() {
     if (!running) return;
     try {
       await monitorTaskAttention();
+      await monitorTaskOutcomes();
     } catch (err) {
-      console.error("Task attention monitor error:", err);
+      console.error("Task attention/outcome monitor error:", err);
     }
   }, config.taskAttentionCheckIntervalMs);
 
@@ -65,8 +67,9 @@ async function main() {
 
   try {
     await monitorTaskAttention();
+    await monitorTaskOutcomes();
   } catch (err) {
-    console.error("Initial task attention monitor error:", err);
+    console.error("Initial task attention/outcome monitor error:", err);
   }
 
   // Health endpoint for Docker healthchecks
