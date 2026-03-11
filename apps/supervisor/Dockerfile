@@ -28,13 +28,11 @@ COPY apps/supervisor/ apps/supervisor/
 
 RUN npm run build -w packages/shared && npm run build -w apps/mcp && npm run build -w apps/supervisor
 
-COPY scripts/entrypoint.sh /scripts/entrypoint.sh
+COPY --chmod=755 scripts/entrypoint.sh /scripts/entrypoint.sh
 
 # Copy runtime bootstrap and durable agent instructions
 COPY AGENTS.md /app/AGENTS.md
 COPY AGENTS_INSCTRUCTIONS.md /app/AGENTS_INSCTRUCTIONS.md
-
-RUN chmod 755 /scripts/entrypoint.sh
 
 ENV AGENT_HOME_DIR=/home/node
 ENV AGENT_RUN_AS_UID=1000

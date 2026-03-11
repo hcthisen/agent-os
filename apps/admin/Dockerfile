@@ -17,9 +17,7 @@ FROM node:20-bookworm-slim
 
 COPY --from=build /app/apps/admin/dist /app/dist
 COPY apps/admin/server.mjs /app/server.mjs
-COPY scripts/entrypoint.sh /scripts/entrypoint.sh
-
-RUN chmod 755 /scripts/entrypoint.sh
+COPY --chmod=755 scripts/entrypoint.sh /scripts/entrypoint.sh
 
 EXPOSE 80
 
