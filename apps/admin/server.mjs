@@ -12,6 +12,10 @@ const POSTGREST_URL = (process.env.POSTGREST_URL || "http://rest:3000").replace(
 );
 const SUPERVISOR_HEALTH_URL =
   process.env.SUPERVISOR_HEALTH_URL || "http://supervisor:3001/health";
+const SUPERVISOR_API_URL = (process.env.SUPERVISOR_API_URL || "http://supervisor:3001").replace(
+  /\/+$/,
+  ""
+);
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "";
@@ -314,6 +318,29 @@ async function getSupervisorRuntimeProvider() {
   }
 }
 
+async function callSupervisor(path, options = {}) {
+  const { body, method = "GET" } = options;
+  const response = await fetch(`${SUPERVISOR_API_URL}${path}`, {
+    method,
+    headers:
+      body === undefined
+        ? undefined
+        : { "Content-Type": "application/json; charset=utf-8" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || payload?.message || response.statusText || "Supervisor request failed"
+    );
+  }
+
+  return payload;
+}
+
 async function handleApi(req, res, url) {
   const { pathname, searchParams } = url;
 
@@ -583,6 +610,34 @@ async function handleApi(req, res, url) {
     const nextValue = normalizeRuntimeProviderValue(body || {});
     await saveRuntimeProviderSetting(nextValue);
     sendJson(res, 200, nextValue);
+    return;
+  }
+
+  if (pathname === "/api/runtime/provider/openai/device-auth" && req.method === "GET") {
+    const payload = await callSupervisor("/provider-auth/openai/device-auth");
+    sendJson(res, 200, payload || {});
+    return;
+  }
+
+  if (
+    pathname === "/api/runtime/provider/openai/device-auth/start" &&
+    req.method === "POST"
+  ) {
+    const payload = await callSupervisor("/provider-auth/openai/device-auth/start", {
+      method: "POST",
+    });
+    sendJson(res, 200, payload || {});
+    return;
+  }
+
+  if (
+    pathname === "/api/runtime/provider/openai/device-auth/cancel" &&
+    req.method === "POST"
+  ) {
+    const payload = await callSupervisor("/provider-auth/openai/device-auth/cancel", {
+      method: "POST",
+    });
+    sendJson(res, 200, payload || {});
     return;
   }
 

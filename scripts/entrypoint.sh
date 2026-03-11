@@ -25,12 +25,10 @@ if [ -n "$ENV_OVERRIDE_KEYS" ]; then
   OVERRIDE_FILE="$(mktemp)"
 
   for key in $ENV_OVERRIDE_KEYS; do
-    if eval "[ \"\${$key+x}\" = x ]"; then
+    if eval "[ -n \"\${$key:-}\" ]"; then
       eval "value=\${$key}"
       escaped=$(printf "%s" "$value" | sed "s/'/'\\\\''/g")
       printf "%s='%s'\nexport %s\n" "$key" "$escaped" "$key" >>"$OVERRIDE_FILE"
-    else
-      printf "unset %s\n" "$key" >>"$OVERRIDE_FILE"
     fi
   done
 fi

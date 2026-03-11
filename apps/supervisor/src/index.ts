@@ -6,6 +6,11 @@ import { checkSchedules } from "./scheduler.js";
 import { getActiveCount } from "./process-manager.js";
 import { startAsyncWorkers, stopAsyncWorkers } from "./async-workers.js";
 import { getRuntimeProviderStatus } from "./runtime-provider.js";
+import {
+  cancelOpenAiDeviceAuth,
+  getOpenAiDeviceAuthState,
+  startOpenAiDeviceAuth,
+} from "./provider-auth.js";
 import http from "node:http";
 
 let running = true;
@@ -61,6 +66,27 @@ async function main() {
           runtime_provider: runtimeProvider,
         })
       );
+    } else if (
+      req.url === "/provider-auth/openai/device-auth" &&
+      req.method === "GET"
+    ) {
+      const state = await getOpenAiDeviceAuthState();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state));
+    } else if (
+      req.url === "/provider-auth/openai/device-auth/start" &&
+      req.method === "POST"
+    ) {
+      const state = await startOpenAiDeviceAuth();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state));
+    } else if (
+      req.url === "/provider-auth/openai/device-auth/cancel" &&
+      req.method === "POST"
+    ) {
+      const state = await cancelOpenAiDeviceAuth();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state));
     } else {
       res.writeHead(404);
       res.end();

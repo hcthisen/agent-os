@@ -64,6 +64,8 @@ export const api = {
     apiGet<any[]>("/messages?channel=admin_chat&limit=100"),
   getRoles: (): Promise<any[]> => apiGet<any[]>("/roles"),
   getRuntimeProvider: (): Promise<any> => apiGet<any>("/runtime/provider"),
+  getOpenAiDeviceAuth: (): Promise<any> =>
+    apiGet<any>("/runtime/provider/openai/device-auth"),
   getSchedules: (): Promise<any[]> => apiGet<any[]>("/schedules"),
   getServices: (): Promise<any[]> => apiGet<any[]>("/services"),
   getSession: (): Promise<any> => apiGet<any>("/auth/session"),
@@ -76,6 +78,10 @@ export const api = {
       decision: "rejected",
     }),
   retryTask: (taskId: string) => apiPost<void>(`/tasks/${taskId}/retry`),
+  startOpenAiDeviceAuth: (): Promise<any> =>
+    apiPost<any>("/runtime/provider/openai/device-auth/start"),
+  cancelOpenAiDeviceAuth: (): Promise<any> =>
+    apiPost<any>("/runtime/provider/openai/device-auth/cancel"),
   saveRuntimeProvider: (
     activeProvider: string,
     openaiModelMap: Record<string, string>,

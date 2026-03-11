@@ -23,6 +23,19 @@ interface RuntimeProviderResponse {
   updatedAt: string | null;
 }
 
+interface OpenAiDeviceAuthResponse {
+  authDetected: boolean;
+  completedAt: string | null;
+  createdAt: string | null;
+  error: string | null;
+  expiresAt: string | null;
+  sessionId: string | null;
+  status: "idle" | "starting" | "waiting" | "complete" | "failed" | "canceled";
+  updatedAt: string | null;
+  userCode: string | null;
+  verificationUrl: string | null;
+}
+
 interface ServiceEntry {
   id: string;
   service_name: string;
@@ -81,10 +94,28 @@ const ROLE_NOTES: Record<string, string> = {
   sage: "Deep planning role. xHigh is reserved here.",
   sentinel: "Suggested default: gpt-5.3-codex / medium to keep recurring watchdog cost down.",
 };
+const OPENAI_AUTH_STATUS_LABELS: Record<OpenAiDeviceAuthResponse["status"], string> = {
+  canceled: "Canceled",
+  complete: "Connected",
+  failed: "Failed",
+  idle: "Idle",
+  starting: "Starting",
+  waiting: "Waiting for approval",
+};
+const OPENAI_AUTH_STATUS_COLORS: Record<OpenAiDeviceAuthResponse["status"], string> = {
+  canceled: "#8b8b96",
+  complete: "#22c55e",
+  failed: "#ef4444",
+  idle: "#8b8b96",
+  starting: "#93c5fd",
+  waiting: "#f59e0b",
+};
 
 export function SettingsPage() {
   const [runtimeProvider, setRuntimeProvider] =
     useState<RuntimeProviderResponse | null>(null);
+  const [openAiDeviceAuth, setOpenAiDeviceAuth] =
+    useState<OpenAiDeviceAuthResponse | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
   const [services, setServices] = useState<ServiceEntry[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -96,17 +127,29 @@ export function SettingsPage() {
   const [savingProvider, setSavingProvider] = useState<"anthropic" | "openai" | null>(
     null
   );
+  const [deviceAuthBusy, setDeviceAuthBusy] = useState<"cancel" | "start" | null>(
+    null
+  );
+  const [deviceAuthError, setDeviceAuthError] = useState<string | null>(null);
 
   async function loadSettings() {
-    const [runtimeProviderData, rolesData, servicesData, schedulesData] =
+    const [
+      runtimeProviderData,
+      openAiDeviceAuthData,
+      rolesData,
+      servicesData,
+      schedulesData,
+    ] =
       await Promise.all([
         api.getRuntimeProvider(),
+        api.getOpenAiDeviceAuth(),
         api.getRoles(),
         api.getServices(),
         api.getSchedules(),
       ]);
 
     setRuntimeProvider(runtimeProviderData || null);
+    setOpenAiDeviceAuth(openAiDeviceAuthData || null);
     setOpenaiModelMap(runtimeProviderData?.openaiModelMap || {});
     setOpenaiRoleConfig(runtimeProviderData?.openaiRoleConfig || {});
     setRoles(rolesData || []);
@@ -118,6 +161,35 @@ export function SettingsPage() {
     void loadSettings();
   }, []);
 
+  useEffect(() => {
+    if (
+      !openAiDeviceAuth ||
+      (openAiDeviceAuth.status !== "starting" &&
+        openAiDeviceAuth.status !== "waiting")
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const nextState = await api.getOpenAiDeviceAuth();
+          setOpenAiDeviceAuth(nextState || null);
+
+          if (nextState?.authDetected || nextState?.status === "complete") {
+            await loadSettings();
+          }
+        } catch (error) {
+          setDeviceAuthError(
+            error instanceof Error ? error.message : "Failed to refresh ChatGPT login status."
+          );
+        }
+      })();
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [openAiDeviceAuth?.status]);
+
   async function saveProvider(provider: "anthropic" | "openai") {
     setSavingProvider(provider);
     try {
@@ -125,6 +197,51 @@ export function SettingsPage() {
       await loadSettings();
     } finally {
       setSavingProvider(null);
+    }
+  }
+
+  async function startOpenAiDeviceAuth() {
+    const authWindow = window.open("", "_blank");
+    setDeviceAuthBusy("start");
+    setDeviceAuthError(null);
+
+    try {
+      const nextState = await api.startOpenAiDeviceAuth();
+      setOpenAiDeviceAuth(nextState || null);
+
+      if (nextState?.verificationUrl) {
+        authWindow?.location.replace(nextState.verificationUrl);
+      } else {
+        authWindow?.close();
+      }
+
+      if (nextState?.authDetected) {
+        await loadSettings();
+      }
+    } catch (error) {
+      authWindow?.close();
+      setDeviceAuthError(
+        error instanceof Error ? error.message : "Failed to start ChatGPT sign-in."
+      );
+    } finally {
+      setDeviceAuthBusy(null);
+    }
+  }
+
+  async function cancelOpenAiDeviceAuth() {
+    setDeviceAuthBusy("cancel");
+    setDeviceAuthError(null);
+
+    try {
+      const nextState = await api.cancelOpenAiDeviceAuth();
+      setOpenAiDeviceAuth(nextState || null);
+      await loadSettings();
+    } catch (error) {
+      setDeviceAuthError(
+        error instanceof Error ? error.message : "Failed to cancel ChatGPT sign-in."
+      );
+    } finally {
+      setDeviceAuthBusy(null);
     }
   }
 
@@ -169,6 +286,13 @@ export function SettingsPage() {
     ),
     ...roles.filter((role) => !ROLE_ORDER.includes(role.id)),
   ];
+  const openAiAuthStatus =
+    openAiDeviceAuth?.status ||
+    (runtimeProvider?.providerStatus?.openai?.authDetected ? "complete" : "idle");
+  const openAiAuthDetected =
+    openAiDeviceAuth?.authDetected ||
+    runtimeProvider?.providerStatus?.openai?.authDetected ||
+    false;
 
   return (
     <div>
@@ -274,6 +398,149 @@ export function SettingsPage() {
                   </span>
                 )}
               </div>
+              {providerKey === "openai" && (
+                <div
+                  style={{
+                    background: "#0d0d15",
+                    border: "1px solid #232334",
+                    borderRadius: 8,
+                    marginBottom: 12,
+                    padding: 12,
+                  }}
+                >
+                  <div
+                    style={{
+                      alignItems: "center",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      marginBottom: 8,
+                    }}
+                  >
+                    <span style={{ color: "#d9d9e5", fontSize: 12, fontWeight: 600 }}>
+                      Remote Sign-In
+                    </span>
+                    <span
+                      style={{
+                        color: OPENAI_AUTH_STATUS_COLORS[openAiAuthStatus],
+                        fontSize: 11,
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      {OPENAI_AUTH_STATUS_LABELS[openAiAuthStatus]}
+                    </span>
+                  </div>
+                  <p style={{ color: "#8b8b96", fontSize: 12, marginBottom: 10 }}>
+                    Starts Codex device authorization on the supervisor, opens the
+                    official OpenAI sign-in page, and waits for the persisted login
+                    to land in the shared provider volume.
+                  </p>
+                  {openAiDeviceAuth?.userCode && !openAiDeviceAuth.authDetected && (
+                    <div
+                      style={{
+                        background: "#121826",
+                        border: "1px solid #23314d",
+                        borderRadius: 8,
+                        marginBottom: 10,
+                        padding: 10,
+                      }}
+                    >
+                      <div style={{ color: "#8b8b96", fontSize: 11, marginBottom: 4 }}>
+                        One-time code
+                      </div>
+                      <div
+                        style={{
+                          color: "#f8fafc",
+                          fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                          fontSize: 18,
+                          fontWeight: 700,
+                          letterSpacing: "0.08em",
+                        }}
+                      >
+                        {openAiDeviceAuth.userCode}
+                      </div>
+                      {openAiDeviceAuth.expiresAt && (
+                        <div style={{ color: "#8b8b96", fontSize: 11, marginTop: 6 }}>
+                          Expires:{" "}
+                          {new Date(openAiDeviceAuth.expiresAt).toLocaleTimeString()}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {openAiDeviceAuth?.verificationUrl && !openAiDeviceAuth.authDetected && (
+                    <a
+                      href={openAiDeviceAuth.verificationUrl}
+                      rel="noreferrer"
+                      style={{
+                        color: "#93c5fd",
+                        display: "inline-block",
+                        fontSize: 12,
+                        marginBottom: 10,
+                        textDecoration: "none",
+                      }}
+                      target="_blank"
+                    >
+                      Open OpenAI sign-in page
+                    </a>
+                  )}
+                  {deviceAuthError && (
+                    <p style={{ color: "#ef4444", fontSize: 11, marginBottom: 8 }}>
+                      {deviceAuthError}
+                    </p>
+                  )}
+                  {openAiDeviceAuth?.error && openAiAuthStatus === "failed" && (
+                    <p style={{ color: "#ef4444", fontSize: 11, marginBottom: 8 }}>
+                      {openAiDeviceAuth.error}
+                    </p>
+                  )}
+                  {openAiAuthDetected && (
+                    <p style={{ color: "#22c55e", fontSize: 11, marginBottom: 8 }}>
+                      ChatGPT subscription login is present in the supervisor volume.
+                    </p>
+                  )}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      disabled={
+                        !providerStatus?.cliInstalled ||
+                        deviceAuthBusy !== null ||
+                        openAiAuthDetected
+                      }
+                      onClick={() => void startOpenAiDeviceAuth()}
+                      style={{
+                        ...btnStyle,
+                        background: "#2563eb",
+                        flex: 1,
+                        opacity:
+                          !providerStatus?.cliInstalled ||
+                          deviceAuthBusy !== null ||
+                          openAiAuthDetected
+                            ? 0.6
+                            : 1,
+                      }}
+                    >
+                      {deviceAuthBusy === "start"
+                        ? "Starting..."
+                        : openAiAuthDetected
+                          ? "ChatGPT Connected"
+                          : "Connect ChatGPT subscription"}
+                    </button>
+                    {(openAiAuthStatus === "starting" || openAiAuthStatus === "waiting") && (
+                      <button
+                        disabled={deviceAuthBusy !== null}
+                        onClick={() => void cancelOpenAiDeviceAuth()}
+                        style={{
+                          ...btnStyle,
+                          background: "#1f2937",
+                          color: "#d1d5db",
+                          opacity: deviceAuthBusy !== null ? 0.6 : 1,
+                        }}
+                      >
+                        {deviceAuthBusy === "cancel" ? "Canceling..." : "Cancel"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               <button
                 disabled={savingProvider !== null && savingProvider !== providerKey}
                 onClick={() => void saveProvider(providerKey)}
