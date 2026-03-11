@@ -553,7 +553,7 @@ immediately.
 
 **Memory staleness:** Checks for memories past verification date or expiry.
 
-How it runs: Triggered by a cron schedule (default: every 5 minutes) and by event-driven
+How it runs: Triggered by a cron schedule (default: every 30 minutes) and by event-driven
 triggers (e.g., Supabase trigger when queue depth exceeds threshold).
 
 Escalation chain:
@@ -564,7 +564,7 @@ Escalation chain:
 
 Why Sonnet: Monitoring is pattern recognition and threshold analysis — important reasoning
 but not frontier-level inference. Sonnet with high effort handles this well and costs less
-per invocation than Opus. The sentinel runs frequently (every 5 minutes), so per-run cost
+per invocation than Opus. The sentinel runs periodically (every 30 minutes), so per-run cost
 matters more here than for the sage (which runs rarely).
 
 ## The Self-Evolution Mechanism

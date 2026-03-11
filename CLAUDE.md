@@ -29,7 +29,7 @@ Monorepo with seven Coolify services:
 | builder | Opus | High | Executes tasks: code, content, integrations, agent configs. |
 | reviewer | Opus | High | Quality gate. Approves, requests revision, or escalates. |
 | architect | Opus | High | System evolution. Only agent that can approve system modifications. |
-| sentinel | Sonnet | High | Monitors queue health, cost, auth, services. Runs every 5 min. |
+| sentinel | Sonnet | High | Monitors queue health, cost, auth, services. Runs every 30 min. |
 
 New agents are created as data (rows in `roles`/`agents` tables + `AGENTS_INSCTRUCTIONS.md`
 sections + RLS policies), not new code. Same `claude` binary, different context.

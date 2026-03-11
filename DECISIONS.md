@@ -100,12 +100,12 @@ high), stored in the `roles` table and overridable per-agent via the admin panel
 | Architect | Opus   | High   | Makes system-level decisions. Mistakes cascade    |
 |           |        |        | across all future sessions.                      |
 | Sentinel  | Sonnet | High   | Monitoring is pattern recognition — important but |
-|           |        |        | not frontier-level. Runs frequently (every 5 min)|
+|           |        |        | not frontier-level. Runs periodically (every 30 min)|
 |           |        |        | so per-run cost matters more here.               |
 
 **Why not Opus everywhere:** The relay processes every single human message. On a busy
 day, that could be dozens of runs. Haiku handles classification well and responds much
-faster. The sentinel runs every 5 minutes — 288 times/day. Sonnet is sufficient for
+faster. The sentinel runs every 30 minutes — 48 times/day. Sonnet is sufficient for
 threshold analysis. Saving frontier-model capacity for the agents that need it.
 
 ---
@@ -386,13 +386,13 @@ agent evolution.
 
 ## D-020: Sentinel Runs on Schedule, Not Continuously
 
-**Decision:** The sentinel is triggered by a cron schedule (every 5 minutes) and by
+**Decision:** The sentinel is triggered by a cron schedule (every 30 minutes) and by
 event-driven Supabase triggers (e.g., queue depth threshold), not as a continuously
 running process.
 
 **Why:** A continuous sentinel process would occupy a Claude Code slot permanently. The
 sentinel's job — check queue depth, check cost trends, verify auth, check service health
-— takes seconds per invocation. Running it every 5 minutes provides adequate monitoring
+— takes seconds per invocation. Running it every 30 minutes provides adequate monitoring
 without consuming resources continuously.
 
 **Event-driven triggers supplement the schedule:** If the task count in `ready` state

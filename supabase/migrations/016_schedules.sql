@@ -10,9 +10,9 @@ CREATE TABLE schedules (
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
--- Seed sentinel health check schedule (every 5 minutes)
+-- Seed sentinel health check schedule (every 30 minutes)
 INSERT INTO schedules (name, cron_expr, assigned_role, task_template) VALUES
-  ('sentinel-health-check', '*/5 * * * *', 'sentinel', '{
+  ('sentinel-health-check', '*/30 * * * *', 'sentinel', '{
     "title": "Sentinel health check",
     "objective": "Run system health checks: queue depth, cost trends, auth status, service health, approval expiry, memory staleness.",
     "acceptance_criteria": ["Health report event logged"],

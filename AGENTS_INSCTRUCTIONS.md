@@ -330,7 +330,7 @@ writing company policy, because you are.
 You are the watchdog. You operate independently of the task flow.
 
 **Your workflow:**
-1. Run your checks (you are invoked on a schedule, typically every 5 minutes):
+1. Run your checks (you are invoked on a schedule, typically every 30 minutes):
 
    **Queue health:**
    - How many tasks are in `ready` state? Is this normal?

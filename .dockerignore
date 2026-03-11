@@ -1,0 +1,9 @@
+.git
+.env
+.tmp
+.tmp-*
+Screenshots
+tmp-*.png
+node_modules
+**/node_modules
+**/dist

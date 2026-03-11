@@ -1,32 +1,33 @@
-FROM node:20-bookworm-slim
-
-# Install dependencies for headless Chromium
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    fonts-liberation \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libgtk-3-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV CHROMIUM_PATH=/usr/bin/chromium
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
-COPY apps/browser/package.json apps/browser/
-RUN cd apps/browser && npm install
+COPY apps/browser/package.json apps/browser/package-lock.json apps/browser/tsconfig.json apps/browser/
+RUN cd apps/browser && npm ci
 
-COPY apps/browser/ apps/browser/
+COPY apps/browser/src/ apps/browser/src/
 
 RUN cd apps/browser && npm run build
+
+FROM node:20-alpine
+
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV CHROMIUM_PATH=/usr/bin/chromium-browser
+
+WORKDIR /app
+
+COPY apps/browser/package.json apps/browser/package-lock.json apps/browser/
+RUN cd apps/browser && npm ci --omit=dev && npm cache clean --force
+
+COPY --from=build /app/apps/browser/dist/ apps/browser/dist/
 
 EXPOSE 3002
 

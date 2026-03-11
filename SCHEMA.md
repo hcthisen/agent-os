@@ -369,8 +369,8 @@ Cron-style recurring work.
 | next_run_at   | timestamptz |                                                |
 | created_at    | timestamptz |                                                |
 
-**Seed data:** One schedule for the sentinel: `sentinel-health-check`, cron `*/5 * * * *`
-(every 5 minutes), assigned to `sentinel` role.
+**Seed data:** One schedule for the sentinel: `sentinel-health-check`, cron `*/30 * * * *`
+(every 30 minutes), assigned to `sentinel` role.
 
 ### service_registry
 
