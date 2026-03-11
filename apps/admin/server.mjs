@@ -10,6 +10,11 @@ const POSTGREST_URL = (process.env.POSTGREST_URL || "http://rest:3000").replace(
   /\/+$/,
   ""
 );
+const ADMIN_PUBLIC_URL = (
+  process.env.ADMIN_PUBLIC_URL ||
+  process.env.SERVICE_URL_ADMIN ||
+  ""
+).replace(/\/+$/, "");
 const SUPERVISOR_HEALTH_URL =
   process.env.SUPERVISOR_HEALTH_URL || "http://supervisor:3001/health";
 const SUPERVISOR_API_URL = (process.env.SUPERVISOR_API_URL || "http://supervisor:3001").replace(
@@ -19,9 +24,21 @@ const SUPERVISOR_API_URL = (process.env.SUPERVISOR_API_URL || "http://supervisor
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const SESSION_SECRET = process.env.JWT_SECRET || "agent-os-admin";
 const SESSION_COOKIE = "agent_os_admin_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const TELEGRAM_WEBHOOK_URL = (
+  process.env.TELEGRAM_WEBHOOK_URL ||
+  (ADMIN_PUBLIC_URL ? `${ADMIN_PUBLIC_URL}/api/integrations/telegram/webhook` : "")
+).replace(/\/+$/, "");
+const TELEGRAM_WEBHOOK_SECRET =
+  process.env.TELEGRAM_WEBHOOK_SECRET ||
+  (TELEGRAM_BOT_TOKEN
+    ? createHmac("sha256", "agent-os-telegram-webhook")
+        .update(TELEGRAM_BOT_TOKEN)
+        .digest("hex")
+    : "");
 const DEFAULT_OPENAI_MODEL_MAP = {
   haiku: "gpt-5.4",
   opus: "gpt-5.4",
@@ -365,8 +382,170 @@ async function callSupervisor(path, options = {}) {
   return payload;
 }
 
+async function callTelegramApi(method, body) {
+  if (!TELEGRAM_BOT_TOKEN) {
+    throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+  }
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }
+  );
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(
+      payload?.description || response.statusText || "Telegram request failed"
+    );
+  }
+
+  return payload?.result ?? payload;
+}
+
+async function ensureTelegramWebhookRegistered() {
+  if (!TELEGRAM_BOT_TOKEN) {
+    console.log("[admin] Telegram integration disabled: TELEGRAM_BOT_TOKEN missing.");
+    return;
+  }
+
+  if (!TELEGRAM_WEBHOOK_URL) {
+    console.warn(
+      "[admin] Telegram integration not registered: ADMIN_PUBLIC_URL / TELEGRAM_WEBHOOK_URL missing."
+    );
+    return;
+  }
+
+  try {
+    const webhookInfo = await callTelegramApi("getWebhookInfo");
+    if (webhookInfo?.url === TELEGRAM_WEBHOOK_URL) {
+      console.log(`[admin] Telegram webhook already set to ${TELEGRAM_WEBHOOK_URL}`);
+      return;
+    }
+
+    await callTelegramApi("setWebhook", {
+      allowed_updates: ["message"],
+      secret_token: TELEGRAM_WEBHOOK_SECRET,
+      url: TELEGRAM_WEBHOOK_URL,
+    });
+    console.log(`[admin] Telegram webhook registered at ${TELEGRAM_WEBHOOK_URL}`);
+  } catch (error) {
+    console.error("[admin] Failed to register Telegram webhook:", error);
+  }
+}
+
+async function handleTelegramWebhook(req, res) {
+  if (!TELEGRAM_BOT_TOKEN) {
+    sendJson(res, 503, { error: "Telegram integration is not configured" });
+    return;
+  }
+
+  const providedSecret =
+    req.headers["x-telegram-bot-api-secret-token"] || "";
+  const expectedSecret = TELEGRAM_WEBHOOK_SECRET;
+
+  if (expectedSecret && providedSecret !== expectedSecret) {
+    sendJson(res, 401, { error: "Invalid Telegram webhook secret" });
+    return;
+  }
+
+  const update = await readJson(req);
+  const message = update?.message;
+
+  if (!message?.text) {
+    sendJson(res, 200, { ok: true, ignored: true });
+    return;
+  }
+
+  const chatId = message.chat?.id;
+  const fromUser =
+    message.from?.first_name || message.from?.username || "unknown";
+  const sender = `telegram:${fromUser}`;
+  const content = String(message.text || "").trim();
+
+  if (!content) {
+    sendJson(res, 200, { ok: true, ignored: true });
+    return;
+  }
+
+  let relayTask = null;
+  let routing = "direct_relay_task";
+  let routingError = null;
+
+  try {
+    relayTask = await createRelayTaskForInboundMessage({
+      channel: "telegram",
+      content,
+      sender,
+    });
+  } catch (error) {
+    routing = "fallback_poll";
+    routingError = error instanceof Error ? error.message : String(error);
+  }
+
+  const telegramRows = await postgrest("/messages", {
+    body: {
+      channel: "telegram",
+      content,
+      direction: "inbound",
+      metadata: {
+        chat_id: chatId,
+        from: message.from || null,
+        message_id: message.message_id || null,
+        relay_task_id: relayTask?.id || null,
+        routing,
+        routing_error: routingError,
+        telegram_update_id: update?.update_id || null,
+      },
+      processed: routing !== "fallback_poll",
+      sender,
+      task_id: relayTask?.id || null,
+    },
+    method: "POST",
+    preferRepresentation: true,
+  });
+
+  const sourceMessageId = telegramRows?.[0]?.id || null;
+
+  await postgrest("/messages", {
+    body: {
+      channel: "admin_chat",
+      content,
+      direction: "inbound",
+      metadata: {
+        chat_id: chatId,
+        mirrored_from: "telegram",
+        relay_task_id: relayTask?.id || null,
+        routing,
+        routing_error: routingError,
+        source_channel: "telegram",
+        source_message_id: sourceMessageId,
+        telegram_message_id: message.message_id || null,
+      },
+      processed: true,
+      sender,
+      task_id: relayTask?.id || null,
+    },
+    method: "POST",
+  });
+
+  sendJson(res, 200, {
+    ok: true,
+    relayTaskId: relayTask?.id || null,
+    routed: routing === "direct_relay_task",
+  });
+}
+
 async function handleApi(req, res, url) {
   const { pathname, searchParams } = url;
+
+  if (pathname === "/api/integrations/telegram/webhook" && req.method === "POST") {
+    await handleTelegramWebhook(req, res);
+    return;
+  }
 
   if (pathname === "/api/auth/session" && req.method === "GET") {
     const session = getSession(req);
@@ -814,4 +993,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[admin] Server listening on port ${PORT}`);
+  void ensureTelegramWebhookRegistered();
 });

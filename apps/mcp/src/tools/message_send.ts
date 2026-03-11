@@ -53,6 +53,35 @@ async function sendTelegramMessage(
   }
 }
 
+async function resolveLatestTelegramChatId(
+  explicitChatId?: number | string | null
+): Promise<number | string | null> {
+  if (typeof explicitChatId === "number" || typeof explicitChatId === "string") {
+    return explicitChatId;
+  }
+
+  const db = getDb();
+  const { data, error } = await db
+    .from("messages")
+    .select("metadata")
+    .eq("channel", "telegram")
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  if (error) {
+    throw new Error(`Failed to resolve Telegram chat ID: ${error.message}`);
+  }
+
+  for (const row of data || []) {
+    const chatId = (row as { metadata?: Record<string, unknown> | null }).metadata?.chat_id;
+    if (typeof chatId === "number" || typeof chatId === "string") {
+      return chatId;
+    }
+  }
+
+  return null;
+}
+
 export async function messageSend(args: {
   channel: "admin_chat" | "telegram";
   content: string;
@@ -77,16 +106,51 @@ export async function messageSend(args: {
 
   const metadata = args.metadata || {};
   let delivery = "stored";
+  let telegramChatId: number | string | null = null;
+  let telegramError: string | null = null;
+  let mirrorMessage: Record<string, unknown> | null = null;
 
   if (args.channel === "telegram") {
-    const chatId = metadata.chat_id;
-    if (chatId === undefined || chatId === null) {
+    telegramChatId = await resolveLatestTelegramChatId(
+      metadata.chat_id as number | string | null | undefined
+    );
+    if (telegramChatId === undefined || telegramChatId === null) {
       throw new Error("Telegram outbound messages require metadata.chat_id");
     }
 
-    await sendTelegramMessage(chatId as number | string, args.content);
+    await sendTelegramMessage(telegramChatId, args.content);
     delivery = "telegram_sent";
+  } else {
+    telegramChatId = await resolveLatestTelegramChatId(
+      metadata.chat_id as number | string | null | undefined
+    );
+
+    if (telegramChatId !== null) {
+      try {
+        await sendTelegramMessage(telegramChatId, args.content);
+        delivery = "stored_and_telegram_sent";
+      } catch (error) {
+        telegramError = error instanceof Error ? error.message : String(error);
+        delivery = "stored_admin_only";
+      }
+    }
   }
+
+  const messageMetadata = {
+    ...metadata,
+    ...(telegramChatId !== null ? { chat_id: telegramChatId } : {}),
+    ...(args.channel === "admin_chat"
+      ? {
+          telegram_delivery:
+            delivery === "stored_and_telegram_sent"
+              ? "telegram_sent"
+              : telegramChatId === null
+                ? "no_chat"
+                : "failed",
+        }
+      : {}),
+    ...(telegramError ? { telegram_error: telegramError } : {}),
+  };
 
   const { data, error } = await db
     .from("messages")
@@ -94,7 +158,7 @@ export async function messageSend(args: {
       channel: args.channel,
       content: args.content,
       direction: "outbound",
-      metadata,
+      metadata: messageMetadata,
       processed: true,
       sender: agent?.name || ctx.role_id,
       task_id: taskId,
@@ -106,5 +170,36 @@ export async function messageSend(args: {
     return { success: false, error: error.message };
   }
 
-  return { success: true, delivery, message: data };
+  if (args.channel === "telegram") {
+    const { data: adminMirror, error: adminMirrorError } = await db
+      .from("messages")
+      .insert({
+        channel: "admin_chat",
+        content: args.content,
+        direction: "outbound",
+        metadata: {
+          mirrored_from: "telegram",
+          telegram_chat_id: telegramChatId,
+          telegram_delivery: "telegram_sent",
+        },
+        processed: true,
+        sender: agent?.name || ctx.role_id,
+        task_id: taskId,
+      })
+      .select()
+      .single();
+
+    if (!adminMirrorError) {
+      mirrorMessage = adminMirror as Record<string, unknown>;
+    }
+  }
+
+  return {
+    success: true,
+    delivery,
+    message: data,
+    ...(telegramChatId !== null ? { telegram_chat_id: telegramChatId } : {}),
+    ...(telegramError ? { telegram_error: telegramError } : {}),
+    ...(mirrorMessage ? { admin_mirror_message: mirrorMessage } : {}),
+  };
 }

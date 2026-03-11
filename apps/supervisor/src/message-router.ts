@@ -1,4 +1,5 @@
 import { getDb } from "./db.js";
+import { sendOperatorMessage } from "./operator-delivery.js";
 
 /**
  * Check for unprocessed inbound messages and create relay tasks for them.
@@ -37,17 +38,14 @@ export async function routeMessages(): Promise<void> {
 
     if (taskErr) {
       console.error(`Failed to create relay task for message ${msg.id}:`, taskErr);
-      await db.from("messages").insert({
-        channel: "admin_chat",
+      await sendOperatorMessage({
         content: `System alert: failed to route inbound operator message "${msg.content.slice(0, 80)}". Reason: ${taskErr.message}`,
-        direction: "outbound",
         metadata: {
           delivery: "local",
           source_message_id: msg.id,
         },
-        processed: true,
         sender: "system",
-        task_id: null,
+        taskId: null,
       });
       continue;
     }

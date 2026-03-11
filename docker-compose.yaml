@@ -155,6 +155,7 @@ services:
       CONCURRENCY_LIMIT: 5
       PUBLIC_LIVE_DIR: /app/public-live
       PUBLIC_SITE_URL: ${SERVICE_URL_PUBLIC:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro
       - provider-home:/home/node
@@ -195,10 +196,12 @@ services:
     environment:
       ADMIN_PASS: ${ADMIN_PASS:-}
       ADMIN_USER: ${ADMIN_USER:-}
+      ADMIN_PUBLIC_URL: ${SERVICE_URL_ADMIN:-}
       ENV_OVERRIDE_KEYS: "ADMIN_USER ADMIN_PASS"
       PORT: 80
       POSTGREST_URL: http://rest:3000
       SUPERVISOR_HEALTH_URL: http://supervisor:3001/health
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro
     networks:

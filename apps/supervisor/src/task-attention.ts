@@ -1,5 +1,6 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
+import { sendOperatorMessage } from "./operator-delivery.js";
 
 type AttentionState =
   | "blocked_on_agent"
@@ -247,23 +248,18 @@ async function sendOperatorNotification(
   content: string
 ): Promise<void> {
   const db = getDb();
-
-  const { error: messageError } = await db.from("messages").insert({
-    channel: "admin_chat",
+  const delivery = await sendOperatorMessage({
     content,
-    direction: "outbound",
     metadata: {
       notification_key: notificationKey,
       task_state: task.state,
       task_title: task.title,
     },
-    processed: true,
     sender: "system",
-    task_id: task.id,
+    taskId: task.id,
   });
 
-  if (messageError) {
-    console.error(`Failed to notify operator for task ${task.id}:`, messageError);
+  if (!delivery.sent) {
     return;
   }
 

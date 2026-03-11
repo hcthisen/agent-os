@@ -1,5 +1,6 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
+import { sendOperatorMessage } from "./operator-delivery.js";
 
 interface CompletedTask {
   assigned_role: string;
@@ -167,22 +168,17 @@ async function sendOperatorCompletion(
   content: string
 ): Promise<void> {
   const db = getDb();
-
-  const { error: messageError } = await db.from("messages").insert({
-    channel: "admin_chat",
+  const delivery = await sendOperatorMessage({
     content,
-    direction: "outbound",
     metadata: {
       notification_key: notificationKey,
       notification_type: "task_completion",
     },
-    processed: true,
     sender: "system",
-    task_id: taskId,
+    taskId,
   });
 
-  if (messageError) {
-    console.error(`Failed to send completion notification for ${taskId}:`, messageError);
+  if (!delivery.sent) {
     return;
   }
 
