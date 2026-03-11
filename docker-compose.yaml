@@ -11,17 +11,20 @@ services:
 
   # --- Init: generates all secrets on first boot ---
   init:
-    image: node:20-alpine
+    build:
+      context: .
+      dockerfile: docker/init.Dockerfile
     command: ["node", "/scripts/init-secrets.mjs"]
     volumes:
       - config:/config
-      - ./scripts/init-secrets.mjs:/scripts/init-secrets.mjs:ro
     networks:
       - agent-net
 
   # --- Supabase Stack ---
   db:
-    image: supabase/postgres:15.6.1.143
+    build:
+      context: .
+      dockerfile: docker/db.Dockerfile
     depends_on:
       init:
         condition: service_completed_successfully
@@ -32,9 +35,6 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
       - config:/config:ro
-      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
-      - ./supabase/migrations:/migrations:ro
-      - ./scripts/zzz-run-migrations.sh:/docker-entrypoint-initdb.d/zzz-run-migrations.sh:ro
     networks:
       - agent-net
     healthcheck:
@@ -44,7 +44,9 @@ services:
       retries: 10
 
   auth:
-    image: supabase/gotrue:v2.158.1
+    build:
+      context: .
+      dockerfile: docker/gotrue.Dockerfile
     depends_on:
       db:
         condition: service_healthy
@@ -59,7 +61,6 @@ services:
       API_EXTERNAL_URL: http://admin
     volumes:
       - config:/config:ro
-      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
     networks:
       - agent-net
 
@@ -101,7 +102,9 @@ services:
       - agent-net
 
   storage:
-    image: supabase/storage-api:v1.11.13
+    build:
+      context: .
+      dockerfile: docker/storage.Dockerfile
     depends_on:
       db:
         condition: service_healthy
@@ -114,7 +117,6 @@ services:
     volumes:
       - storage-data:/var/lib/storage
       - config:/config:ro
-      - ./scripts/storage-entrypoint.sh:/scripts/storage-entrypoint.sh:ro
     networks:
       - agent-net
 
@@ -148,9 +150,6 @@ services:
       - config:/config:ro
       - provider-home:/home/node
       - workspaces:/app/workspaces
-      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
-      - ./AGENTS.md:/app/AGENTS.md:ro
-      - ./AGENTS_INSCTRUCTIONS.md:/app/AGENTS_INSCTRUCTIONS.md:ro
     networks:
       - agent-net
 
@@ -169,7 +168,6 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro
-      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
     networks:
       - agent-net
 
@@ -190,7 +188,6 @@ services:
       SUPERVISOR_HEALTH_URL: http://supervisor:3001/health
     volumes:
       - config:/config:ro
-      - ./scripts/entrypoint.sh:/scripts/entrypoint.sh:ro
     networks:
       - agent-net
 
