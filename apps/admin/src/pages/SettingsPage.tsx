@@ -119,6 +119,7 @@ export function SettingsPage() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [services, setServices] = useState<ServiceEntry[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [scheduleInputs, setScheduleInputs] = useState<Record<string, string>>({});
   const [keyInput, setKeyInput] = useState<Record<string, string>>({});
   const [openaiModelMap, setOpenaiModelMap] = useState<Record<string, string>>({});
   const [openaiRoleConfig, setOpenaiRoleConfig] = useState<
@@ -155,6 +156,14 @@ export function SettingsPage() {
     setRoles(rolesData || []);
     setServices(servicesData || []);
     setSchedules(schedulesData || []);
+    setScheduleInputs(
+      Object.fromEntries(
+        (schedulesData || []).map((schedule: Schedule) => [
+          schedule.id,
+          schedule.cron_expr || "",
+        ])
+      )
+    );
   }
 
   useEffect(() => {
@@ -256,6 +265,14 @@ export function SettingsPage() {
 
   async function toggleSchedule(id: string, enabled: boolean) {
     await api.setScheduleEnabled(id, enabled);
+    await loadSettings();
+  }
+
+  async function saveSchedule(id: string) {
+    const cron_expr = (scheduleInputs[id] || "").trim();
+    if (!cron_expr) return;
+
+    await api.saveSchedule(id, { cron_expr });
     await loadSettings();
   }
 
@@ -773,12 +790,23 @@ export function SettingsPage() {
             <div>
               <span style={{ fontWeight: 500 }}>{s.name}</span>
               <span style={{ marginLeft: 12, color: "#888", fontSize: 11 }}>
-                {s.cron_expr}
-              </span>
-              <span style={{ marginLeft: 12, color: "#888", fontSize: 11 }}>
                 {s.assigned_role}
               </span>
             </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                style={{ ...inputStyle, width: 140, padding: "4px 8px" }}
+                value={scheduleInputs[s.id] || ""}
+                onChange={(e) =>
+                  setScheduleInputs((prev) => ({
+                    ...prev,
+                    [s.id]: e.target.value,
+                  }))
+                }
+              />
+              <button onClick={() => void saveSchedule(s.id)} style={btnStyle}>
+                Save
+              </button>
             <button
               onClick={() => void toggleSchedule(s.id, !s.enabled)}
               style={{
@@ -793,6 +821,7 @@ export function SettingsPage() {
             >
               {s.enabled ? "Enabled" : "Disabled"}
             </button>
+            </div>
           </div>
         ))}
       </div>

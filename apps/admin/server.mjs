@@ -83,6 +83,23 @@ function sendNoContent(res, headers = {}) {
   res.end();
 }
 
+function calculateNextRun(cronExpr) {
+  const parts = String(cronExpr || "").trim().split(/\s+/);
+  if (parts.length !== 5) {
+    return new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  }
+
+  const [minPart] = parts;
+  if (minPart.startsWith("*/")) {
+    const interval = parseInt(minPart.slice(2), 10);
+    if (!Number.isNaN(interval) && interval > 0) {
+      return new Date(Date.now() + interval * 60 * 1000).toISOString();
+    }
+  }
+
+  return new Date(Date.now() + 60 * 60 * 1000).toISOString();
+}
+
 function setSessionCookie(res, username) {
   const payload = Buffer.from(
     JSON.stringify({
@@ -906,6 +923,30 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     await postgrest("/schedules", {
       body: { enabled: !!body.enabled },
+      method: "PATCH",
+      query: { id: `eq.${scheduleId}` },
+    });
+    sendNoContent(res);
+    return;
+  }
+
+  const scheduleUpdateMatch = pathname.match(/^\/api\/schedules\/([^/]+)$/);
+  if (scheduleUpdateMatch && req.method === "POST") {
+    const [, scheduleId] = scheduleUpdateMatch;
+    const body = await readJson(req);
+    const update = {};
+
+    if (typeof body.enabled === "boolean") {
+      update.enabled = body.enabled;
+    }
+
+    if (typeof body.cron_expr === "string" && body.cron_expr.trim()) {
+      update.cron_expr = body.cron_expr.trim();
+      update.next_run_at = calculateNextRun(body.cron_expr);
+    }
+
+    await postgrest("/schedules", {
+      body: update,
       method: "PATCH",
       query: { id: `eq.${scheduleId}` },
     });

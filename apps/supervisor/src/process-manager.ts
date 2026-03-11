@@ -99,7 +99,7 @@ export async function launchAgent(
   await writeFile(join(workDir, "TASK_BRIEFING.md"), briefing);
 
   // Build the prompt
-  const prompt = buildPrompt(agentName, roleId, contextPack);
+  const prompt = buildPrompt(agentName, roleId, contextPack, activeProvider);
   const responsePath =
     activeProvider === "openai" ? join(workDir, "codex-last-message.txt") : null;
   const providerHomeDir =
@@ -531,7 +531,8 @@ ${JSON.stringify(contextPack, null, 2)}
 function buildPrompt(
   agentName: string,
   roleId: string,
-  contextPack: Record<string, unknown>
+  contextPack: Record<string, unknown>,
+  activeProvider: RuntimeProvider
 ): string {
   const task = contextPack.task as Record<string, unknown>;
   const rolePolicy = (contextPack.role_policy as string) || "";
@@ -543,6 +544,9 @@ function buildPrompt(
 Title: ${task?.title || "Unknown"}
 Objective: ${task?.objective || "Unknown"}
 Task ID: ${task?.id || "Unknown"}
+
+## Runtime
+Active coding provider: ${activeProvider}
 
 ## Acceptance Criteria
 ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}

@@ -29,6 +29,10 @@ import {
   contextRefresh,
 } from "./tools/context_refresh.js";
 import { messageSendDef, messageSend } from "./tools/message_send.js";
+import {
+  scheduleUpdateDef,
+  scheduleUpdate,
+} from "./tools/schedule_update.js";
 
 const tools = [
   taskClaimDef,
@@ -43,6 +47,7 @@ const tools = [
   approvalRequestDef,
   contextRefreshDef,
   messageSendDef,
+  scheduleUpdateDef,
 ];
 
 const handlers: Record<string, (args: any) => Promise<unknown>> = {
@@ -58,6 +63,7 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   approval_request: approvalRequest,
   context_refresh: contextRefresh,
   message_send: messageSend,
+  schedule_update: scheduleUpdate,
 };
 
 async function extractPolicyAction(
@@ -93,6 +99,24 @@ async function extractPolicyAction(
       type: "artifact.create",
       taskId,
       desc: `Upload artifact: ${args.name || "unnamed artifact"}`,
+    };
+  }
+
+  if (name === "schedule_update") {
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    const target =
+      (typeof args?.name === "string" && args.name.trim()) ||
+      (typeof args?.schedule_id === "string" && args.schedule_id.trim()) ||
+      "unknown schedule";
+
+    return {
+      type: "system.modify",
+      taskId,
+      desc: `Update schedule: ${target}`,
     };
   }
 

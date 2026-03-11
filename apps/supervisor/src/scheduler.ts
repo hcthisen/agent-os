@@ -7,6 +7,8 @@ export async function checkSchedules(): Promise<void> {
   const db = getDb();
   const now = new Date();
 
+  await reconcileLegacySchedules();
+
   const { data: schedules, error } = await db
     .from("schedules")
     .select("*")
@@ -55,12 +57,45 @@ export async function checkSchedules(): Promise<void> {
   }
 }
 
+export async function reconcileLegacySchedules(): Promise<void> {
+  const db = getDb();
+  const legacyCron = "*/5 * * * *";
+  const targetCron = "*/30 * * * *";
+
+  const { data: schedule, error } = await db
+    .from("schedules")
+    .select("id,name,cron_expr")
+    .eq("name", "sentinel-health-check")
+    .maybeSingle<{ cron_expr: string; id: string; name: string }>();
+
+  if (error || !schedule || schedule.cron_expr !== legacyCron) {
+    return;
+  }
+
+  const { error: updateError } = await db
+    .from("schedules")
+    .update({
+      cron_expr: targetCron,
+      next_run_at: calculateNextRun(targetCron),
+    })
+    .eq("id", schedule.id);
+
+  if (updateError) {
+    console.error("Failed to reconcile legacy sentinel schedule:", updateError);
+    return;
+  }
+
+  console.log(
+    `Reconciled legacy schedule ${schedule.name} from ${legacyCron} to ${targetCron}`
+  );
+}
+
 /**
  * Simple cron next-run calculator.
  * Supports: minute, hour, day-of-month, month, day-of-week
  * For production, use a proper cron library.
  */
-function calculateNextRun(cronExpr: string): string {
+export function calculateNextRun(cronExpr: string): string {
   // Parse cron expression
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) {

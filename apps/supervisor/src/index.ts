@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import { recoverOrphanedTasks } from "./recovery.js";
 import { pollForTasks } from "./task-poller.js";
 import { routeMessages } from "./message-router.js";
-import { checkSchedules } from "./scheduler.js";
+import { checkSchedules, reconcileLegacySchedules } from "./scheduler.js";
 import { getActiveCount } from "./process-manager.js";
 import { startAsyncWorkers, stopAsyncWorkers } from "./async-workers.js";
 import { getRuntimeProviderStatus } from "./runtime-provider.js";
@@ -23,6 +23,7 @@ async function main() {
 
   // Recover orphaned tasks from previous run
   await recoverOrphanedTasks();
+  await reconcileLegacySchedules();
 
   // Start polling loops
   const taskPollLoop = setInterval(async () => {

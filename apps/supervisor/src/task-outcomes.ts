@@ -140,26 +140,90 @@ async function notificationAlreadySent(
 }
 
 function formatCompletionMessage(task: CompletedTask, rootTask: RootTask): string {
-  const handoff = summarizeHandoff(task.last_handoff_note);
-  const rootSuffix =
-    rootTask.id !== task.id
-      ? ` Root request: ${rootTask.title} (${rootTask.id.slice(0, 8)}).`
-      : "";
+  const outcome = summarizeOutcome(task.last_handoff_note);
+  const prefix =
+    task.assigned_role === "builder"
+      ? "Done."
+      : `${capitalize(task.assigned_role)} finished.`;
 
-  return `Task complete: ${task.assigned_role} task "${task.title}" (${task.id.slice(0, 8)}) finished successfully.${rootSuffix} Latest handoff: ${handoff}`;
+  if (outcome) {
+    return `${prefix} ${outcome}`;
+  }
+
+  const rootSuffix =
+    rootTask.id !== task.id ? ` Request: ${simplifyTitle(rootTask.title)}.` : "";
+  return `${prefix} ${simplifyTitle(task.title)} is complete.${rootSuffix}`;
 }
 
-function summarizeHandoff(note: string | null): string {
+function summarizeOutcome(note: string | null): string | null {
   if (!note) {
-    return "No handoff note recorded.";
+    return null;
   }
 
   const compact = note.replace(/\s+/g, " ").trim();
-  if (compact.length <= 600) {
-    return compact;
+  const changed = extractSection(compact, "What changed:");
+  const blocked = extractSection(compact, "What is blocked:");
+  const liveUrlMatch = compact.match(/https?:\/\/[^\s)]+/i);
+  const publishedLiveMatch = compact.match(
+    /public site .*?(rebuilt|published).*?live at (https?:\/\/[^\s)]+)/i
+  );
+
+  if (publishedLiveMatch) {
+    return `The public site is rebuilt and live at ${publishedLiveMatch[2]}.`;
   }
 
-  return `${compact.slice(0, 597)}...`;
+  if (changed) {
+    const cleaned = toSingleSentence(changed);
+    if (liveUrlMatch && !cleaned.includes(liveUrlMatch[0])) {
+      return trimSentence(`${cleaned} Live at ${liveUrlMatch[0]}.`);
+    }
+
+    return trimSentence(cleaned);
+  }
+
+  if (blocked && !/^nothing blocked/i.test(blocked)) {
+    return trimSentence(`Completed, but still blocked by ${toSingleSentence(blocked)}`);
+  }
+
+  if (liveUrlMatch) {
+    return `Live at ${liveUrlMatch[0]}.`;
+  }
+
+  return trimSentence(toSingleSentence(compact));
+}
+
+function extractSection(note: string, label: string): string | null {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = note.match(
+    new RegExp(`${escaped}\\s*(.*?)(?=\\s+[A-Z][^:]{1,40}:|$)`, "i")
+  );
+
+  return match?.[1]?.trim() || null;
+}
+
+function toSingleSentence(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  const firstSentence = compact.match(/^(.+?[.!?])(\s|$)/);
+  return (firstSentence?.[1] || compact)
+    .replace(/^[-:]\s*/, "")
+    .replace(/^(the workspace now contains|what changed:)\s*/i, "")
+    .trim();
+}
+
+function trimSentence(value: string, maxLength = 260): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 3).trim()}...`;
+}
+
+function simplifyTitle(title: string): string {
+  return title.replace(/^Process message:\s*/i, "").trim();
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 async function sendOperatorCompletion(

@@ -94,6 +94,8 @@ export const api = {
     }),
   saveServiceCredential: (serviceId: string, credential: string) =>
     apiPost<void>(`/services/${serviceId}/credential`, { credential }),
+  saveSchedule: (scheduleId: string, payload: { cron_expr?: string; enabled?: boolean }) =>
+    apiPost<void>(`/schedules/${scheduleId}`, payload),
   sendMessage: (content: string) =>
     apiPost("/messages", {
       channel: "admin_chat",
