@@ -12,7 +12,7 @@ export async function pollForTasks(): Promise<void> {
   // Find ready tasks ordered by priority
   const { data: tasks, error } = await db
     .from("tasks")
-    .select("id, assigned_role, priority")
+    .select("id, assigned_role, priority, last_handoff_note")
     .eq("state", "ready")
     .order("priority")
     .order("created_at")
@@ -34,6 +34,16 @@ export async function pollForTasks(): Promise<void> {
 
     if (!agent) {
       console.warn(`No active agent for role: ${task.assigned_role}`);
+      const note = `Supervisor could not start this task because no active agent is configured for role '${task.assigned_role}'. Task remains queued in ready.`;
+      if (task.last_handoff_note !== note) {
+        await db
+          .from("tasks")
+          .update({
+            last_handoff_note: note,
+          })
+          .eq("id", task.id)
+          .eq("state", "ready");
+      }
       continue;
     }
 
@@ -44,7 +54,20 @@ export async function pollForTasks(): Promise<void> {
       .eq("id", task.assigned_role)
       .single();
 
-    if (!role) continue;
+    if (!role) {
+      console.error(`No role config found for role: ${task.assigned_role}`);
+      const note = `Supervisor could not start this task because the role configuration for '${task.assigned_role}' is missing. Task remains queued in ready.`;
+      if (task.last_handoff_note !== note) {
+        await db
+          .from("tasks")
+          .update({
+            last_handoff_note: note,
+          })
+          .eq("id", task.id)
+          .eq("state", "ready");
+      }
+      continue;
+    }
 
     // Apply agent config overrides
     const model = (agent.config as any)?.model || role.model;
@@ -68,6 +91,15 @@ export async function pollForTasks(): Promise<void> {
 
     if (runErr) {
       console.error(`Failed to move task ${task.id} to running:`, runErr);
+      await db
+        .from("tasks")
+        .update({
+          state: "ready",
+          claimed_by: null,
+          last_handoff_note: `Supervisor claimed this task but could not transition it to running: ${runErr.message}`,
+        })
+        .eq("id", task.id)
+        .eq("state", "claimed");
       continue;
     }
 

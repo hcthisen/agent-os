@@ -17,5 +17,12 @@ export const config = {
   workspacesDir: process.env.WORKSPACES_DIR || "/app/workspaces",
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || "5000", 10),
   scheduleCheckIntervalMs: parseInt(process.env.SCHEDULE_CHECK_MS || "30000", 10),
+  taskAttentionCheckIntervalMs: parseInt(
+    process.env.TASK_ATTENTION_CHECK_MS || "30000",
+    10
+  ),
+  readyTaskAlertMs: parseInt(process.env.READY_TASK_ALERT_MS || "300000", 10),
+  claimedTaskAlertMs: parseInt(process.env.CLAIMED_TASK_ALERT_MS || "300000", 10),
+  runningTaskAlertMs: parseInt(process.env.RUNNING_TASK_ALERT_MS || "900000", 10),
   processTimeoutMs: parseInt(process.env.PROCESS_TIMEOUT_MS || "600000", 10), // 10 min default
 };

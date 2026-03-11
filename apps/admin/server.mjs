@@ -412,7 +412,7 @@ async function handleApi(req, res, url) {
         limit: "200",
         order: "created_at.desc",
         select:
-          "id,title,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,blocked_reason",
+          "id,title,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id",
       },
     });
     sendJson(res, 200, data || []);

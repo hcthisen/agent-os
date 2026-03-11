@@ -9,8 +9,11 @@ interface Task {
   assigned_role: string;
   claimed_by: string | null;
   attempt_count: number;
+  blocked_reason: string | null;
   last_handoff_note: string | null;
   created_at: string;
+  updated_at: string;
+  parent_task_id: string | null;
 }
 
 interface Approval {
@@ -108,7 +111,18 @@ export function TasksPage() {
       )}
 
       <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-        {["all", "ready", "running", "blocked_on_human", "in_review", "completed", "failed", "dead_letter"].map((s) => (
+        {[
+          "all",
+          "ready",
+          "claimed",
+          "running",
+          "blocked_on_human",
+          "blocked_on_agent",
+          "in_review",
+          "completed",
+          "failed",
+          "dead_letter",
+        ].map((s) => (
           <button
             key={s}
             onClick={() => setFilter(s)}
@@ -153,8 +167,11 @@ export function TasksPage() {
             {selected?.id === t.id && (
               <div style={{ marginTop: 10, fontSize: 12, color: "#aaa" }}>
                 <p><strong>ID:</strong> {t.id}</p>
+                {t.parent_task_id && <p><strong>Parent:</strong> {t.parent_task_id}</p>}
                 <p><strong>Priority:</strong> {t.priority}</p>
                 <p><strong>Attempts:</strong> {t.attempt_count}</p>
+                <p><strong>Updated:</strong> {new Date(t.updated_at).toLocaleString()}</p>
+                {t.blocked_reason && <p style={{ marginTop: 6 }}><strong>Blocked:</strong> {t.blocked_reason}</p>}
                 {t.last_handoff_note && <p style={{ marginTop: 6 }}><strong>Handoff:</strong> {t.last_handoff_note}</p>}
                 {t.state === "dead_letter" && (
                   <button onClick={(e) => { e.stopPropagation(); retryDeadLetter(t.id); }} style={{ ...btnStyle, background: "#3b82f6", marginTop: 8 }}>

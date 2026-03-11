@@ -18,24 +18,44 @@ export async function routeMessages(): Promise<void> {
 
   for (const msg of messages) {
     // Create a high-priority relay task
-    const { error: taskErr } = await db.from("tasks").insert({
-      title: `Process message: ${msg.content.slice(0, 50)}...`,
-      objective: `Process this inbound message from ${msg.sender} via ${msg.channel}. Classify intent and route appropriately.\n\nMessage: ${msg.content}`,
-      acceptance_criteria: ["Message classified", "Appropriate action taken or task created", "Response sent"],
-      state: "ready",
-      priority: "high",
-      assigned_role: "relay",
-    });
+    const { data: relayTask, error: taskErr } = await db
+      .from("tasks")
+      .insert({
+        title: `Process message: ${msg.content.slice(0, 50)}...`,
+        objective: `Process this inbound message from ${msg.sender} via ${msg.channel}. Classify intent and route appropriately.\n\nMessage: ${msg.content}`,
+        acceptance_criteria: [
+          "Message classified",
+          "Appropriate action taken or task created",
+          "Response sent",
+        ],
+        state: "ready",
+        priority: "high",
+        assigned_role: "relay",
+      })
+      .select("id")
+      .single();
 
     if (taskErr) {
       console.error(`Failed to create relay task for message ${msg.id}:`, taskErr);
+      await db.from("messages").insert({
+        channel: "admin_chat",
+        content: `System alert: failed to route inbound operator message "${msg.content.slice(0, 80)}". Reason: ${taskErr.message}`,
+        direction: "outbound",
+        metadata: {
+          delivery: "local",
+          source_message_id: msg.id,
+        },
+        processed: true,
+        sender: "system",
+        task_id: null,
+      });
       continue;
     }
 
     // Mark message as processed
     await db
       .from("messages")
-      .update({ processed: true })
+      .update({ processed: true, task_id: relayTask.id })
       .eq("id", msg.id);
   }
 }

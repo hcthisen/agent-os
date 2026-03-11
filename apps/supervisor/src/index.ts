@@ -6,6 +6,7 @@ import { checkSchedules } from "./scheduler.js";
 import { getActiveCount } from "./process-manager.js";
 import { startAsyncWorkers, stopAsyncWorkers } from "./async-workers.js";
 import { getRuntimeProviderStatus } from "./runtime-provider.js";
+import { monitorTaskAttention } from "./task-attention.js";
 import {
   cancelOpenAiDeviceAuth,
   getOpenAiDeviceAuthState,
@@ -50,8 +51,23 @@ async function main() {
     }
   }, config.scheduleCheckIntervalMs);
 
+  const attentionPollLoop = setInterval(async () => {
+    if (!running) return;
+    try {
+      await monitorTaskAttention();
+    } catch (err) {
+      console.error("Task attention monitor error:", err);
+    }
+  }, config.taskAttentionCheckIntervalMs);
+
   // Start async workers (embedding generation, memory distillation, artifact chunking)
   startAsyncWorkers();
+
+  try {
+    await monitorTaskAttention();
+  } catch (err) {
+    console.error("Initial task attention monitor error:", err);
+  }
 
   // Health endpoint for Docker healthchecks
   const server = http.createServer(async (req, res) => {
@@ -104,6 +120,7 @@ async function main() {
     clearInterval(taskPollLoop);
     clearInterval(messagePollLoop);
     clearInterval(schedulePollLoop);
+    clearInterval(attentionPollLoop);
     stopAsyncWorkers();
     server.close();
 

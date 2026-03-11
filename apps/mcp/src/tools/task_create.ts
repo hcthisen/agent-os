@@ -50,16 +50,17 @@ export async function taskCreate(args: {
 }): Promise<unknown> {
   const db = getDb();
   const currentTask = await getCurrentTaskContext();
+  const parentTaskId = args.parent_task_id || currentTask?.id || null;
   let projectId = args.project_id || null;
   let parentProjectId: string | null = null;
 
-  if (args.parent_task_id) {
-    await enforceScope("task", args.parent_task_id);
+  if (parentTaskId) {
+    await enforceScope("task", parentTaskId);
 
     const { data: parentTask, error: parentError } = await db
       .from("tasks")
       .select("id, project_id")
-      .eq("id", args.parent_task_id)
+      .eq("id", parentTaskId)
       .maybeSingle<{ id: string; project_id: string | null }>();
 
     if (parentError) {
@@ -69,7 +70,7 @@ export async function taskCreate(args: {
     if (!parentTask) {
       return {
         success: false,
-        error: `Parent task '${args.parent_task_id}' not found`,
+        error: `Parent task '${parentTaskId}' not found`,
       };
     }
 
@@ -102,7 +103,7 @@ export async function taskCreate(args: {
       acceptance_criteria: args.acceptance_criteria || [],
       assigned_role: args.assigned_role,
       priority: args.priority || "normal",
-      parent_task_id: args.parent_task_id || null,
+      parent_task_id: parentTaskId,
       project_id: projectId,
       requires_approval: args.requires_approval || false,
       is_system_modification: args.is_system_modification || false,
