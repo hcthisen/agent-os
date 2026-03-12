@@ -83,20 +83,7 @@ export async function launchAgent(
   await mkdir(workDir, { recursive: true });
   await chown(workDir, config.agentRunAsUid, config.agentRunAsGid);
 
-  // Copy the runtime bootstrap and durable instructions into the task workspace.
-  const [agentsInit, agentsInstructions] = await Promise.all([
-    readFile(config.agentsMdPath, "utf8"),
-    readFile(config.agentsInstructionsPath, "utf8"),
-  ]);
-
-  await Promise.all([
-    writeFile(join(workDir, "AGENTS.md"), agentsInit),
-    writeFile(join(workDir, "AGENTS_INSCTRUCTIONS.md"), agentsInstructions),
-  ]);
-
-  // Write task briefing
-  const briefing = formatBriefing(contextPack);
-  await writeFile(join(workDir, "TASK_BRIEFING.md"), briefing);
+  await writeRuntimeDocs(workDir, contextPack, agentName, roleId, activeProvider);
 
   // Build the prompt
   const prompt = buildPrompt(agentName, roleId, contextPack, activeProvider);
@@ -134,12 +121,14 @@ export async function launchAgent(
   await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2));
 
   await Promise.all([
-    chown(join(workDir, "AGENTS.md"), config.agentRunAsUid, config.agentRunAsGid),
     chown(
       join(workDir, "AGENTS_INSCTRUCTIONS.md"),
       config.agentRunAsUid,
       config.agentRunAsGid
     ),
+    chown(join(workDir, "ROLE_POLICY.md"), config.agentRunAsUid, config.agentRunAsGid),
+    chown(join(workDir, "ROLE_DIRECTORY.md"), config.agentRunAsUid, config.agentRunAsGid),
+    chown(join(workDir, "AGENT_IDENTITY.md"), config.agentRunAsUid, config.agentRunAsGid),
     chown(
       join(workDir, "TASK_BRIEFING.md"),
       config.agentRunAsUid,
@@ -522,9 +511,112 @@ function tomlString(value: string): string {
 }
 
 function formatBriefing(contextPack: Record<string, unknown>): string {
+  const {
+    agent_identity: _agentIdentity,
+    available_roles: _availableRoles,
+    role: _role,
+    role_policy: _rolePolicy,
+    ...briefingContext
+  } = contextPack;
+
   return `# Task Briefing
 
-${JSON.stringify(contextPack, null, 2)}
+${JSON.stringify(briefingContext, null, 2)}
+`;
+}
+
+async function writeRuntimeDocs(
+  workDir: string,
+  contextPack: Record<string, unknown>,
+  agentName: string,
+  roleId: string,
+  activeProvider: RuntimeProvider
+): Promise<void> {
+  const agentsInstructions = await readFile(config.agentsInstructionsPath, "utf8");
+
+  await Promise.all([
+    writeFile(join(workDir, "AGENTS_INSCTRUCTIONS.md"), agentsInstructions),
+    writeFile(join(workDir, "ROLE_POLICY.md"), formatRolePolicy(contextPack)),
+    writeFile(join(workDir, "ROLE_DIRECTORY.md"), formatRoleDirectory(contextPack)),
+    writeFile(
+      join(workDir, "AGENT_IDENTITY.md"),
+      formatAgentIdentity(contextPack, agentName, roleId, activeProvider)
+    ),
+    writeFile(join(workDir, "TASK_BRIEFING.md"), formatBriefing(contextPack)),
+  ]);
+}
+
+function formatRolePolicy(contextPack: Record<string, unknown>): string {
+  const role = (contextPack.role as Record<string, unknown> | null) || null;
+  const fallbackPolicy = String((contextPack.role_policy as string) || "").trim();
+  const displayName = String(role?.display_name || role?.id || "Unknown Role");
+  const description = String(role?.description || "").trim();
+  const usageSummary = String(role?.usage_summary || "").trim();
+  const handoffWhen = String(role?.handoff_when || "").trim();
+  const policyDoc = String(role?.policy_doc || fallbackPolicy).trim();
+
+  return `# Role Policy
+
+Role: ${displayName}
+${description ? `Description: ${description}` : ""}
+${usageSummary ? `Use this role when: ${usageSummary}` : ""}
+${handoffWhen ? `Hand off to this role when: ${handoffWhen}` : ""}
+
+${policyDoc}
+`;
+}
+
+function formatRoleDirectory(contextPack: Record<string, unknown>): string {
+  const availableRoles = Array.isArray(contextPack.available_roles)
+    ? (contextPack.available_roles as Array<Record<string, unknown>>)
+    : [];
+
+  const lines = availableRoles.map((role) => {
+    const displayName = String(role.display_name || role.id || "Unknown");
+    const roleId = String(role.id || "unknown");
+    const usageSummary = String(role.usage_summary || role.description || "").trim();
+    const handoffWhen = String(role.handoff_when || "").trim();
+    const activeAgentCount = Number(role.active_agent_count || 0);
+    const foundational = role.is_system_role ? "foundational" : "evolved";
+
+    return [
+      `## ${displayName} (${roleId})`,
+      `Type: ${foundational}`,
+      `Active agents: ${activeAgentCount}`,
+      usageSummary ? `Use for: ${usageSummary}` : "",
+      handoffWhen ? `Handoff guidance: ${handoffWhen}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
+
+  return `# Role Directory
+
+This directory lists the currently available roles in the system and when to use them.
+
+${lines.join("\n\n")}
+`;
+}
+
+function formatAgentIdentity(
+  contextPack: Record<string, unknown>,
+  agentName: string,
+  roleId: string,
+  activeProvider: RuntimeProvider
+): string {
+  const agentIdentity =
+    (contextPack.agent_identity as Record<string, unknown> | null) || null;
+
+  return `# Agent Identity
+
+Name: ${agentName}
+Role: ${roleId}
+Agent ID: ${String(agentIdentity?.id || "unclaimed")}
+Status: ${String(agentIdentity?.status || "active")}
+Active coding provider: ${activeProvider}
+
+Config overrides:
+${JSON.stringify(agentIdentity?.config || {}, null, 2)}
 `;
 }
 
@@ -535,7 +627,6 @@ function buildPrompt(
   activeProvider: RuntimeProvider
 ): string {
   const task = contextPack.task as Record<string, unknown>;
-  const rolePolicy = (contextPack.role_policy as string) || "";
   const lastHandoff = contextPack.last_handoff as Record<string, unknown> | null;
 
   let prompt = `You are ${agentName}, a ${roleId} agent in the agent-os system.
@@ -551,11 +642,9 @@ Active coding provider: ${activeProvider}
 ## Acceptance Criteria
 ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 
-## Role Policy
-${rolePolicy}
-
 ## Instructions
-- Read AGENTS.md, AGENTS_INSCTRUCTIONS.md, and TASK_BRIEFING.md from the working directory before you act.
+- Read AGENTS_INSCTRUCTIONS.md, ROLE_POLICY.md, ROLE_DIRECTORY.md, AGENT_IDENTITY.md,
+  and TASK_BRIEFING.md from the working directory before you act.
 - Use the MCP tools (task_update, memory_write, event_log, etc.) to interact with the system.
 - When done, update the task state and write a handoff note.
 - Log all side effects via event_log.

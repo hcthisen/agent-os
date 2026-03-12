@@ -33,6 +33,7 @@ interface OpenAiRoleAlignment {
 
 interface RuntimeProviderResponse {
   activeProvider: "anthropic" | "openai";
+  anthropicRoleConfig: Record<string, OpenAiRoleAlignment>;
   openaiModelMap: Record<string, string>;
   openaiRoleConfig: Record<string, OpenAiRoleAlignment>;
   providerStatus: Record<string, ProviderStatusEntry> | null;
@@ -83,6 +84,7 @@ const MODEL_OPTIONS = [
   "gpt-5.1-codex",
   "gpt-5.1-codex-mini",
 ];
+const ANTHROPIC_MODEL_OPTIONS = ["haiku", "sonnet", "opus"];
 
 const REASONING_OPTIONS = ["low", "medium", "high", "xhigh"];
 const ROLE_ORDER = [
@@ -101,6 +103,11 @@ const ROLE_NOTES: Record<string, string> = {
 };
 
 const BASE_TIER_LABEL = "Base role preset";
+const BASE_PROFILE_LABELS: Record<string, string> = {
+  haiku: "Fast profile",
+  opus: "Frontier profile",
+  sonnet: "Balanced profile",
+};
 
 const OPENAI_AUTH_STATUS_LABELS: Record<OpenAiDeviceAuthResponse["status"], string> = {
   canceled: "Canceled",
@@ -127,6 +134,9 @@ export function AgentsPage() {
     useState<RuntimeProviderResponse | null>(null);
   const [openAiDeviceAuth, setOpenAiDeviceAuth] =
     useState<OpenAiDeviceAuthResponse | null>(null);
+  const [anthropicRoleConfig, setAnthropicRoleConfig] = useState<
+    Record<string, OpenAiRoleAlignment>
+  >({});
   const [openaiModelMap, setOpenaiModelMap] = useState<Record<string, string>>({});
   const [openaiRoleConfig, setOpenaiRoleConfig] = useState<
     Record<string, OpenAiRoleAlignment>
@@ -134,6 +144,7 @@ export function AgentsPage() {
   const [savingProvider, setSavingProvider] = useState<"anthropic" | "openai" | null>(
     null
   );
+  const [savingRuntimeConfig, setSavingRuntimeConfig] = useState(false);
   const [deviceAuthBusy, setDeviceAuthBusy] = useState<"cancel" | "start" | null>(
     null
   );
@@ -152,6 +163,7 @@ export function AgentsPage() {
     setRoles(rolesData || []);
     setRuntimeProvider(runtimeProviderData || null);
     setOpenAiDeviceAuth(openAiDeviceAuthData || null);
+    setAnthropicRoleConfig(runtimeProviderData?.anthropicRoleConfig || {});
     setOpenaiModelMap(runtimeProviderData?.openaiModelMap || {});
     setOpenaiRoleConfig(runtimeProviderData?.openaiRoleConfig || {});
   }
@@ -211,6 +223,11 @@ export function AgentsPage() {
     runtimeProvider?.providerStatus?.openai?.authDetected ||
     false;
 
+  function formatBaseProfile(model: string) {
+    const normalized = String(model || "").trim().toLowerCase();
+    return BASE_PROFILE_LABELS[normalized] || model || "?";
+  }
+
   function resolveOpenAiRole(roleId: string, roleModel: string, roleEffort: string) {
     const normalizedRoleModel = String(roleModel || "").toLowerCase();
     const roleOverride = openaiRoleConfig[roleId];
@@ -224,16 +241,25 @@ export function AgentsPage() {
     };
   }
 
+  function resolveAnthropicRole(roleId: string, roleModel: string, roleEffort: string) {
+    const roleOverride = anthropicRoleConfig[roleId];
+    return {
+      effort: roleOverride?.effort || roleEffort || "?",
+      model: roleOverride?.model || roleModel || "?",
+    };
+  }
+
   function activeProviderLabel(roleId: string, model: string, effort: string) {
     if (runtimeProvider?.activeProvider === "openai") {
       const resolved = resolveOpenAiRole(roleId, model, effort);
       return `Active runtime: ${PROVIDER_LABELS.openai.runtime} ${resolved.model} / ${resolved.effort}`;
     }
 
-    return `Active runtime: ${PROVIDER_LABELS.anthropic.runtime} ${model} / ${effort}`;
+    const resolved = resolveAnthropicRole(roleId, model, effort);
+    return `Active runtime: ${PROVIDER_LABELS.anthropic.runtime} ${resolved.model} / ${resolved.effort}`;
   }
 
-  function updateRoleConfig(
+  function updateOpenAiRoleConfig(
     roleId: string,
     patch: Partial<OpenAiRoleAlignment>
   ) {
@@ -247,10 +273,46 @@ export function AgentsPage() {
     }));
   }
 
+  function updateAnthropicRoleConfig(
+    roleId: string,
+    patch: Partial<OpenAiRoleAlignment>
+  ) {
+    setAnthropicRoleConfig((prev) => ({
+      ...prev,
+      [roleId]: {
+        effort: prev[roleId]?.effort || "medium",
+        model: prev[roleId]?.model || "",
+        ...patch,
+      },
+    }));
+  }
+
+  async function saveRuntimeConfig() {
+    if (!runtimeProvider) return;
+
+    setSavingRuntimeConfig(true);
+    try {
+      await api.saveRuntimeProvider(
+        runtimeProvider.activeProvider,
+        anthropicRoleConfig,
+        openaiModelMap,
+        openaiRoleConfig
+      );
+      await loadAgentsPage();
+    } finally {
+      setSavingRuntimeConfig(false);
+    }
+  }
+
   async function saveProvider(provider: "anthropic" | "openai") {
     setSavingProvider(provider);
     try {
-      await api.saveRuntimeProvider(provider, openaiModelMap, openaiRoleConfig);
+      await api.saveRuntimeProvider(
+        provider,
+        anthropicRoleConfig,
+        openaiModelMap,
+        openaiRoleConfig
+      );
       await loadAgentsPage();
     } finally {
       setSavingProvider(null);
@@ -304,12 +366,6 @@ export function AgentsPage() {
 
   return (
     <div>
-      <datalist id="codex-model-options">
-        {MODEL_OPTIONS.map((model) => (
-          <option key={model} value={model} />
-        ))}
-      </datalist>
-
       <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Agents</h2>
 
       <div
@@ -583,18 +639,26 @@ export function AgentsPage() {
           }}
         >
           <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
-            OpenAI Runtime Overrides
+            {runtimeProvider?.activeProvider === "openai"
+              ? "OpenAI Runtime Configuration"
+              : "Anthropic Runtime Configuration"}
           </h4>
           <p style={{ color: "#8b8b96", fontSize: 12, marginBottom: 12 }}>
-            These per-role settings apply when the active runtime provider is OpenAI Codex.
-            The label below shows the stored role preset, not the live runtime selection.
+            {runtimeProvider?.activeProvider === "openai"
+              ? "These per-role settings apply when the active runtime provider is OpenAI Codex."
+              : "These per-role settings apply when the active runtime provider is Claude."}
+            {" "}Changes are not applied until you save them.
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             {sortedRoles.map((role) => {
-              const roleConfig = openaiRoleConfig[role.id] || {
-                effort: "medium",
-                model: "",
-              };
+              const roleConfig =
+                runtimeProvider?.activeProvider === "openai"
+                  ? resolveOpenAiRole(role.id, role.model, role.effort)
+                  : resolveAnthropicRole(role.id, role.model, role.effort);
+              const modelOptions =
+                runtimeProvider?.activeProvider === "openai"
+                  ? MODEL_OPTIONS
+                  : ANTHROPIC_MODEL_OPTIONS;
 
               return (
                 <div
@@ -614,7 +678,7 @@ export function AgentsPage() {
                       {role.display_name}
                     </div>
                     <div style={{ color: "#777", fontSize: 11, marginTop: 4 }}>
-                      {BASE_TIER_LABEL}: {role.model} / {role.effort}
+                      {BASE_TIER_LABEL}: {formatBaseProfile(role.model)} / {role.effort}
                     </div>
                     {ROLE_NOTES[role.id] && (
                       <div style={{ color: "#8b8b96", fontSize: 11, marginTop: 6 }}>
@@ -622,20 +686,28 @@ export function AgentsPage() {
                       </div>
                     )}
                   </div>
-                  <input
-                    list="codex-model-options"
-                    style={inputStyle}
-                    type="text"
+                  <select
+                    style={selectStyle}
                     value={roleConfig.model}
                     onChange={(e) =>
-                      updateRoleConfig(role.id, { model: e.target.value })
+                      runtimeProvider?.activeProvider === "openai"
+                        ? updateOpenAiRoleConfig(role.id, { model: e.target.value })
+                        : updateAnthropicRoleConfig(role.id, { model: e.target.value })
                     }
-                  />
+                  >
+                    {modelOptions.map((modelOption) => (
+                      <option key={modelOption} value={modelOption}>
+                        {modelOption}
+                      </option>
+                    ))}
+                  </select>
                   <select
                     style={selectStyle}
                     value={roleConfig.effort}
                     onChange={(e) =>
-                      updateRoleConfig(role.id, { effort: e.target.value })
+                      runtimeProvider?.activeProvider === "openai"
+                        ? updateOpenAiRoleConfig(role.id, { effort: e.target.value })
+                        : updateAnthropicRoleConfig(role.id, { effort: e.target.value })
                     }
                   >
                     {REASONING_OPTIONS.map((effort) => (
@@ -648,64 +720,82 @@ export function AgentsPage() {
               );
             })}
           </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+            <button
+              onClick={() => void saveRuntimeConfig()}
+              style={{
+                ...btnStyle,
+                background: "#2563eb",
+                opacity: savingRuntimeConfig ? 0.6 : 1,
+              }}
+              disabled={savingRuntimeConfig}
+            >
+              {savingRuntimeConfig ? "Saving..." : "Save Runtime Configuration"}
+            </button>
+          </div>
         </div>
 
-        <div
-          style={{
-            background: "#0d0d15",
-            border: "1px solid #232334",
-            borderRadius: 8,
-            padding: 14,
-          }}
-        >
-          <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
-            Base Tier Fallback Mapping
-          </h4>
-          <p style={{ color: "#8b8b96", fontSize: 12, marginBottom: 12 }}>
-            Maps the stored base role tiers (`opus`, `sonnet`, `haiku`) onto OpenAI
-            models when a role does not have an explicit override above.
-          </p>
-          <div style={{ display: "grid", gap: 8 }}>
-            {(["opus", "sonnet", "haiku"] as const).map((tier) => (
-              <label
-                key={tier}
-                style={{
-                  alignItems: "center",
-                  display: "grid",
-                  gap: 10,
-                  gridTemplateColumns: "90px 1fr",
-                }}
-              >
-                <span
+        {runtimeProvider?.activeProvider === "openai" && (
+          <div
+            style={{
+              background: "#0d0d15",
+              border: "1px solid #232334",
+              borderRadius: 8,
+              padding: 14,
+            }}
+          >
+            <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
+              Base Tier Fallback Mapping
+            </h4>
+            <p style={{ color: "#8b8b96", fontSize: 12, marginBottom: 12 }}>
+              Maps the stored base role profiles onto OpenAI models when a role does not
+              have an explicit override above.
+            </p>
+            <div style={{ display: "grid", gap: 8 }}>
+              {(["opus", "sonnet", "haiku"] as const).map((tier) => (
+                <label
+                  key={tier}
                   style={{
-                    color: "#cfcfe0",
-                    fontSize: 12,
-                    textTransform: "capitalize",
+                    alignItems: "center",
+                    display: "grid",
+                    gap: 10,
+                    gridTemplateColumns: "120px 1fr",
                   }}
                 >
-                  {tier}
-                </span>
-                <input
-                  list="codex-model-options"
-                  style={inputStyle}
-                  type="text"
-                  value={openaiModelMap[tier] || ""}
-                  onChange={(e) =>
-                    setOpenaiModelMap((prev) => ({
-                      ...prev,
-                      [tier]: e.target.value,
-                    }))
-                  }
-                />
-              </label>
-            ))}
+                  <span
+                    style={{
+                      color: "#cfcfe0",
+                      fontSize: 12,
+                    }}
+                  >
+                    {formatBaseProfile(tier)}
+                  </span>
+                  <select
+                    style={selectStyle}
+                    value={openaiModelMap[tier] || ""}
+                    onChange={(e) =>
+                      setOpenaiModelMap((prev) => ({
+                        ...prev,
+                        [tier]: e.target.value,
+                      }))
+                    }
+                  >
+                    {MODEL_OPTIONS.map((modelOption) => (
+                      <option key={modelOption} value={modelOption}>
+                        {modelOption}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+            {runtimeProvider?.updatedAt && (
+              <p style={{ color: "#777", fontSize: 11, marginTop: 10 }}>
+                Last updated: {new Date(runtimeProvider.updatedAt).toLocaleString()}
+              </p>
+            )}
           </div>
-          {runtimeProvider?.updatedAt && (
-            <p style={{ color: "#777", fontSize: 11, marginTop: 10 }}>
-              Last updated: {new Date(runtimeProvider.updatedAt).toLocaleString()}
-            </p>
-          )}
-        </div>
+        )}
       </div>
 
       <div
@@ -752,7 +842,7 @@ export function AgentsPage() {
                 }}
               >
                 <span>Role: {a.role_id}</span>
-                <span>{BASE_TIER_LABEL}: {model} / {effort}</span>
+                <span>{BASE_TIER_LABEL}: {formatBaseProfile(model)} / {effort}</span>
                 <span>Resolved OpenAI override: {openai.model} / {openai.effort}</span>
                 <span>{activeProviderLabel(a.role_id, model, effort)}</span>
                 <span>Max concurrent: {role?.max_concurrent_tasks ?? "?"}</span>
@@ -785,7 +875,7 @@ export function AgentsPage() {
               <tr key={r.id} style={{ borderBottom: "1px solid #1a1a2a" }}>
                 <td style={tdStyle}>{r.display_name}</td>
                 <td style={tdStyle}>
-                  {r.model} / {r.effort}
+                  {formatBaseProfile(r.model)} / {r.effort}
                 </td>
                 <td style={tdStyle}>
                   {openai.model} / {openai.effort}

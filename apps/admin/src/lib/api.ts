@@ -84,11 +84,13 @@ export const api = {
     apiPost<any>("/runtime/provider/openai/device-auth/cancel"),
   saveRuntimeProvider: (
     activeProvider: string,
+    anthropicRoleConfig: Record<string, { effort: string; model: string }>,
     openaiModelMap: Record<string, string>,
     openaiRoleConfig: Record<string, { effort: string; model: string }>
   ) =>
     apiPost<any>("/runtime/provider", {
       activeProvider,
+      anthropicRoleConfig,
       openaiModelMap,
       openaiRoleConfig,
     }),

@@ -37,6 +37,8 @@ import {
   scheduleCreateDef,
   scheduleCreate,
 } from "./tools/schedule_create.js";
+import { roleUpsertDef, roleUpsert } from "./tools/role_upsert.js";
+import { agentUpsertDef, agentUpsert } from "./tools/agent_upsert.js";
 
 const tools = [
   taskClaimDef,
@@ -53,6 +55,8 @@ const tools = [
   messageSendDef,
   scheduleUpdateDef,
   scheduleCreateDef,
+  roleUpsertDef,
+  agentUpsertDef,
 ];
 
 const handlers: Record<string, (args: any) => Promise<unknown>> = {
@@ -70,6 +74,8 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   message_send: messageSend,
   schedule_update: scheduleUpdate,
   schedule_create: scheduleCreate,
+  role_upsert: roleUpsert,
+  agent_upsert: agentUpsert,
 };
 
 async function extractPolicyAction(
@@ -139,6 +145,32 @@ async function extractPolicyAction(
       type: "system.modify",
       taskId,
       desc: `Create schedule: ${target}`,
+    };
+  }
+
+  if (name === "role_upsert") {
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    return {
+      type: "system.modify",
+      taskId,
+      desc: `Upsert role: ${String(args?.id || "unknown role")}`,
+    };
+  }
+
+  if (name === "agent_upsert") {
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    return {
+      type: "system.modify",
+      taskId,
+      desc: `Upsert agent: ${String(args?.name || args?.id || "unknown agent")}`,
     };
   }
 

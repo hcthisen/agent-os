@@ -17,6 +17,8 @@ export interface Role {
   display_name: string;
   description: string;
   policy_doc: string;
+  usage_summary: string;
+  handoff_when: string;
   model: ClaudeModel;
   effort: ClaudeEffort;
   max_concurrent_tasks: number;
@@ -35,6 +37,16 @@ export interface Agent {
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RoleDirectoryEntry {
+  id: string;
+  display_name: string;
+  description: string;
+  usage_summary: string;
+  handoff_when: string;
+  is_system_role: boolean;
+  active_agent_count: number;
 }
 
 export interface Project {
@@ -222,7 +234,10 @@ export interface Message {
 export interface ContextPack {
   task: Task;
   project: Project | null;
+  role: Role;
   role_policy: string;
+  agent_identity: Agent | null;
+  available_roles: RoleDirectoryEntry[];
   model: ClaudeModel;
   effort: ClaudeEffort;
   last_handoff: Handoff | null;

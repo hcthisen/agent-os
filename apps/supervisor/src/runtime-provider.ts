@@ -4,23 +4,25 @@ import { join } from "node:path";
 import { getDb } from "./db.js";
 
 export type RuntimeProvider = "anthropic" | "openai";
-export type OpenAiReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
-export interface OpenAiRoleAlignment {
-  effort: OpenAiReasoningEffort;
+export interface ProviderRoleAlignment {
+  effort: ProviderReasoningEffort;
   model: string;
 }
 
 export interface RuntimeProviderConfig {
   activeProvider: RuntimeProvider;
+  anthropicRoleConfig: Record<string, ProviderRoleAlignment>;
   openaiModelMap: Record<string, string>;
-  openaiRoleConfig: Record<string, OpenAiRoleAlignment>;
+  openaiRoleConfig: Record<string, ProviderRoleAlignment>;
 }
 
 export interface RuntimeProviderStatus {
   activeProvider: RuntimeProvider;
+  anthropicRoleConfig: Record<string, ProviderRoleAlignment>;
   openaiModelMap: Record<string, string>;
-  openaiRoleConfig: Record<string, OpenAiRoleAlignment>;
+  openaiRoleConfig: Record<string, ProviderRoleAlignment>;
   providers: Record<
     RuntimeProvider,
     {
@@ -37,6 +39,33 @@ export const DEFAULT_OPENAI_MODEL_MAP = {
   haiku: "gpt-5.4",
   opus: "gpt-5.4",
   sonnet: "gpt-5.4",
+} as const;
+
+export const DEFAULT_ANTHROPIC_ROLE_CONFIG = {
+  architect: {
+    effort: "high",
+    model: "opus",
+  },
+  builder: {
+    effort: "high",
+    model: "opus",
+  },
+  relay: {
+    effort: "medium",
+    model: "haiku",
+  },
+  reviewer: {
+    effort: "high",
+    model: "opus",
+  },
+  sage: {
+    effort: "high",
+    model: "opus",
+  },
+  sentinel: {
+    effort: "high",
+    model: "sonnet",
+  },
 } as const;
 
 export const DEFAULT_OPENAI_ROLE_CONFIG = {
@@ -83,6 +112,10 @@ export async function getRuntimeProviderConfig(): Promise<RuntimeProviderConfig>
   const value = data.value as Record<string, unknown>;
   const activeProvider =
     value.activeProvider === "openai" ? "openai" : "anthropic";
+  const rawAnthropicRoleConfig =
+    value.anthropicRoleConfig && typeof value.anthropicRoleConfig === "object"
+      ? (value.anthropicRoleConfig as Record<string, unknown>)
+      : {};
   const rawMap =
     value.openaiModelMap && typeof value.openaiModelMap === "object"
       ? (value.openaiModelMap as Record<string, unknown>)
@@ -94,6 +127,10 @@ export async function getRuntimeProviderConfig(): Promise<RuntimeProviderConfig>
 
   return {
     activeProvider,
+    anthropicRoleConfig: {
+      ...DEFAULT_ANTHROPIC_ROLE_CONFIG,
+      ...normalizeRoleConfig(rawAnthropicRoleConfig),
+    },
     openaiModelMap: {
       ...DEFAULT_OPENAI_MODEL_MAP,
       ...normalizeModelMap(rawMap),
@@ -114,6 +151,7 @@ export async function getRuntimeProviderStatus(
 
   return {
     activeProvider: config.activeProvider,
+    anthropicRoleConfig: config.anthropicRoleConfig,
     openaiModelMap: config.openaiModelMap,
     openaiRoleConfig: config.openaiRoleConfig,
     providers: {
@@ -158,9 +196,10 @@ export function resolveProviderLaunch(
   config: RuntimeProviderConfig
 ): { effort: string; model: string | null } {
   if (provider === "anthropic") {
+    const roleOverride = config.anthropicRoleConfig[roleId];
     return {
-      effort: normalizeReasoningEffort(requestedEffort),
-      model: requestedModel || null,
+      effort: normalizeReasoningEffort(roleOverride?.effort || requestedEffort),
+      model: roleOverride?.model || requestedModel || null,
     };
   }
 
@@ -178,6 +217,7 @@ export function resolveProviderLaunch(
 function defaultRuntimeProviderConfig(): RuntimeProviderConfig {
   return {
     activeProvider: "anthropic",
+    anthropicRoleConfig: { ...DEFAULT_ANTHROPIC_ROLE_CONFIG },
     openaiModelMap: { ...DEFAULT_OPENAI_MODEL_MAP },
     openaiRoleConfig: { ...DEFAULT_OPENAI_ROLE_CONFIG },
   };
@@ -199,8 +239,8 @@ function normalizeModelMap(
 
 function normalizeRoleConfig(
   roleConfig: Record<string, unknown>
-): Record<string, OpenAiRoleAlignment> {
-  const normalized: Record<string, OpenAiRoleAlignment> = {};
+): Record<string, ProviderRoleAlignment> {
+  const normalized: Record<string, ProviderRoleAlignment> = {};
 
   for (const [roleId, value] of Object.entries(roleConfig)) {
     if (!value || typeof value !== "object") {
@@ -224,7 +264,7 @@ function normalizeRoleConfig(
   return normalized;
 }
 
-function normalizeReasoningEffort(value: unknown): OpenAiReasoningEffort {
+function normalizeReasoningEffort(value: unknown): ProviderReasoningEffort {
   const normalized =
     typeof value === "string" ? value.trim().toLowerCase() : "medium";
 

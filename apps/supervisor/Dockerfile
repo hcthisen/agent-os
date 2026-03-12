@@ -30,8 +30,7 @@ RUN npm run build -w packages/shared && npm run build -w apps/mcp && npm run bui
 
 COPY --chmod=755 scripts/entrypoint.sh /scripts/entrypoint.sh
 
-# Copy runtime bootstrap and durable agent instructions
-COPY AGENTS.md /app/AGENTS.md
+# Copy durable foundational agent instructions
 COPY AGENTS_INSCTRUCTIONS.md /app/AGENTS_INSCTRUCTIONS.md
 
 ENV AGENT_HOME_DIR=/home/node

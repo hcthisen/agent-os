@@ -44,6 +44,14 @@ const DEFAULT_OPENAI_MODEL_MAP = {
   opus: "gpt-5.4",
   sonnet: "gpt-5.4",
 };
+const DEFAULT_ANTHROPIC_ROLE_CONFIG = {
+  architect: { effort: "high", model: "opus" },
+  builder: { effort: "high", model: "opus" },
+  relay: { effort: "medium", model: "haiku" },
+  reviewer: { effort: "high", model: "opus" },
+  sage: { effort: "high", model: "opus" },
+  sentinel: { effort: "high", model: "sonnet" },
+};
 const DEFAULT_OPENAI_ROLE_CONFIG = {
   architect: { effort: "high", model: "gpt-5.4" },
   builder: { effort: "high", model: "gpt-5.4" },
@@ -278,6 +286,10 @@ async function requireAuth(req, res) {
 }
 
 function normalizeRuntimeProviderValue(value) {
+  const anthropicRoleConfig =
+    value?.anthropicRoleConfig && typeof value.anthropicRoleConfig === "object"
+      ? value.anthropicRoleConfig
+      : {};
   const openaiModelMap =
     value?.openaiModelMap && typeof value.openaiModelMap === "object"
       ? value.openaiModelMap
@@ -289,6 +301,21 @@ function normalizeRuntimeProviderValue(value) {
 
   return {
     activeProvider: value?.activeProvider === "openai" ? "openai" : "anthropic",
+    anthropicRoleConfig: {
+      ...DEFAULT_ANTHROPIC_ROLE_CONFIG,
+      ...Object.fromEntries(
+        Object.entries(anthropicRoleConfig)
+          .map(([roleId, entry]) => {
+            const model =
+              typeof entry?.model === "string" ? entry.model.trim() : "";
+            const effort = normalizeReasoningEffort(entry?.effort);
+
+            if (!model) return null;
+            return [roleId.toLowerCase(), { effort, model }];
+          })
+          .filter(Boolean)
+      ),
+    },
     openaiModelMap: {
       ...DEFAULT_OPENAI_MODEL_MAP,
       ...Object.fromEntries(
@@ -902,6 +929,7 @@ async function handleApi(req, res, url) {
 
     sendJson(res, 200, {
       activeProvider: setting.activeProvider,
+      anthropicRoleConfig: setting.anthropicRoleConfig,
       openaiModelMap: setting.openaiModelMap,
       openaiRoleConfig: setting.openaiRoleConfig,
       providerStatus: supervisorRuntime?.providers || null,

@@ -1,7 +1,6 @@
 export const config = {
   concurrencyLimit: parseInt(process.env.CONCURRENCY_LIMIT || "5", 10),
   mcpConfigPath: process.env.MCP_CONFIG_PATH || "/app/apps/mcp/mcp-config.json",
-  agentsMdPath: process.env.AGENTS_MD_PATH || "/app/AGENTS.md",
   agentsInstructionsPath:
     process.env.AGENTS_INSTRUCTIONS_PATH || "/app/AGENTS_INSCTRUCTIONS.md",
   agentHomeDir:

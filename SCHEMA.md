@@ -24,6 +24,8 @@ actions require human approval.
 | display_name            | text     | Human-readable name.                            |
 | description             | text     | What this role does.                            |
 | policy_doc              | text     | Markdown. Responsibilities, boundaries, rules.  |
+| usage_summary           | text     | Short "use this role when..." summary.          |
+| handoff_when            | text     | Short handoff guidance for other agents.        |
 | model                   | text     | Claude Code model: `opus`, `sonnet`, `haiku`.   |
 | effort                  | text     | Claude Code effort: `low`, `medium`, `high`.    |
 | max_concurrent_tasks    | int      | Default 3. How many tasks this role can have in |
@@ -437,7 +439,12 @@ supervisor before launching a Claude Code process.
 {
   "task": { /* full task row */ },
   "project": { /* project row, if task has project_id */ },
+  "role": { /* full role row */ },
   "role_policy": "markdown string from roles.policy_doc",
+  "agent_identity": { /* current agent row, if claimed */ },
+  "available_roles": [
+    /* compact role directory entries with usage_summary, handoff_when, and active agent counts */
+  ],
   "model": "opus",
   "effort": "high",
   "last_handoff": { /* most recent handoff for this task */ },
@@ -457,9 +464,9 @@ supervisor before launching a Claude Code process.
 The function retrieves model and effort from the agent's `config` override if it exists,
 otherwise from the role's defaults.
 
-**The supervisor takes this JSON and writes it into `TASK_BRIEFING.md`.** The runtime
-`AGENTS.md` bootstrap file then points the Claude Code process to `TASK_BRIEFING.md`
-and `AGENTS_INSCTRUCTIONS.md` on launch.
+**The supervisor takes this JSON and generates runtime docs** such as
+`ROLE_POLICY.md`, `ROLE_DIRECTORY.md`, `AGENT_IDENTITY.md`, and `TASK_BRIEFING.md`.
+`AGENTS_INSCTRUCTIONS.md` remains the single foundational repo file used at launch.
 
 ## Row Level Security
 
