@@ -45,6 +45,28 @@ prompt_env_safe_value() {
   done
 }
 
+prompt_optional_env_safe_value() {
+  local prompt="$1"
+  local value=""
+
+  while true; do
+    read -r -p "${prompt}: " value
+
+    if [[ -z "${value}" ]]; then
+      printf '%s' ""
+      return 0
+    fi
+
+    if [[ "${value}" =~ [[:space:]#] ]]; then
+      echo "${prompt} cannot contain whitespace or '#' because it is written to .env.vps." >&2
+      continue
+    fi
+
+    printf '%s' "${value}"
+    return 0
+  done
+}
+
 prompt_password() {
   local first=""
   local second=""
@@ -137,6 +159,7 @@ write_env_file() {
   local admin_user="$1"
   local admin_pass="$2"
   local root_domain="$3"
+  local telegram_bot_token="$4"
   local admin_public_url="https://admin.${root_domain}"
   local public_site_url="https://${root_domain}"
 
@@ -148,7 +171,7 @@ ADMIN_LOCAL_PORT=3000
 CADDY_SITE_SNIPPETS_DIR=${CADDY_ROOT}/sites
 CADDY_DATA_DIR=${CADDY_ROOT}/data
 CADDY_CONFIG_DIR=${CADDY_ROOT}/config
-TELEGRAM_BOT_TOKEN=
+TELEGRAM_BOT_TOKEN=${telegram_bot_token}
 ADMIN_USER=${admin_user}
 ADMIN_PASS=${admin_pass}
 EOF
@@ -192,6 +215,7 @@ main() {
   admin_user="$(prompt_env_safe_value "Admin username")"
   admin_pass="$(prompt_password)"
   root_domain="$(normalize_domain "$(prompt_nonempty "Root domain pointed at this VPS")")"
+  telegram_bot_token="$(prompt_optional_env_safe_value "Telegram bot token (optional, press Enter to skip)")"
 
   if [[ ! "${root_domain}" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
     echo "Invalid root domain: ${root_domain}" >&2
@@ -206,7 +230,7 @@ main() {
 EOF
   fi
 
-  write_env_file "${admin_user}" "${admin_pass}" "${root_domain}"
+  write_env_file "${admin_user}" "${admin_pass}" "${root_domain}" "${telegram_bot_token}"
   install_systemd_unit
 
   AGENT_OS_ENV_FILE="${ENV_FILE}" bash "${ROOT_DIR}/scripts/manage-vps-stack.sh" up
