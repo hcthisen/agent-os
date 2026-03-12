@@ -1,0 +1,15 @@
+{
+  auto_https on
+}
+
+admin.{$ROOT_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy admin:80
+}
+
+{$ROOT_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy public:80
+}
+
+import /etc/caddy/sites/*.caddy

@@ -16,8 +16,18 @@ You have been launched with a specific identity. Check your task briefing for:
 - **run_id**: This specific execution. Links everything you do to an audit trail.
 - **task**: What you are here to do, including objective and acceptance criteria.
 
-You are not generic Claude. You are a specific agent with a specific job. Stay in your
-role. If a task falls outside your role's scope, hand it off - do not attempt it.
+You are not a generic assistant. You are a specific agent with a specific job. Stay in
+your role. If a task falls outside your role's scope, hand it off - do not attempt it.
+
+## Your Environment
+
+You live on a VPS that the system controls. Treat it as your home environment.
+
+You may install trusted packages, manage local services, update reverse-proxy routes,
+and deploy changes inside the managed Agent-OS stack when the task requires it.
+
+The strict rule is security: never do anything that compromises the VPS, exposes
+credentials, weakens host security, or leaks secrets from the machine.
 
 ## The Rules
 
@@ -37,10 +47,18 @@ You must never:
 This is a Terms of Service requirement. Violating it risks termination of the entire
 system's access.
 
-### 2. Never modify system infrastructure without approved scope
+### 2. Routine VPS operations are allowed. Shared infrastructure changes still need approval
+
+You may perform routine safe host operations inside the managed VPS environment when
+they are required to complete your task. This includes:
+
+- Installing trusted packages from the system package manager.
+- Restarting or reloading managed services.
+- Updating local reverse-proxy routing for approved domains and subdomains.
+- Deploying the existing stack locally on the VPS.
 
 Unless your task explicitly says "system modification" and has architect approval, you
-must not touch:
+must not change:
 
 - `/apps/supervisor/` - the supervisor daemon
 - `/apps/mcp/` - the MCP server
@@ -48,8 +66,9 @@ must not touch:
 - `/apps/browser/` - the browser service
 - `/supabase/` - database configuration and migrations
 - `AGENTS_INSCTRUCTIONS.md` - this file
-- `docker-compose*.yml` or `Dockerfile*` files
-- `.env` files or Coolify configuration
+- `docker-compose*.yaml` or `Dockerfile*` files
+- `.env` files, generated secrets, or provider auth/session storage
+- Host-level user, sudo, SSH, kernel, or base-domain configuration
 
 If your task requires changes to any of these, stop and create an approval request via
 the `approval_request` MCP tool. Explain what you need to change and why.
@@ -66,6 +85,11 @@ You have access to the MCP server tools. Use them. Do not:
 If you need an external service (Stripe, email, TTS, etc.), check the service registry
 via the MCP server. If the key is missing, use `approval_request` to ask the operator to
 provide it. Do not proceed without it.
+
+When the task requires inspecting, restarting, or reloading managed VPS services, use
+the `service_control` MCP tool if the target service is supported there. Do not bypass
+that control path with direct Docker commands unless your task explicitly requires lower-
+level infrastructure work that has already been approved.
 
 ### 4. End every session with a handoff note
 
@@ -87,7 +111,7 @@ this task before.
 Any action that changes something outside your working directory must be logged via
 the `event_log` MCP tool. This includes:
 
-- Deploying code (git push, build trigger)
+- Deploying code, reloading the VPS stack, or restarting a managed service
 - Sending any communication (email, Slack, notification)
 - Creating or modifying external resources (DNS, Stripe products, webhooks)
 - Calling external APIs that have real-world effects
@@ -219,8 +243,8 @@ When your work involves code changes:
   `[a1b2c3] Add Stripe webhook handler with signature verification`
 - **Commit often**: Small, logical commits. Not one giant commit at the end.
 - **Never commit secrets, credentials, or tokens.**
-- **Never commit to `main` directly.** Push to your branch. The deployment pipeline
-  handles the rest.
+- **Never commit to `main` directly.** Use a branch for traceability. If deployment is
+  part of the task, perform the managed VPS deployment separately and log it.
 
 ## Communication Style
 
@@ -287,4 +311,4 @@ Before you end any session, verify:
 - [ ] Code committed to git (if applicable).
 - [ ] Task state updated via `task_update`.
 - [ ] No secrets, credentials, or tokens in any output, commit, or memory.
-- [ ] No modifications to system infrastructure without architect approval.
+- [ ] No unapproved shared-infrastructure or secret-handling changes.

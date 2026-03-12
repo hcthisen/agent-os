@@ -1,5 +1,15 @@
-import { cp, mkdir, readdir, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  cp,
+  lstat,
+  mkdir,
+  readdir,
+  rename,
+  rm,
+  stat,
+  symlink,
+} from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { requireCurrentTaskContext } from "../scope.js";
@@ -9,6 +19,9 @@ const DEFAULT_SOURCE_CANDIDATES = [
   "sites/public",
   "dist",
 ] as const;
+const RELEASES_DIR_NAME = "releases";
+const CURRENT_LINK_NAME = "current";
+const RELEASES_TO_KEEP = 3;
 
 export const publicSitePublishDef = {
   name: "public_site_publish",
@@ -25,7 +38,7 @@ export const publicSitePublishDef = {
       clear_existing: {
         type: "boolean",
         description:
-          "When true, remove the current public site files before copying the new build.",
+          "When true, prune older releases after the new build has been atomically activated.",
         default: true,
       },
       name: {
@@ -45,29 +58,36 @@ export async function publicSitePublish(args: {
   const ctx = getAgentContext();
   const task = await requireCurrentTaskContext();
   const workspaceDir = process.env.WORKSPACE_DIR || process.cwd();
-  const publicLiveDir = process.env.PUBLIC_LIVE_DIR;
+  const deploymentRoot = process.env.PUBLIC_LIVE_DIR;
 
-  if (!publicLiveDir) {
+  if (!deploymentRoot) {
     throw new Error("PUBLIC_LIVE_DIR is not configured for this runtime");
   }
 
   const sourceDir = await resolveSourceDir(workspaceDir, args.source_path);
-  const clearExisting = args.clear_existing !== false;
+  const pruneReleases = args.clear_existing !== false;
+  const relativeSource = relativeToWorkspace(workspaceDir, sourceDir);
+  const releaseId = createReleaseId();
+  const releasesDir = join(deploymentRoot, RELEASES_DIR_NAME);
+  const releaseDir = join(releasesDir, releaseId);
 
-  await mkdir(publicLiveDir, { recursive: true });
-  if (clearExisting) {
-    await emptyDirectory(publicLiveDir);
-  }
-
-  await cp(sourceDir, publicLiveDir, {
+  await mkdir(deploymentRoot, { recursive: true });
+  await ensureAtomicLayout(deploymentRoot);
+  await mkdir(releasesDir, { recursive: true });
+  await rm(releaseDir, { recursive: true, force: true });
+  await cp(sourceDir, releaseDir, {
     recursive: true,
     force: true,
   });
 
-  const fileCount = await countFiles(publicLiveDir);
+  await activateRelease(deploymentRoot, releaseId);
+  const retainedReleaseIds = pruneReleases
+    ? await pruneOldReleases(releasesDir, releaseId)
+    : await listReleaseIds(releasesDir);
+
+  const fileCount = await countFiles(releaseDir);
   const publishedAt = new Date().toISOString();
   const publicSiteUrl = process.env.PUBLIC_SITE_URL || null;
-  const relativeSource = relativeToWorkspace(workspaceDir, sourceDir);
 
   const { error: artifactError } = await db.from("artifacts").insert({
     name: args.name || `Published public site from ${relativeSource}`,
@@ -75,11 +95,13 @@ export async function publicSitePublish(args: {
     task_id: task.id,
     external_url: publicSiteUrl,
     metadata: {
-      clear_existing: clearExisting,
       file_count: fileCount,
       published_at: publishedAt,
+      prune_releases: pruneReleases,
+      release_id: releaseId,
+      retained_release_ids: retainedReleaseIds,
       source_path: relativeSource,
-      target: "public_live",
+      target: "public_live_current",
     },
     created_by: ctx.agent_id,
   });
@@ -95,12 +117,14 @@ export async function publicSitePublish(args: {
     severity: "info",
     scope_type: "task",
     scope_id: task.id,
-    summary: `Published ${fileCount} public-site file(s) from ${relativeSource}.`,
+    summary: `Published public release ${releaseId} with ${fileCount} file(s) from ${relativeSource}.`,
     detail: {
-      clear_existing: clearExisting,
       file_count: fileCount,
       public_site_url: publicSiteUrl,
       published_at: publishedAt,
+      prune_releases: pruneReleases,
+      release_id: releaseId,
+      retained_release_ids: retainedReleaseIds,
       source_path: relativeSource,
       workspace_dir: workspaceDir,
     },
@@ -112,10 +136,12 @@ export async function publicSitePublish(args: {
 
   return {
     success: true,
-    clear_existing: clearExisting,
     file_count: fileCount,
     public_site_url: publicSiteUrl,
     published_at: publishedAt,
+    prune_releases: pruneReleases,
+    release_id: releaseId,
+    retained_release_ids: retainedReleaseIds,
     source_path: relativeSource,
   };
 }
@@ -179,14 +205,118 @@ function relativeToWorkspace(workspaceDir: string, absolutePath: string): string
   return absolutePath.slice(ensureTrailingSeparator(resolve(workspaceDir)).length);
 }
 
-async function emptyDirectory(targetDir: string): Promise<void> {
-  const entries = await readdir(targetDir, { withFileTypes: true }).catch(() => []);
+function createReleaseId(): string {
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
+  return `${timestamp}-${randomUUID().slice(0, 8)}`;
+}
+
+async function ensureAtomicLayout(deploymentRoot: string): Promise<void> {
+  const releasesDir = join(deploymentRoot, RELEASES_DIR_NAME);
+  const currentLink = join(deploymentRoot, CURRENT_LINK_NAME);
+
+  await mkdir(releasesDir, { recursive: true });
+
+  const currentState = await getPathState(currentLink);
+  if (currentState === "symlink") {
+    return;
+  }
+
+  if (currentState === "directory") {
+    const legacyReleaseId = `legacy-current-${createReleaseId()}`;
+    const legacyReleaseDir = join(releasesDir, legacyReleaseId);
+    await rename(currentLink, legacyReleaseDir);
+    await swapCurrentLink(deploymentRoot, legacyReleaseDir, legacyReleaseId);
+    return;
+  }
+
+  const rootEntries = await readdir(deploymentRoot, { withFileTypes: true }).catch(() => []);
+  const legacyEntries = rootEntries.filter(
+    (entry) => entry.name !== CURRENT_LINK_NAME && entry.name !== RELEASES_DIR_NAME
+  );
+
+  if (!legacyEntries.length) {
+    return;
+  }
+
+  const legacyReleaseId = `legacy-root-${createReleaseId()}`;
+  const legacyReleaseDir = join(releasesDir, legacyReleaseId);
+  await mkdir(legacyReleaseDir, { recursive: true });
+
+  for (const entry of legacyEntries) {
+    await rename(join(deploymentRoot, entry.name), join(legacyReleaseDir, entry.name));
+  }
+
+  await swapCurrentLink(deploymentRoot, legacyReleaseDir, legacyReleaseId);
+}
+
+async function activateRelease(deploymentRoot: string, releaseId: string): Promise<void> {
+  const releaseDir = join(deploymentRoot, RELEASES_DIR_NAME, releaseId);
+  await swapCurrentLink(deploymentRoot, releaseDir, releaseId);
+}
+
+async function swapCurrentLink(
+  deploymentRoot: string,
+  releaseDir: string,
+  releaseId: string
+): Promise<void> {
+  const currentLink = join(deploymentRoot, CURRENT_LINK_NAME);
+  const tempLink = join(deploymentRoot, `.current-${releaseId}`);
+  const relativeTarget = relative(deploymentRoot, releaseDir);
+
+  await rm(tempLink, { force: true, recursive: true });
+  await symlink(relativeTarget, tempLink, "dir");
+  await rename(tempLink, currentLink);
+}
+
+async function getPathState(targetPath: string): Promise<"missing" | "directory" | "symlink"> {
+  try {
+    const targetStats = await lstat(targetPath);
+
+    if (targetStats.isSymbolicLink()) {
+      return "symlink";
+    }
+
+    if (targetStats.isDirectory()) {
+      return "directory";
+    }
+  } catch {
+    return "missing";
+  }
+
+  throw new Error(`Expected ${targetPath} to be a directory or symlink`);
+}
+
+async function listReleaseIds(releasesDir: string): Promise<string[]> {
+  const entries = await readdir(releasesDir, { withFileTypes: true }).catch(() => []);
+
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+}
+
+async function pruneOldReleases(releasesDir: string, activeReleaseId: string): Promise<string[]> {
+  const releaseIds = await listReleaseIds(releasesDir);
+  const retained = new Set<string>([activeReleaseId]);
+
+  for (const releaseId of releaseIds) {
+    if (retained.size >= RELEASES_TO_KEEP) {
+      break;
+    }
+
+    retained.add(releaseId);
+  }
 
   await Promise.all(
-    entries.map((entry) =>
-      rm(join(targetDir, entry.name), { recursive: true, force: true })
-    )
+    releaseIds
+      .filter((releaseId) => !retained.has(releaseId))
+      .map((releaseId) =>
+        rm(join(releasesDir, releaseId), { recursive: true, force: true })
+      )
   );
+
+  return [...retained].sort().reverse();
 }
 
 async function countFiles(targetDir: string): Promise<number> {

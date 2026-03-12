@@ -25,6 +25,10 @@ import {
   approvalRequest,
 } from "./tools/approval_request.js";
 import {
+  serviceControlDef,
+  serviceControl,
+} from "./tools/service_control.js";
+import {
   contextRefreshDef,
   contextRefresh,
 } from "./tools/context_refresh.js";
@@ -51,6 +55,7 @@ const tools = [
   handoffCreateDef,
   publicSitePublishDef,
   approvalRequestDef,
+  serviceControlDef,
   contextRefreshDef,
   messageSendDef,
   scheduleUpdateDef,
@@ -70,6 +75,7 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   handoff_create: handoffCreate,
   public_site_publish: publicSitePublish,
   approval_request: approvalRequest,
+  service_control: serviceControl,
   context_refresh: contextRefresh,
   message_send: messageSend,
   schedule_update: scheduleUpdate,
@@ -171,6 +177,30 @@ async function extractPolicyAction(
       type: "system.modify",
       taskId,
       desc: `Upsert agent: ${String(args?.name || args?.id || "unknown agent")}`,
+    };
+  }
+
+  if (name === "service_control") {
+    if (args?.action === "status") {
+      return null;
+    }
+
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    const services = [
+      ...(typeof args?.service === "string" ? [args.service] : []),
+      ...(Array.isArray(args?.services) ? args.services : []),
+    ]
+      .map((value) => String(value).trim())
+      .filter(Boolean);
+
+    return {
+      type: "service.manage",
+      taskId,
+      desc: `${String(args?.action || "control")} service${services.length > 1 ? "s" : ""}: ${services.join(", ") || "unspecified"}`,
     };
   }
 

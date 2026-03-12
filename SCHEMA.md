@@ -15,8 +15,8 @@ implement.
 
 ### roles
 
-The job description table. Defines what an agent can do, which model it uses, and what
-actions require human approval.
+The job description table. Defines what an agent can do, which base reasoning profile it
+uses, and what actions require human approval.
 
 | Column                  | Type     | Notes                                          |
 |-------------------------|----------|-------------------------------------------------|
@@ -26,8 +26,8 @@ actions require human approval.
 | policy_doc              | text     | Markdown. Responsibilities, boundaries, rules.  |
 | usage_summary           | text     | Short "use this role when..." summary.          |
 | handoff_when            | text     | Short handoff guidance for other agents.        |
-| model                   | text     | Claude Code model: `opus`, `sonnet`, `haiku`.   |
-| effort                  | text     | Claude Code effort: `low`, `medium`, `high`.    |
+| model                   | text     | Base profile slug. Stored today as `opus`, `sonnet`, or `haiku`; resolved to a concrete provider model at launch. |
+| effort                  | text     | Default reasoning effort: `low`, `medium`, `high`, `xhigh`. |
 | max_concurrent_tasks    | int      | Default 3. How many tasks this role can have in |
 |                         |          | `claimed` or `running` simultaneously.          |
 | requires_approval_for   | jsonb    | Array of action types needing human sign-off.   |
@@ -47,6 +47,13 @@ actions require human approval.
 | reviewer   | opus   | high   | true           |
 | architect  | opus   | high   | true           |
 | sentinel   | sonnet | high   | true           |
+
+The stored `model` values are compatibility slugs, not a promise that the active runtime
+provider is Anthropic. The supervisor interprets them as base profiles:
+
+- `haiku` = fast profile
+- `sonnet` = balanced profile
+- `opus` = frontier profile
 
 ### agents
 
@@ -68,8 +75,9 @@ One row per persistent identity. Sessions are disposable; the agent is not.
 `reviewer-1`, `architect-1`, `sentinel-1`.
 
 **Config overrides:** If `config` contains `{ "model": "sonnet" }`, the supervisor uses
-that instead of the role's default model. This lets the operator override per-agent via
-the admin panel without changing the role definition.
+that instead of the role's default base profile. The active runtime provider then maps
+that profile to the concrete CLI launch settings. This lets the operator override
+per-agent behavior via the admin panel without changing the role definition.
 
 ### projects
 
@@ -152,7 +160,7 @@ dead_letter      → ready (human override only)
 
 ### task_runs
 
-One row per Claude Code execution attempt. The audit trail.
+One row per native coding CLI execution attempt. The audit trail.
 
 | Column        | Type      | Notes                                            |
 |---------------|-----------|--------------------------------------------------|
@@ -161,11 +169,11 @@ One row per Claude Code execution attempt. The audit trail.
 | agent_id      | uuid FK→agents |                                             |
 | trace_id      | text UQ   | For end-to-end observability.                    |
 | status        | text      | `started`, `completed`, `failed`, `timeout`.     |
-| context_pack  | jsonb     | Snapshot of what was sent to Claude Code.         |
+| context_pack  | jsonb     | Snapshot of what was sent to the active coding CLI. |
 | outcome       | jsonb     | Structured result.                               |
 | handoff_note  | text      |                                                  |
-| model_used    | text      | Actual model (opus/sonnet/haiku).                |
-| effort_used   | text      | Actual effort (low/medium/high).                 |
+| model_used    | text      | Actual resolved provider model, for example `opus`, `sonnet`, `gpt-5.4`, or `gpt-5.3-codex`. |
+| effort_used   | text      | Actual launch reasoning effort.                  |
 | error_message | text      |                                                  |
 | started_at    | timestamptz |                                                |
 | finished_at   | timestamptz |                                                |
@@ -173,11 +181,12 @@ One row per Claude Code execution attempt. The audit trail.
 
 **Indexes:** task_id, agent_id, trace_id.
 
-**Note:** We deliberately do not store token counts or cost per run in this table. Claude
-Code via subscription does not expose per-request token usage the way the API does. If
-the operator adds an API key and uses API billing for some operations, those costs can be
-tracked. But the primary execution model (subscription CLI) has no per-run cost metric.
-The sentinel monitors overall spending patterns at the subscription level, not per-task.
+**Note:** We deliberately do not store token counts or cost per run in this table.
+Provider-native subscription CLIs do not expose a consistent per-request token ledger the
+way direct APIs do. If the operator adds Anthropic or OpenAI API keys and uses API
+billing for some operations, those costs can be tracked separately. But the primary
+execution model has no reliable per-run token metric. The sentinel monitors overall
+spending and rate-limit patterns at the provider level, not per task.
 
 ### events
 
@@ -404,6 +413,40 @@ panel shows this as a pending request. The operator pastes the key, the admin pa
 encrypts and stores it. The MCP server reads the decrypted key when the agent calls a
 tool that needs it.
 
+### system_settings
+
+Small key-value store for global runtime behavior that does not belong to any one task,
+agent, or role.
+
+| Column     | Type        | Notes                                         |
+|------------|-------------|-----------------------------------------------|
+| key        | text PK     | Setting name, for example `runtime_provider`. |
+| value      | jsonb       | Structured config payload.                    |
+| updated_at | timestamptz | Auto-updated when the setting changes.        |
+
+**Current critical key:** `runtime_provider`
+
+Example payload:
+
+```json
+{
+  "activeProvider": "anthropic",
+  "openaiModelMap": {
+    "haiku": "gpt-5.4",
+    "sonnet": "gpt-5.4",
+    "opus": "gpt-5.4"
+  },
+  "openaiRoleConfig": {
+    "relay": { "model": "gpt-5.4", "effort": "low" },
+    "sage": { "model": "gpt-5.4", "effort": "xhigh" },
+    "sentinel": { "model": "gpt-5.3-codex", "effort": "medium" }
+  }
+}
+```
+
+This is how the system switches between Claude Code and Codex CLI while keeping the role
+schema stable.
+
 ### messages
 
 Communication queue for human-to-system and system-to-human messages.
@@ -429,7 +472,7 @@ trigger relay invocations.
 ## Context Pack Assembly: `build_context_pack()`
 
 A Postgres function that assembles everything an agent needs to start work. Called by the
-supervisor before launching a Claude Code process.
+supervisor before launching a native coding CLI process.
 
 **Input:** `task_id` (uuid)
 
@@ -461,8 +504,9 @@ supervisor before launching a Claude Code process.
 }
 ```
 
-The function retrieves model and effort from the agent's `config` override if it exists,
-otherwise from the role's defaults.
+The function retrieves the role's base profile and default effort from the agent's
+`config` override if it exists, otherwise from the role's defaults. The supervisor then
+resolves those into the active provider's concrete launch settings.
 
 **The supervisor takes this JSON and generates runtime docs** such as
 `ROLE_POLICY.md`, `ROLE_DIRECTORY.md`, `AGENT_IDENTITY.md`, and `TASK_BRIEFING.md`.

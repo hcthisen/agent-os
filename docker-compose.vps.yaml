@@ -1,0 +1,40 @@
+services:
+  supervisor:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  mcp:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      admin:
+        condition: service_started
+      public:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ROOT_DOMAIN: ${ROOT_DOMAIN:?ROOT_DOMAIN is required}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CADDY_SITE_SNIPPETS_DIR:-./docker/caddy/sites}:/etc/caddy/sites
+      - ${CADDY_DATA_DIR:-./.tmp/caddy/data}:/data
+      - ${CADDY_CONFIG_DIR:-./.tmp/caddy/config}:/config
+    networks:
+      - agent-net
+
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 30
+      AUTOHEAL_START_PERIOD: 60
+      CURL_TIMEOUT: 10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

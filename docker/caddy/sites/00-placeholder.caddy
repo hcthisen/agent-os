@@ -1,0 +1,2 @@
+# Additional per-subdomain routes live in this directory.
+# Leave this file in place so the Caddy import glob always resolves.

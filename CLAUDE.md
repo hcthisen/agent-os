@@ -1,64 +1,106 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file documents the repository for Claude Code, Codex CLI, and compatible
+coding-agent runtimes. The filename remains `CLAUDE.md` for tool compatibility.
 
 ## What This Is
 
-A self-hosted, persistent AI employee system deployed on a single Hetzner VPS via Coolify. AI agents (running as native Claude Code CLI processes) claim tasks from a queue, execute work, write handoff notes, and pass work to each other. The system can self-evolve by creating new agent roles without redeployment.
+A self-hosted, persistent AI employee system deployed on a single VPS via Docker Compose
+and Caddy. AI agents run as native coding CLI processes, claim tasks from a queue,
+execute work, write handoff notes, and pass work to each other. The active runtime
+provider can be Claude Code or OpenAI Codex; the supervisor resolves each agent's launch
+settings for the selected provider.
 
 ## Repository Structure
 
-Monorepo with seven Coolify services:
+Monorepo with seven containerized services:
 
 | Directory | Service | Notes |
 |---|---|---|
 | `/supabase/` | Self-hosted Supabase | Postgres + Auth + Storage + Edge Functions. All durable state lives here. |
-| `/apps/supervisor/` | Supervisor daemon | Process manager for Claude Code CLI. Claims tasks, builds context packs, launches agents. |
-| `/apps/mcp/` | MCP server | 10-tool interface between agents and DB. Enforces scope/policy. Agents never access DB directly. |
-| `/apps/admin/` | Admin panel | React SPA, OAuth-gated. Chat, task dashboard, memory browser, cost monitoring, service connections. |
+| `/apps/supervisor/` | Supervisor daemon | Process manager for the active coding provider CLI. Claims tasks, builds context packs, launches agents. |
+| `/apps/mcp/` | MCP server | Managed tool interface between agents and DB/services. Enforces scope and policy. Agents never access DB directly. |
+| `/apps/admin/` | Admin panel | React SPA, auth-gated. Chat, task dashboard, runtime-provider controls, memory browser, cost and health views. |
 | `/apps/browser/` | Browser service | Headless Chromium via agent-browser. Auth flows, research, testing. |
-| `/sites/public/` | Public surface | Optional. Empty until operator instructs system to build something public. |
-| Edge Function | Telegram bot | Webhook mode, inserts into same message queue as admin chat. |
+| `/sites/public/` | Public surface | Optional. Empty until the operator instructs the system to build something public. |
+| Edge Function | Telegram bot | Webhook mode, inserts into the same message queue as admin chat. |
 
-## Six Foundational Agents
+## Runtime Providers and Role Defaults
 
-| Role | Model | Effort | Purpose |
-|---|---|---|---|
-| relay | Haiku | Medium | Classifies human messages, routes to correct agent. Speed-critical. |
-| sage | Opus | High | Strategic planning. Produces plan docs, never executes. |
-| builder | Opus | High | Executes tasks: code, content, integrations, agent configs. |
-| reviewer | Opus | High | Quality gate. Approves, requests revision, or escalates. |
-| architect | Opus | High | System evolution. Only agent that can approve system modifications. |
-| sentinel | Sonnet | High | Monitors queue health, cost, auth, services. Runs every 30 min. |
+The supervisor can launch either:
 
-New agents are created as data (rows in `roles`/`agents` tables + `AGENTS_INSCTRUCTIONS.md`
-sections + RLS policies), not new code. Same `claude` binary, different context.
+- `claude` using the operator's Claude Code subscription login
+- `codex` using the operator's ChatGPT/Codex CLI login
+
+The `roles.model` column still stores compatibility slugs today: `haiku`, `sonnet`,
+and `opus`. In practice those mean base reasoning profiles:
+
+- `haiku` = fast profile
+- `sonnet` = balanced profile
+- `opus` = frontier profile
+
+At launch time the supervisor maps that base profile to the concrete provider model and
+reasoning effort. Current defaults are:
+
+| Role | Base profile | Default effort | Example Claude launch | Example Codex launch | Purpose |
+|---|---|---|---|---|---|
+| relay | Fast (`haiku`) | medium | `haiku` + `medium` | `gpt-5.4` + `low` | Classifies human messages and routes work quickly. |
+| sage | Frontier (`opus`) | high | `opus` + `high` | `gpt-5.4` + `xhigh` | Strategic planning and decomposition. |
+| builder | Frontier (`opus`) | high | `opus` + `high` | `gpt-5.4` + `high` | Executes code, content, and integration work. |
+| reviewer | Frontier (`opus`) | high | `opus` + `high` | `gpt-5.4` + `high` | Quality gate for completed work. |
+| architect | Frontier (`opus`) | high | `opus` + `high` | `gpt-5.4` + `high` | Governs system changes and evolution. |
+| sentinel | Balanced (`sonnet`) | high | `sonnet` + `high` | `gpt-5.3-codex` + `medium` | Periodic watchdog for queue, auth, and service health. |
+
+New agents are created as data in the `roles` and `agents` tables plus Supabase-backed
+policy documents and permissions. They are not new binaries or new services.
 
 ## Key Architecture Decisions
 
-- **Native CLI only**: All inference via `claude` CLI binary. No token extraction, no API proxying. ToS requirement.
-- **`--dangerously-skip-permissions`**: Mandatory for headless operation. Safe because agents run inside Docker containers with scoped volume mounts.
-- **No token budgets**: Agents run to completion. Sentinel monitors spending patterns, operator sets expectations.
-- **Task state machine enforced by DB trigger**: Not application code. Invalid transitions are rejected at the Postgres level.
-- **Handoff notes mandatory**: DB trigger rejects state transitions from `running`/`blocked`/`failed` without a `last_handoff_note`.
-- **Structured data first, vectors second**: Tables are truth. Vector search (pgvector + RRF hybrid search) is a recall aid built on top.
-- **Self-hosted Supabase**: Included in monorepo. Migrations create schema and seed foundational roles on first boot.
+- **Native provider CLI only**: all core inference runs through the selected vendor CLI
+  (`claude` or `codex`), not through extracted session tokens.
+- **No session/token extraction**: auth lives in provider-owned config directories such
+  as `~/.claude` or `~/.codex`; the system never reads those secrets for API calls.
+- **Headless bypass mode is required**: the supervisor uses the provider's autonomous
+  execution mode so agents can run unattended inside Docker.
+- **No token budgets**: agents run to completion; the sentinel monitors overall cost and
+  rate-limit pressure instead of killing work mid-task.
+- **Task state machine enforced by DB trigger**: invalid transitions are rejected at the
+  Postgres level.
+- **Handoff notes are mandatory**: runs leaving `running`, blocked, or failed states must
+  leave a structured handoff.
+- **Structured data first, vectors second**: tables are truth; vector search is a recall
+  aid.
+- **Self-hosted Supabase**: included in the monorepo and bootstrapped on first deploy.
+- **Managed VPS deployment**: the stack runs on a VPS through Docker Compose + Caddy.
+- **MCP-driven service control**: agents should use `service_control` for supported VPS
+  service status, restart, and reload operations.
 
 ## Database Schema
 
-Defined in `SCHEMA.md`. Key tables: `roles`, `agents`, `projects`, `tasks` (strict state machine), `task_runs`, `events` (append-only), `memories`, `memory_chunks` (derived vector index), `approvals`, `artifacts`, `handoffs`, `schedules`, `service_registry`, `messages`.
+Defined in `SCHEMA.md`. Key tables: `roles`, `agents`, `projects`, `tasks` (strict state
+machine), `task_runs`, `events` (append-only), `memories`, `memory_chunks` (derived
+vector index), `approvals`, `artifacts`, `handoffs`, `schedules`, `service_registry`,
+`messages`, and `system_settings`.
 
 Required Postgres extensions: `pgcrypto`, `vector` (pgvector), `pg_trgm`.
 
-The `build_context_pack()` function assembles everything an agent needs before launch (task, project, role policy, last handoff, memories scoped by chain: task > project > role > company).
+The `build_context_pack()` function assembles everything an agent needs before launch:
+task, project, role policy, agent identity, available roles, last handoff, scoped
+memories, recent events, artifacts, and the role's base profile/effort.
 
-## MCP Tools (10 total)
+## MCP Tools
 
-`task_claim`, `task_update`, `task_create`, `memory_search`, `memory_write`, `event_log`, `artifact_put`, `handoff_create`, `approval_request`, `context_refresh`
+Current tool surface:
+
+`task_claim`, `task_update`, `task_create`, `memory_search`, `memory_write`,
+`event_log`, `artifact_put`, `handoff_create`, `public_site_publish`,
+`approval_request`, `service_control`, `context_refresh`, `message_send`,
+`schedule_update`, `schedule_create`, `role_upsert`, `agent_upsert`
 
 ## Protected Infrastructure
 
-Do NOT modify without explicit architect approval:
+Do not modify without explicit architect approval:
+
 - `/apps/supervisor/`, `/apps/mcp/`, `/apps/admin/`, `/apps/browser/`
 - `/supabase/` (migrations and config)
 - `AGENTS.md`, `AGENTS_INSCTRUCTIONS.md`, `docker-compose*.yaml`, `Dockerfile*`,
@@ -67,15 +109,31 @@ Do NOT modify without explicit architect approval:
 ## Git Conventions
 
 - **Branch naming**: `agent/{role_id}/{task_id_short}`
-- **Commit messages**: Prefix with task ID: `[a1b2c3] Add Stripe webhook handler`
-- **Never commit to `main` directly**. Push to branch; deployment pipeline handles the rest.
+- **Commit messages**: prefix with task ID, for example `[a1b2c3] Add Stripe webhook handler`
+- **Never commit to `main` directly**. Use a branch for traceability. If deployment is
+  in scope, deploy the managed VPS stack separately.
 - Commit frequently in small logical units.
 
-## Environment Variables (set in Coolify)
+## Environment Variables
 
-Coolify domains are configured in the platform's Domains UI per service, not through env vars. `TELEGRAM_BOT_TOKEN` is optional. `ADMIN_USER` and `ADMIN_PASS` are also optional: if unset, they are generated on first boot by the `init` service (`scripts/init-secrets.mjs`) and stored in the `config` Docker volume at `/config/.env.generated`; if set in Coolify, they override the generated values at runtime. The remaining bootstrap secrets (`POSTGRES_PASSWORD`, `JWT_SECRET`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`) are auto-generated on first boot and stored in the same volume. Services source generated config via `scripts/entrypoint.sh`. Agent auth is managed through admin panel (Claude Code's own session). External API keys stored encrypted in `service_registry` table.
+Direct VPS deployments use `.env.vps` plus `docker-compose.vps.yaml`. `ROOT_DOMAIN`,
+`ADMIN_PUBLIC_URL`, and `PUBLIC_SITE_URL` define public routing. `TELEGRAM_BOT_TOKEN`
+is optional. `ADMIN_USER` and `ADMIN_PASS` are optional overrides: if unset, they are
+generated on first boot by the `init` service (`scripts/init-secrets.mjs`) and stored
+in the `config` Docker volume at `/config/.env.generated`.
 
-**Docker Compose file**: `docker-compose.yaml` (not `.yml` - Coolify convention).
+The remaining bootstrap secrets (`POSTGRES_PASSWORD`, `JWT_SECRET`,
+`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`) are auto-generated on first boot and stored
+in the same volume. Services source generated config via `scripts/entrypoint.sh`.
+
+Agent auth is managed through the admin panel for the active provider:
+
+- Claude provider: `claude login`
+- Codex provider: `codex login --device-auth` or equivalent persisted Codex login
+
+External API keys are stored encrypted in `service_registry`.
+
+**Compose files**: `docker-compose.yaml` plus `docker-compose.vps.yaml`.
 
 ## Task State Machine
 
@@ -90,17 +148,18 @@ completed -> (terminal)
 
 ## Build Plan
 
-**PLAN.md is the persistent execution tracker for this project.** Before starting any work:
+**PLAN.md is the persistent execution tracker for this project.** Before starting work:
+
 1. Read `PLAN.md` to find the current phase and next unchecked task.
-2. Execute that task (and any parallel-safe tasks in the same phase).
-3. After completing a task, update `PLAN.md` by checking off the box (`- [ ]` -> `- [x]`).
-4. Do not skip ahead to a later phase while the current phase has unchecked tasks, unless the dependency graph explicitly allows parallelism.
-5. When resuming work in a new session, always re-read `PLAN.md` first to pick up where the last session left off.
+2. Execute that task, plus any parallel-safe tasks in the same phase.
+3. After completing a task, update `PLAN.md` by checking the box.
+4. Do not skip ahead while the current phase still has unresolved dependencies.
+5. When resuming a session, re-read `PLAN.md` first.
 
 ## Detailed Documentation
 
-- `AGENTS.md` - Runtime bootstrap file copied into each agent workspace
-- `AGENTS_INSCTRUCTIONS.md` - Agent behavioral instructions, role-specific workflows, rules, and the non-negotiable checklist
-- `ARCHITECTURE.md` - Full system architecture, execution model, component details, memory system, security model, deployment
-- `DECISIONS.md` - All architectural decisions with rationale and rejected alternatives (D-001 through D-023)
+- `AGENTS.md` - Repository guidelines for Codex and human contributors
+- `AGENTS_INSCTRUCTIONS.md` - Foundational agent rules, collaboration model, and the non-negotiable checklist
+- `ARCHITECTURE.md` - Full system architecture, runtime-provider model, component details, memory system, security model, deployment
+- `DECISIONS.md` - Architectural decisions with rationale and rejected alternatives
 - `SCHEMA.md` - Complete data model, table definitions, indexes, RLS policies, hybrid search function, async processing

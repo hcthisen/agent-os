@@ -43,4 +43,4 @@ Git history uses short, imperative subjects such as `Initial monorepo scaffold a
 PRs should include a brief summary, impacted workspaces, setup or env changes, and verification steps. Link the related issue when available, and attach screenshots for visible UI changes.
 
 ## Security & Configuration Tips
-Do not commit `.env` files, service tokens, or Supabase credentials. Start from `.env.example`, document any new variables there, and keep deployment-specific values in the hosting platform rather than hardcoding them in source.
+Do not commit `.env` files, service tokens, or Supabase credentials. Start from `.env.example`, document any new variables there, and keep deployment-specific values in host-provided env files or runtime config on the VPS rather than hardcoding them in source.

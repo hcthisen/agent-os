@@ -1,5 +1,9 @@
 FROM node:20-bookworm-slim
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates docker.io && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package.json package-lock.json* tsconfig.json ./
