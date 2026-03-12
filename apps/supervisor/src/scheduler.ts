@@ -1,4 +1,5 @@
 import { getDb } from "./db.js";
+import cronParser from "cron-parser";
 
 /**
  * Check schedules and create tasks for any that have fired.
@@ -96,21 +97,13 @@ export async function reconcileLegacySchedules(): Promise<void> {
  * For production, use a proper cron library.
  */
 export function calculateNextRun(cronExpr: string): string {
-  // Parse cron expression
-  const parts = cronExpr.trim().split(/\s+/);
-  if (parts.length !== 5) {
-    // Fallback: 5 minutes from now
+  try {
+    return cronParser
+      .parseExpression(cronExpr.trim(), { currentDate: new Date() })
+      .next()
+      .toDate()
+      .toISOString();
+  } catch {
     return new Date(Date.now() + 5 * 60 * 1000).toISOString();
   }
-
-  const [minPart] = parts;
-
-  // Handle */N pattern for minutes
-  if (minPart.startsWith("*/")) {
-    const interval = parseInt(minPart.slice(2), 10);
-    return new Date(Date.now() + interval * 60 * 1000).toISOString();
-  }
-
-  // Default: 1 hour from now (safe fallback for complex crons)
-  return new Date(Date.now() + 60 * 60 * 1000).toISOString();
 }

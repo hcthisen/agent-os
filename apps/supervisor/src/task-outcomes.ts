@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
-import { sendOperatorMessage } from "./operator-delivery.js";
+import { queueOperatorRelayMessage } from "./operator-delivery.js";
 
 interface CompletedTask {
   assigned_role: string;
@@ -232,7 +232,7 @@ async function sendOperatorCompletion(
   content: string
 ): Promise<void> {
   const db = getDb();
-  const delivery = await sendOperatorMessage({
+  const delivery = await queueOperatorRelayMessage({
     content,
     metadata: {
       notification_key: notificationKey,
@@ -242,7 +242,7 @@ async function sendOperatorCompletion(
     taskId,
   });
 
-  if (!delivery.sent) {
+  if (!delivery.queued) {
     return;
   }
 
@@ -255,6 +255,7 @@ async function sendOperatorCompletion(
     scope_id: taskId,
     summary: content.slice(0, 500),
     detail: {
+      delivery: "relay_queue",
       notification_key: notificationKey,
       notification_type: "task_completion",
     },

@@ -28,6 +28,14 @@ COPY apps/supervisor/ apps/supervisor/
 
 RUN npm run build -w packages/shared && npm run build -w apps/mcp && npm run build -w apps/supervisor
 
+COPY apps/ apps/
+COPY docker/ docker/
+COPY packages/ packages/
+COPY scripts/ scripts/
+COPY sites/ sites/
+COPY supabase/ supabase/
+COPY .dockerignore .env.example .gitattributes .gitignore AGENTS.md ARCHITECTURE.md CLAUDE.md DECISIONS.md PLAN.md SCHEMA.md docker-compose.vps.yaml docker-compose.yaml ./
+
 COPY --chmod=755 scripts/entrypoint.sh /scripts/entrypoint.sh
 
 # Copy durable foundational agent instructions

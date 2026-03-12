@@ -84,6 +84,8 @@ export interface Task {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  last_activity_at?: string | null;
+  last_activity_summary?: string | null;
   updated_at: string;
 }
 

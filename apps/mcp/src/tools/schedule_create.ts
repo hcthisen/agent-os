@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import cronParser from "cron-parser";
 
 export const scheduleCreateDef = {
   name: "schedule_create",
@@ -95,19 +96,13 @@ export async function scheduleCreate(args: {
 }
 
 function calculateNextRun(cronExpr: string): string {
-  const parts = cronExpr.trim().split(/\s+/);
-  if (parts.length !== 5) {
+  try {
+    return cronParser
+      .parseExpression(cronExpr.trim(), { currentDate: new Date() })
+      .next()
+      .toDate()
+      .toISOString();
+  } catch {
     return new Date(Date.now() + 5 * 60 * 1000).toISOString();
   }
-
-  const [minPart] = parts;
-
-  if (minPart.startsWith("*/")) {
-    const interval = parseInt(minPart.slice(2), 10);
-    if (!Number.isNaN(interval) && interval > 0) {
-      return new Date(Date.now() + interval * 60 * 1000).toISOString();
-    }
-  }
-
-  return new Date(Date.now() + 60 * 60 * 1000).toISOString();
 }

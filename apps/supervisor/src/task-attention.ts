@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
-import { sendOperatorMessage } from "./operator-delivery.js";
+import { queueOperatorRelayMessage } from "./operator-delivery.js";
 
 type AttentionState =
   | "blocked_on_agent"
@@ -8,6 +8,7 @@ type AttentionState =
   | "claimed"
   | "dead_letter"
   | "failed"
+  | "in_review"
   | "ready"
   | "running";
 
@@ -33,6 +34,11 @@ interface OperatorRootTask {
   title: string;
 }
 
+interface TaskActivity {
+  created_at: string | null;
+  summary: string | null;
+}
+
 const ATTENTION_STATES: AttentionState[] = [
   "ready",
   "claimed",
@@ -41,6 +47,7 @@ const ATTENTION_STATES: AttentionState[] = [
   "blocked_on_human",
   "failed",
   "dead_letter",
+  "in_review",
 ];
 
 export async function monitorTaskAttention(): Promise<void> {
@@ -57,8 +64,12 @@ export async function monitorTaskAttention(): Promise<void> {
     return;
   }
 
-  for (const task of (tasks || []) as AttentionTask[]) {
-    const notificationKey = getNotificationKey(task);
+  const taskList = (tasks || []) as AttentionTask[];
+  const activityMap = await loadLatestTaskActivity(taskList.map((task) => task.id));
+
+  for (const task of taskList) {
+    const activity = activityMap.get(task.id) || null;
+    const notificationKey = getNotificationKey(task, activity);
     if (!notificationKey) {
       continue;
     }
@@ -73,12 +84,15 @@ export async function monitorTaskAttention(): Promise<void> {
       continue;
     }
 
-    const content = formatAttentionMessage(task, rootTask);
+    const content = formatAttentionMessage(task, rootTask, activity);
     await sendOperatorNotification(task, notificationKey, content);
   }
 }
 
-function getNotificationKey(task: AttentionTask): string | null {
+function getNotificationKey(
+  task: AttentionTask,
+  activity: TaskActivity | null
+): string | null {
   if (
     task.state === "ready" &&
     task.last_handoff_note?.startsWith("Supervisor could not start this task")
@@ -95,7 +109,8 @@ function getNotificationKey(task: AttentionTask): string | null {
     return `state:${task.state}:${task.updated_at}`;
   }
 
-  const ageMs = Date.now() - new Date(task.updated_at || task.created_at).getTime();
+  const referenceTimestamp = resolveTaskActivityTimestamp(task, activity);
+  const ageMs = Date.now() - new Date(referenceTimestamp).getTime();
 
   if (task.state === "ready" && ageMs >= config.readyTaskAlertMs) {
     return `stale:ready:${task.updated_at}`;
@@ -106,7 +121,11 @@ function getNotificationKey(task: AttentionTask): string | null {
   }
 
   if (task.state === "running" && ageMs >= config.runningTaskAlertMs) {
-    return `stale:running:${task.updated_at}`;
+    return `stale:running:${referenceTimestamp}`;
+  }
+
+  if (task.state === "in_review" && ageMs >= config.runningTaskAlertMs) {
+    return `stale:in_review:${referenceTimestamp}`;
   }
 
   return null;
@@ -203,9 +222,65 @@ async function notificationAlreadySent(
   return Boolean(count && count > 0);
 }
 
+async function loadLatestTaskActivity(
+  taskIds: string[]
+): Promise<Map<string, TaskActivity>> {
+  const db = getDb();
+  const taskIdSet = new Set(taskIds);
+  const activityMap = new Map<string, TaskActivity>();
+
+  if (!taskIds.length) {
+    return activityMap;
+  }
+
+  const { data, error } = await db
+    .from("events")
+    .select("scope_id,summary,created_at")
+    .eq("scope_type", "task")
+    .in("event_type", ["task.heartbeat", "task.started"])
+    .order("created_at", { ascending: false })
+    .limit(Math.max(500, taskIds.length * 4));
+
+  if (error) {
+    console.error("Failed to load latest task activity:", error);
+    return activityMap;
+  }
+
+  for (const row of data || []) {
+    const scopeId =
+      row && typeof row.scope_id === "string" ? row.scope_id : null;
+    if (!scopeId || !taskIdSet.has(scopeId) || activityMap.has(scopeId)) {
+      continue;
+    }
+
+    activityMap.set(scopeId, {
+      created_at:
+        typeof row.created_at === "string" ? row.created_at : null,
+      summary: typeof row.summary === "string" ? row.summary : null,
+    });
+  }
+
+  return activityMap;
+}
+
+function resolveTaskActivityTimestamp(
+  task: AttentionTask,
+  activity: TaskActivity | null
+): string {
+  if (
+    (task.state === "running" || task.state === "in_review") &&
+    activity?.created_at
+  ) {
+    return activity.created_at;
+  }
+
+  return task.updated_at || task.created_at;
+}
+
 function formatAttentionMessage(
   task: AttentionTask,
-  rootTask: OperatorRootTask | null
+  rootTask: OperatorRootTask | null,
+  activity: TaskActivity | null
 ): string {
   const role = task.assigned_role;
   const shortId = task.id.slice(0, 8);
@@ -228,8 +303,14 @@ function formatAttentionMessage(
 
   const waitedMinutes = Math.max(
     1,
-    Math.round((Date.now() - new Date(task.updated_at || task.created_at).getTime()) / 60000)
+    Math.round(
+      (Date.now() - new Date(resolveTaskActivityTimestamp(task, activity)).getTime()) /
+        60000
+    )
   );
+  const activitySuffix = activity?.summary
+    ? ` Last activity: ${activity.summary}`
+    : "";
 
   if (task.state === "ready") {
     return `Task attention: ${role} task "${task.title}" (${shortId}) has been queued in ready for about ${waitedMinutes} minutes without starting.${rootSuffix} Latest note: ${task.last_handoff_note || "No launch note recorded."}`;
@@ -239,7 +320,11 @@ function formatAttentionMessage(
     return `Task attention: ${role} task "${task.title}" (${shortId}) has been stuck in claimed for about ${waitedMinutes} minutes.${rootSuffix} Latest note: ${task.last_handoff_note || "No claim note recorded."}`;
   }
 
-  return `Task attention: ${role} task "${task.title}" (${shortId}) has been running for about ${waitedMinutes} minutes without a terminal update.${rootSuffix} Latest note: ${task.last_handoff_note || "No handoff note recorded."}`;
+  if (task.state === "in_review") {
+    return `Task attention: ${role} task "${task.title}" (${shortId}) has been waiting in review for about ${waitedMinutes} minutes without agent activity.${rootSuffix}${activitySuffix} Latest note: ${task.last_handoff_note || "No review note recorded."}`;
+  }
+
+  return `Task attention: ${role} task "${task.title}" (${shortId}) has been running for about ${waitedMinutes} minutes without agent activity.${rootSuffix}${activitySuffix} Latest note: ${task.last_handoff_note || "No handoff note recorded."}`;
 }
 
 async function sendOperatorNotification(
@@ -248,10 +333,11 @@ async function sendOperatorNotification(
   content: string
 ): Promise<void> {
   const db = getDb();
-  const delivery = await sendOperatorMessage({
+  const delivery = await queueOperatorRelayMessage({
     content,
     metadata: {
       notification_key: notificationKey,
+      notification_type: "task_attention",
       task_state: task.state,
       task_title: task.title,
     },
@@ -259,7 +345,7 @@ async function sendOperatorNotification(
     taskId: task.id,
   });
 
-  if (!delivery.sent) {
+  if (!delivery.queued) {
     return;
   }
 
@@ -275,6 +361,7 @@ async function sendOperatorNotification(
     scope_id: task.id,
     summary: content.slice(0, 500),
     detail: {
+      delivery: "relay_queue",
       notification_key: notificationKey,
       task_state: task.state,
     },

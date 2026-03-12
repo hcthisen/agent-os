@@ -60,6 +60,7 @@ const DEFAULT_OPENAI_ROLE_CONFIG = {
   sage: { effort: "xhigh", model: "gpt-5.4" },
   sentinel: { effort: "medium", model: "gpt-5.3-codex" },
 };
+const RELAY_HISTORY_LIMIT = 15;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -420,7 +421,7 @@ async function getSupervisorRuntimeProvider() {
 
 async function createRelayTaskForInboundMessage(message) {
   const title = `Process message: ${message.content.slice(0, 50)}...`;
-  const objective = `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.\n\nMessage: ${message.content}`;
+  const objective = await buildRelayObjective(message);
 
   const rows = await postgrest("/tasks", {
     body: {
@@ -440,6 +441,75 @@ async function createRelayTaskForInboundMessage(message) {
   });
 
   return rows?.[0] || null;
+}
+
+async function buildRelayObjective(message) {
+  const history = await loadRecentConversationMessages(message);
+  const transcript = [...history, {
+    content: message.content,
+    created_at: new Date().toISOString(),
+    direction: "inbound",
+    sender: message.sender,
+  }]
+    .map(formatConversationMessage)
+    .join("\n");
+
+  return `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
+
+Current message:
+${message.content}
+
+Recent conversation transcript:
+${transcript}`;
+}
+
+function formatConversationMessage(message) {
+  const timestamp = message.created_at
+    ? new Date(message.created_at).toISOString()
+    : "current";
+  return `[${timestamp}] ${message.direction}/${message.sender}: ${message.content}`;
+}
+
+function shouldHideAdminMessage(message) {
+  return (
+    message?.sender === "system" ||
+    message?.metadata?.hidden_from_operator === true ||
+    message?.metadata?.operator_visible === false
+  );
+}
+
+async function loadRecentConversationMessages(message) {
+  const query = {
+    channel: `eq.${message.channel}`,
+    limit: String(RELAY_HISTORY_LIMIT),
+    order: "created_at.desc",
+    select: "id,direction,sender,content,created_at,metadata",
+  };
+  const chatId =
+    message.channel === "telegram" &&
+    (typeof message.chatId === "string" || typeof message.chatId === "number")
+      ? message.chatId
+      : null;
+
+  if (message.currentMessageId) {
+    query.id = `neq.${message.currentMessageId}`;
+  }
+
+  if (chatId !== null) {
+    query.metadata = `cs.${JSON.stringify({ chat_id: chatId })}`;
+  }
+
+  try {
+    const rows = await postgrest("/messages", { query });
+    return Array.isArray(rows)
+      ? [...rows]
+          .filter((row) => !shouldHideAdminMessage(row))
+          .reverse()
+      : [];
+  } catch (error) {
+    console.error("[admin] Failed to load recent relay conversation history:", error);
+    return [];
+  }
 }
 
 async function callSupervisor(path, options = {}) {
@@ -463,6 +533,43 @@ async function callSupervisor(path, options = {}) {
   }
 
   return payload;
+}
+
+async function loadLatestTaskActivityMap(taskIds) {
+  const taskIdSet = new Set(
+    (Array.isArray(taskIds) ? taskIds : []).filter((taskId) => typeof taskId === "string")
+  );
+  const activityMap = new Map();
+
+  if (!taskIdSet.size) {
+    return activityMap;
+  }
+
+  const rows = await postgrest("/events", {
+    query: {
+      event_type: "in.(task.heartbeat,task.started)",
+      limit: String(Math.max(500, taskIdSet.size * 4)),
+      order: "created_at.desc",
+      scope_type: "eq.task",
+      select: "scope_id,summary,created_at",
+    },
+  }).catch(() => []);
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const taskId = typeof row?.scope_id === "string" ? row.scope_id : null;
+    if (!taskId || !taskIdSet.has(taskId) || activityMap.has(taskId)) {
+      continue;
+    }
+
+    activityMap.set(taskId, {
+      last_activity_at:
+        typeof row?.created_at === "string" ? row.created_at : null,
+      last_activity_summary:
+        typeof row?.summary === "string" ? row.summary : null,
+    });
+  }
+
+  return activityMap;
 }
 
 async function callTelegramApi(method, body) {
@@ -561,6 +668,7 @@ async function handleTelegramWebhook(req, res) {
   try {
     relayTask = await createRelayTaskForInboundMessage({
       channel: "telegram",
+      chatId,
       content,
       sender,
     });
@@ -670,7 +778,11 @@ async function handleApi(req, res, url) {
         select: "id,direction,sender,content,created_at,task_id,metadata",
       },
     });
-    sendJson(res, 200, data || []);
+    const visibleData =
+      channel === "admin_chat" && Array.isArray(data)
+        ? data.filter((message) => !shouldHideAdminMessage(message))
+        : data || [];
+    sendJson(res, 200, visibleData);
     return;
   }
 
@@ -749,7 +861,19 @@ async function handleApi(req, res, url) {
           "id,title,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id",
       },
     });
-    sendJson(res, 200, data || []);
+    const activityMap = await loadLatestTaskActivityMap(
+      Array.isArray(data) ? data.map((task) => task.id) : []
+    );
+    const tasksWithActivity = Array.isArray(data)
+      ? data.map((task) => ({
+          ...task,
+          ...(activityMap.get(task.id) || {
+            last_activity_at: null,
+            last_activity_summary: null,
+          }),
+        }))
+      : [];
+    sendJson(res, 200, tasksWithActivity);
     return;
   }
 

@@ -11,6 +11,8 @@ interface Task {
   attempt_count: number;
   blocked_reason: string | null;
   last_handoff_note: string | null;
+  last_activity_at?: string | null;
+  last_activity_summary?: string | null;
   created_at: string;
   updated_at: string;
   parent_task_id: string | null;
@@ -171,6 +173,12 @@ export function TasksPage() {
                 <p><strong>Priority:</strong> {t.priority}</p>
                 <p><strong>Attempts:</strong> {t.attempt_count}</p>
                 <p><strong>Updated:</strong> {new Date(t.updated_at).toLocaleString()}</p>
+                {t.last_activity_at && (
+                  <p><strong>Last Activity:</strong> {new Date(t.last_activity_at).toLocaleString()}</p>
+                )}
+                {t.last_activity_summary && (
+                  <p style={{ marginTop: 6 }}><strong>Activity:</strong> {t.last_activity_summary}</p>
+                )}
                 {t.blocked_reason && <p style={{ marginTop: 6 }}><strong>Blocked:</strong> {t.blocked_reason}</p>}
                 {t.last_handoff_note && <p style={{ marginTop: 6 }}><strong>Handoff:</strong> {t.last_handoff_note}</p>}
                 {t.state === "dead_letter" && (

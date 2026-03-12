@@ -3,12 +3,15 @@ import { randomUUID } from "node:crypto";
 import {
   access,
   chown,
+  cp,
   copyFile,
+  lstat,
   mkdir,
+  readdir,
   readFile,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getDb } from "./db.js";
 import { config } from "./config.js";
 import {
@@ -18,10 +21,17 @@ import {
 } from "./runtime-provider.js";
 
 interface ActiveProcess {
+  heartbeatInFlight: Promise<void> | null;
+  inactivityCheck: ReturnType<typeof setInterval> | null;
+  lastActivityAt: Date;
+  lastActivitySummary: string | null;
+  lastHeartbeatAt: Date | null;
   proc: ChildProcess;
   provider: RuntimeProvider;
   responsePath: string | null;
+  roleId: string;
   taskId: string;
+  terminationReason: "inactivity_timeout" | null;
   agentId: string;
   runId: string;
   traceId: string;
@@ -30,6 +40,40 @@ interface ActiveProcess {
 }
 
 const activeProcesses = new Map<string, ActiveProcess>();
+const WORKSPACE_TEMPLATE_ENTRIES = [
+  ".dockerignore",
+  ".env.example",
+  ".gitattributes",
+  ".gitignore",
+  "AGENTS.md",
+  "AGENTS_INSCTRUCTIONS.md",
+  "ARCHITECTURE.md",
+  "CLAUDE.md",
+  "DECISIONS.md",
+  "PLAN.md",
+  "SCHEMA.md",
+  "apps",
+  "docker",
+  "docker-compose.vps.yaml",
+  "docker-compose.yaml",
+  "package-lock.json",
+  "package.json",
+  "packages",
+  "scripts",
+  "sites",
+  "supabase",
+  "tsconfig.json",
+] as const;
+const WORKSPACE_EXCLUDED_NAMES = new Set([
+  ".git",
+  ".next",
+  ".provider-home",
+  ".tmp",
+  "dist",
+  "node_modules",
+  "public-live",
+  "workspaces",
+]);
 
 export function getActiveCount(): number {
   return activeProcesses.size;
@@ -81,9 +125,10 @@ export async function launchAgent(
   // Prepare working directory
   const workDir = join(config.workspacesDir, taskId);
   await mkdir(workDir, { recursive: true });
-  await chown(workDir, config.agentRunAsUid, config.agentRunAsGid);
+  await seedWorkspaceFromTemplate(workDir);
 
   await writeRuntimeDocs(workDir, contextPack, agentName, roleId, activeProvider);
+  await setOwnershipRecursive(workDir, config.agentRunAsUid, config.agentRunAsGid);
 
   // Build the prompt
   const prompt = buildPrompt(agentName, roleId, contextPack, activeProvider);
@@ -167,10 +212,17 @@ export async function launchAgent(
   );
 
   const active: ActiveProcess = {
+    heartbeatInFlight: null,
+    inactivityCheck: null,
+    lastActivityAt: new Date(),
+    lastActivitySummary: "Agent process launched.",
+    lastHeartbeatAt: null,
     proc,
     provider: activeProvider,
     responsePath,
+    roleId,
     taskId,
+    terminationReason: null,
     agentId,
     runId,
     traceId,
@@ -182,11 +234,15 @@ export async function launchAgent(
 
   // Collect stdout
   proc.stdout?.on("data", (chunk: Buffer) => {
-    active.output += chunk.toString();
+    const text = chunk.toString();
+    active.output += text;
+    void recordProcessActivity(runId, "stdout", text);
   });
 
   proc.stderr?.on("data", (chunk: Buffer) => {
-    active.output += chunk.toString();
+    const text = chunk.toString();
+    active.output += text;
+    void recordProcessActivity(runId, "stderr", text);
   });
 
   // Handle exit
@@ -196,16 +252,30 @@ export async function launchAgent(
     );
   });
 
-  // Timeout
-  setTimeout(() => {
-    if (activeProcesses.has(runId)) {
-      console.warn(`Process ${runId} timed out, killing`);
-      proc.kill("SIGTERM");
-      setTimeout(() => {
-        if (activeProcesses.has(runId)) proc.kill("SIGKILL");
-      }, 10000);
+  active.inactivityCheck = setInterval(() => {
+    const current = activeProcesses.get(runId);
+    if (!current) {
+      clearInterval(active.inactivityCheck!);
+      return;
     }
-  }, config.processTimeoutMs);
+
+    const inactivityMs = Date.now() - current.lastActivityAt.getTime();
+    if (inactivityMs < config.processInactivityTimeoutMs) {
+      return;
+    }
+
+    current.terminationReason = "inactivity_timeout";
+    clearInterval(current.inactivityCheck!);
+    current.inactivityCheck = null;
+    console.warn(
+      `Process ${runId} inactive for ${inactivityMs}ms, killing task ${current.taskId}`
+    );
+    void logInactivityTimeout(current, inactivityMs);
+    proc.kill("SIGTERM");
+    setTimeout(() => {
+      if (activeProcesses.has(runId)) proc.kill("SIGKILL");
+    }, 10000);
+  }, config.processInactivityCheckMs);
 
   return runId;
 }
@@ -218,6 +288,9 @@ async function handleProcessExit(
   const active = activeProcesses.get(runId);
   if (!active) return;
 
+  if (active.inactivityCheck) {
+    clearInterval(active.inactivityCheck);
+  }
   activeProcesses.delete(runId);
   const db = getDb();
   const success = code === 0;
@@ -230,6 +303,7 @@ async function handleProcessExit(
     try {
       const finalMessage = await readFile(active.responsePath, "utf8");
       if (finalMessage.trim()) {
+        handoffNote = finalMessage.trim();
         outcome = { final_message: finalMessage.trim() };
       }
     } catch {
@@ -246,6 +320,12 @@ async function handleProcessExit(
           const parsed = JSON.parse(lines[i]);
           if (parsed.result || parsed.type || parsed.final_message) {
             outcome = parsed;
+            if (
+              typeof parsed.final_message === "string" &&
+              parsed.final_message.trim()
+            ) {
+              handoffNote = parsed.final_message.trim();
+            }
             break;
           }
         } catch {
@@ -261,10 +341,19 @@ async function handleProcessExit(
   await db
     .from("task_runs")
     .update({
-      status: success ? "completed" : signal === "SIGTERM" ? "timeout" : "failed",
+      status:
+        success
+          ? "completed"
+          : active.terminationReason === "inactivity_timeout"
+            ? "timeout"
+            : signal === "SIGTERM"
+              ? "timeout"
+              : "failed",
       outcome,
       handoff_note: handoffNote,
-      error_message: success ? null : `Exit code: ${code}, signal: ${signal}`,
+      error_message: success
+        ? null
+        : buildProcessExitMessage(active, code, signal),
       finished_at: new Date().toISOString(),
     })
     .eq("trace_id", active.traceId);
@@ -280,12 +369,15 @@ async function handleProcessExit(
       .single();
 
     if (task?.state === "running") {
+      const fallbackState = shouldAutoReviewOnSuccess(active.roleId)
+        ? "in_review"
+        : "completed";
       await db
         .from("tasks")
         .update({
-          state: "in_review",
+          state: fallbackState,
           last_handoff_note:
-            handoffNote || "Agent process completed successfully.",
+            handoffNote || buildFallbackHandoffNote(active.roleId, fallbackState),
         })
         .eq("id", active.taskId);
     }
@@ -302,7 +394,7 @@ async function handleProcessExit(
         .from("tasks")
         .update({
           state: "failed",
-          last_handoff_note: `Process exited with code ${code}${signal ? `, signal ${signal}` : ""}. Output tail: ${active.output.slice(-500)}`,
+          last_handoff_note: buildFailedTaskNote(active, code, signal),
         })
         .eq("id", active.taskId);
     }
@@ -311,6 +403,201 @@ async function handleProcessExit(
   console.log(
     `Process ${runId} exited: code=${code} signal=${signal} task=${active.taskId}`
   );
+}
+
+async function recordProcessActivity(
+  runId: string,
+  source: "stderr" | "stdout",
+  rawChunk: string
+): Promise<void> {
+  const active = activeProcesses.get(runId);
+  if (!active) {
+    return;
+  }
+
+  const now = new Date();
+  active.lastActivityAt = now;
+  active.lastActivitySummary = buildActivitySummary(source, rawChunk);
+
+  if (
+    active.heartbeatInFlight ||
+    (active.lastHeartbeatAt &&
+      now.getTime() - active.lastHeartbeatAt.getTime() <
+        config.processActivityHeartbeatMs)
+  ) {
+    return;
+  }
+
+  active.lastHeartbeatAt = now;
+  const db = getDb();
+  const summary = active.lastActivitySummary || `Agent activity detected on ${source}.`;
+
+  active.heartbeatInFlight = Promise.all([
+    db.from("events").insert({
+      trace_id: active.traceId,
+      agent_id: active.agentId,
+      event_type: "task.heartbeat",
+      severity: "info",
+      scope_type: "task",
+      scope_id: active.taskId,
+      summary,
+      detail: {
+        run_id: active.runId,
+        source,
+        activity_at: now.toISOString(),
+      },
+    }),
+    db
+      .from("agents")
+      .update({ last_seen_at: now.toISOString() })
+      .eq("id", active.agentId),
+  ])
+    .then(([eventResult, agentResult]) => {
+      if (eventResult.error) {
+        console.error(
+          `Failed to write heartbeat event for task ${active.taskId}:`,
+          eventResult.error
+        );
+      }
+      if (agentResult.error) {
+        console.error(
+          `Failed to update last_seen_at for agent ${active.agentId}:`,
+          agentResult.error
+        );
+      }
+    })
+    .catch((error) => {
+      console.error(`Failed to record process activity for ${runId}:`, error);
+    })
+    .finally(() => {
+      const current = activeProcesses.get(runId);
+      if (current) {
+        current.heartbeatInFlight = null;
+      }
+    });
+}
+
+function buildActivitySummary(
+  source: "stderr" | "stdout",
+  rawChunk: string
+): string {
+  const lines = rawChunk
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lastLine = lines.at(-1) || "";
+
+  try {
+    const parsed = JSON.parse(lastLine);
+    const payload =
+      parsed && typeof parsed === "object" && parsed.payload && typeof parsed.payload === "object"
+        ? (parsed.payload as Record<string, unknown>)
+        : null;
+    const payloadType =
+      payload && typeof payload.type === "string" ? payload.type : null;
+    const name = payload && typeof payload.name === "string" ? payload.name : null;
+
+    if (payloadType === "function_call" && name) {
+      return `Agent invoked tool \`${name}\`.`;
+    }
+
+    if (payloadType === "function_call_output") {
+      return "Agent received tool output.";
+    }
+
+    if (payloadType === "message") {
+      return "Agent produced a progress message.";
+    }
+
+    if (payloadType === "reasoning") {
+      return "Agent is still reasoning.";
+    }
+  } catch {
+    // Fall back to plain-text summary.
+  }
+
+  if (!lastLine) {
+    return `Agent activity detected on ${source}.`;
+  }
+
+  const compact = lastLine.replace(/\s+/g, " ").slice(0, 120);
+  return `Agent activity on ${source}: ${compact}`;
+}
+
+async function logInactivityTimeout(
+  active: ActiveProcess,
+  inactivityMs: number
+): Promise<void> {
+  const db = getDb();
+  const inactivityMinutes = Math.max(1, Math.round(inactivityMs / 60000));
+  const { error } = await db.from("events").insert({
+    trace_id: active.traceId,
+    agent_id: active.agentId,
+    event_type: "task.inactivity_timeout",
+    severity: "warning",
+    scope_type: "task",
+    scope_id: active.taskId,
+    summary: `Agent restarted after ${inactivityMinutes} minutes without activity.`,
+    detail: {
+      inactivity_ms: inactivityMs,
+      last_activity_at: active.lastActivityAt.toISOString(),
+      last_activity_summary: active.lastActivitySummary,
+      run_id: active.runId,
+    },
+  });
+
+  if (error) {
+    console.error(
+      `Failed to log inactivity timeout for task ${active.taskId}:`,
+      error
+    );
+  }
+}
+
+function buildProcessExitMessage(
+  active: ActiveProcess,
+  code: number | null,
+  signal: string | null
+): string {
+  if (active.terminationReason === "inactivity_timeout") {
+    return `Restarted after ${Math.max(
+      1,
+      Math.round(config.processInactivityTimeoutMs / 60000)
+    )} minutes without agent activity.`;
+  }
+
+  return `Exit code: ${code}, signal: ${signal}`;
+}
+
+function buildFailedTaskNote(
+  active: ActiveProcess,
+  code: number | null,
+  signal: string | null
+): string {
+  if (active.terminationReason === "inactivity_timeout") {
+    const lastActivity = active.lastActivitySummary || "No activity summary recorded.";
+    return `Agent restarted after ${Math.max(
+      1,
+      Math.round(config.processInactivityTimeoutMs / 60000)
+    )} minutes without activity. Last activity: ${lastActivity}`;
+  }
+
+  return `Process exited with code ${code}${signal ? `, signal ${signal}` : ""}. Output tail: ${active.output.slice(-500)}`;
+}
+
+function shouldAutoReviewOnSuccess(roleId: string): boolean {
+  return roleId !== "relay" && roleId !== "reviewer" && roleId !== "sentinel";
+}
+
+function buildFallbackHandoffNote(
+  roleId: string,
+  fallbackState: "completed" | "in_review"
+): string {
+  if (fallbackState === "in_review") {
+    return `${roleId} process completed successfully and is ready for review.`;
+  }
+
+  return `${roleId} process completed successfully.`;
 }
 
 interface BuildLaunchSpecInput {
@@ -500,6 +787,50 @@ async function copyOptionalFile(source: string, destination: string): Promise<vo
   }
 }
 
+async function seedWorkspaceFromTemplate(workDir: string): Promise<void> {
+  for (const entry of WORKSPACE_TEMPLATE_ENTRIES) {
+    const source = join(config.workspaceTemplateDir, entry);
+    const destination = join(workDir, entry);
+
+    try {
+      await cp(source, destination, {
+        recursive: true,
+        force: false,
+        errorOnExist: false,
+        filter: (src) => shouldCopyWorkspacePath(src),
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function shouldCopyWorkspacePath(sourcePath: string): boolean {
+  return !WORKSPACE_EXCLUDED_NAMES.has(basename(sourcePath));
+}
+
+async function setOwnershipRecursive(
+  path: string,
+  uid: number,
+  gid: number
+): Promise<void> {
+  await chown(path, uid, gid);
+  const stats = await lstat(path);
+
+  if (!stats.isDirectory()) {
+    return;
+  }
+
+  const entries = await readdir(path);
+  for (const entry of entries) {
+    await setOwnershipRecursive(join(path, entry), uid, gid);
+  }
+}
+
 function tomlInlineTable(values: Record<string, string>): string {
   return `{ ${Object.entries(values)
     .map(([key, value]) => `${key} = ${tomlString(value)}`)
@@ -645,6 +976,9 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 ## Instructions
 - Read AGENTS_INSCTRUCTIONS.md, ROLE_POLICY.md, ROLE_DIRECTORY.md, AGENT_IDENTITY.md,
   and TASK_BRIEFING.md from the working directory before you act.
+- The working directory contains the task workspace and, when available, a snapshot of the
+  repository. Prefer editing the existing project files there instead of scaffolding a
+  fresh app unless the task explicitly calls for greenfield work.
 - Use the MCP tools (task_update, memory_write, event_log, etc.) to interact with the system.
 - When done, update the task state and write a handoff note.
 - Log all side effects via event_log.

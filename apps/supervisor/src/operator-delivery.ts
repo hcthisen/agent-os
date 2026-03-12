@@ -10,6 +10,11 @@ interface OperatorMessageResult {
   telegramError: string | null;
 }
 
+interface OperatorRelayQueueResult {
+  messageId: string | null;
+  queued: boolean;
+}
+
 export async function sendOperatorMessage(args: {
   content: string;
   metadata?: Record<string, unknown>;
@@ -59,6 +64,48 @@ export async function sendOperatorMessage(args: {
     telegramChatId: telegramMirror.telegramChatId,
     telegramDelivery: telegramMirror.telegramDelivery,
     telegramError: telegramMirror.telegramError,
+  };
+}
+
+export async function queueOperatorRelayMessage(args: {
+  content: string;
+  metadata?: Record<string, unknown>;
+  sender?: string;
+  taskId?: string | null;
+}): Promise<OperatorRelayQueueResult> {
+  const db = getDb();
+  const metadata = {
+    ...(args.metadata || {}),
+    hidden_from_operator: true,
+    operator_visible: false,
+    routed_via: "relay",
+  };
+
+  const { data, error } = await db
+    .from("messages")
+    .insert({
+      channel: "admin_chat",
+      content: args.content,
+      direction: "inbound",
+      metadata,
+      processed: false,
+      sender: args.sender || "system",
+      task_id: args.taskId || null,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("Failed to enqueue operator relay message:", error);
+    return {
+      messageId: null,
+      queued: false,
+    };
+  }
+
+  return {
+    messageId: data?.id || null,
+    queued: true,
   };
 }
 

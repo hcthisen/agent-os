@@ -3,6 +3,7 @@ export const config = {
   mcpConfigPath: process.env.MCP_CONFIG_PATH || "/app/apps/mcp/mcp-config.json",
   agentsInstructionsPath:
     process.env.AGENTS_INSTRUCTIONS_PATH || "/app/AGENTS_INSCTRUCTIONS.md",
+  workspaceTemplateDir: process.env.WORKSPACE_TEMPLATE_DIR || "/app",
   agentHomeDir:
     process.env.AGENT_HOME_DIR || process.env.CLAUDE_HOME_DIR || "/home/node",
   agentRunAsUid: parseInt(
@@ -26,8 +27,21 @@ export const config = {
     process.env.COMPLETION_NOTIFICATION_LOOKBACK_MS || "900000",
     10
   ),
+  processActivityHeartbeatMs: parseInt(
+    process.env.PROCESS_ACTIVITY_HEARTBEAT_MS || "60000",
+    10
+  ),
+  processInactivityCheckMs: parseInt(
+    process.env.PROCESS_INACTIVITY_CHECK_MS || "30000",
+    10
+  ),
   readyTaskAlertMs: parseInt(process.env.READY_TASK_ALERT_MS || "300000", 10),
   claimedTaskAlertMs: parseInt(process.env.CLAIMED_TASK_ALERT_MS || "300000", 10),
   runningTaskAlertMs: parseInt(process.env.RUNNING_TASK_ALERT_MS || "900000", 10),
-  processTimeoutMs: parseInt(process.env.PROCESS_TIMEOUT_MS || "600000", 10), // 10 min default
+  processInactivityTimeoutMs: parseInt(
+    process.env.PROCESS_INACTIVITY_TIMEOUT_MS ||
+      process.env.PROCESS_TIMEOUT_MS ||
+      "1800000",
+    10
+  ), // 30 min inactivity timeout default
 };
