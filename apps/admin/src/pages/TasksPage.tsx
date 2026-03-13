@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 
+const TASK_PAGE_SIZE = 50;
+
 interface Task {
   id: string;
   title: string;
@@ -45,10 +47,39 @@ export function TasksPage() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [filter, setFilter] = useState("all");
   const [selected, setSelected] = useState<Task | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  async function loadTasks() {
-    const data = await api.getTasks();
-    setTasks(data || []);
+  function mergeTasks(nextTasks: Task[], existingTasks: Task[]): Task[] {
+    const merged = new Map<string, Task>();
+    for (const task of nextTasks) {
+      merged.set(task.id, task);
+    }
+    for (const task of existingTasks) {
+      if (!merged.has(task.id)) {
+        merged.set(task.id, task);
+      }
+    }
+    return [...merged.values()];
+  }
+
+  async function loadTasks(options?: { append?: boolean }) {
+    const before =
+      options?.append && tasks.length > 0 ? tasks[tasks.length - 1].created_at : undefined;
+    const data = await api.getTasks({
+      before,
+      limit: TASK_PAGE_SIZE,
+      state: filter === "all" ? undefined : filter,
+    });
+    const nextTasks = data || [];
+
+    if (options?.append) {
+      setTasks((current) => [...current, ...nextTasks]);
+    } else {
+      setTasks((current) => mergeTasks(nextTasks, current));
+    }
+
+    setHasMore(nextTasks.length === TASK_PAGE_SIZE || (!options?.append && tasks.length > 0));
   }
 
   async function loadApprovals() {
@@ -73,7 +104,7 @@ export function TasksPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [filter]);
 
   async function handleApproval(id: string, decision: "approved" | "rejected") {
     if (decision === "approved") {
@@ -88,6 +119,15 @@ export function TasksPage() {
   async function retryDeadLetter(taskId: string) {
     await api.retryTask(taskId);
     await loadTasks();
+  }
+
+  async function loadMoreTasks() {
+    setLoadingMore(true);
+    try {
+      await loadTasks({ append: true });
+    } finally {
+      setLoadingMore(false);
+    }
   }
 
   const filtered = filter === "all" ? tasks : tasks.filter((t) => t.state === filter);
@@ -127,7 +167,12 @@ export function TasksPage() {
         ].map((s) => (
           <button
             key={s}
-            onClick={() => setFilter(s)}
+            onClick={() => {
+              setFilter(s);
+              setTasks([]);
+              setHasMore(false);
+              setSelected(null);
+            }}
             style={{
               padding: "4px 10px",
               borderRadius: 4,
@@ -138,7 +183,7 @@ export function TasksPage() {
               cursor: "pointer",
             }}
           >
-            {s} {s !== "all" ? `(${tasks.filter((t) => t.state === s).length})` : `(${tasks.length})`}
+            {s}
           </button>
         ))}
       </div>
@@ -191,6 +236,22 @@ export function TasksPage() {
           </div>
         ))}
       </div>
+
+      {hasMore && (
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "center" }}>
+          <button
+            onClick={() => void loadMoreTasks()}
+            disabled={loadingMore}
+            style={{
+              ...btnStyle,
+              background: loadingMore ? "#334155" : "#3b82f6",
+              opacity: loadingMore ? 0.8 : 1,
+            }}
+          >
+            {loadingMore ? "Loading..." : "Load More"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

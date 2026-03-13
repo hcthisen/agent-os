@@ -1,11 +1,11 @@
 FROM node:20-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates docker.io && \
+    apt-get install -y --no-install-recommends ca-certificates chromium docker.io && \
     rm -rf /var/lib/apt/lists/*
 
 # Install both supported coding CLIs.
-RUN npm install -g @anthropic-ai/claude-code @openai/codex
+RUN npm install -g @anthropic-ai/claude-code @openai/codex agent-browser
 
 # Pre-configure the shared agent home for both providers.
 RUN mkdir -p /home/node/.claude /home/node/.codex && \
@@ -44,6 +44,7 @@ COPY AGENTS_INSCTRUCTIONS.md /app/AGENTS_INSCTRUCTIONS.md
 ENV AGENT_HOME_DIR=/home/node
 ENV AGENT_RUN_AS_UID=1000
 ENV AGENT_RUN_AS_GID=1000
+ENV CHROMIUM_PATH=/usr/bin/chromium
 
 EXPOSE 3001
 

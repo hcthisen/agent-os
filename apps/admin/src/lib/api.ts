@@ -70,10 +70,26 @@ export const api = {
   expireMemory: (memoryId: string) => apiPost<void>(`/memories/${memoryId}/expire`),
   getAgents: (): Promise<any[]> => apiGet<any[]>("/agents"),
   getApprovals: (): Promise<any[]> => apiGet<any[]>("/approvals"),
-  getEvents: (): Promise<any[]> => apiGet<any[]>("/events"),
-  getMemories: (query = "") =>
+  getEvents: (options?: { before?: string; limit?: number }): Promise<any[]> =>
     apiGet<any[]>(
-      `/memories${query ? `?q=${encodeURIComponent(query)}` : ""}`
+      `/events${buildQueryString({
+        before: options?.before,
+        limit: options?.limit || 50,
+      })}`
+    ),
+  getMemories: (query = "") =>
+    apiGet<any[]>(`/memories${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+  getMemoriesPage: (options?: {
+    before?: string;
+    limit?: number;
+    query?: string;
+  }): Promise<any[]> =>
+    apiGet<any[]>(
+      `/memories${buildQueryString({
+        before: options?.before,
+        limit: options?.limit || 50,
+        q: options?.query,
+      })}`
     ),
   getMessages: (options?: { before?: string; limit?: number }): Promise<any[]> =>
     apiGet<any[]>(
@@ -90,7 +106,18 @@ export const api = {
   getSchedules: (): Promise<any[]> => apiGet<any[]>("/schedules"),
   getServices: (): Promise<any[]> => apiGet<any[]>("/services"),
   getSession: (): Promise<any> => apiGet<any>("/auth/session"),
-  getTasks: (): Promise<any[]> => apiGet<any[]>("/tasks"),
+  getTasks: (options?: {
+    before?: string;
+    limit?: number;
+    state?: string;
+  }): Promise<any[]> =>
+    apiGet<any[]>(
+      `/tasks${buildQueryString({
+        before: options?.before,
+        limit: options?.limit || 50,
+        state: options?.state,
+      })}`
+    ),
   login: (user: string, pass: string): Promise<any> =>
     apiPost<any>("/auth/login", { pass, user }),
   logout: () => apiPost<void>("/auth/logout"),

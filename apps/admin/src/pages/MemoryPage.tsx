@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 
+const MEMORY_PAGE_SIZE = 50;
+
 interface Memory {
   id: string;
   layer: string;
@@ -18,10 +20,25 @@ export function MemoryPage() {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  async function loadMemories(query = "") {
-    const data = await api.getMemories(query);
-    setMemories(data || []);
+  async function loadMemories(query = "", options?: { append?: boolean }) {
+    const before =
+      options?.append && memories.length > 0
+        ? memories[memories.length - 1].created_at
+        : undefined;
+    const data = await api.getMemoriesPage({
+      before,
+      limit: MEMORY_PAGE_SIZE,
+      query,
+    });
+    const nextMemories = data || [];
+
+    setMemories((current) =>
+      options?.append ? [...current, ...nextMemories] : nextMemories
+    );
+    setHasMore(nextMemories.length === MEMORY_PAGE_SIZE);
   }
 
   useEffect(() => {
@@ -29,12 +46,22 @@ export function MemoryPage() {
   }, []);
 
   async function handleSearch() {
+    setExpanded(null);
     await loadMemories(search.trim());
   }
 
   async function expireMemory(id: string) {
     await api.expireMemory(id);
     await loadMemories(search.trim());
+  }
+
+  async function loadMoreMemories() {
+    setLoadingMore(true);
+    try {
+      await loadMemories(search.trim(), { append: true });
+    } finally {
+      setLoadingMore(false);
+    }
   }
 
   const layerColor: Record<string, string> = {
@@ -90,6 +117,22 @@ export function MemoryPage() {
         ))}
         {memories.length === 0 && <p style={{ color: "#666", fontSize: 13 }}>No memories found.</p>}
       </div>
+
+      {hasMore && (
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "center" }}>
+          <button
+            onClick={() => void loadMoreMemories()}
+            disabled={loadingMore}
+            style={{
+              ...btnStyle,
+              background: loadingMore ? "#334155" : "#3b82f6",
+              opacity: loadingMore ? 0.8 : 1,
+            }}
+          >
+            {loadingMore ? "Loading..." : "Load More"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

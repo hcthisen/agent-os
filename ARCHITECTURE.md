@@ -310,8 +310,10 @@ services. It is not a blank check for arbitrary host operations.
 
 ### 6. Browser Service
 
-Headless Chromium via agent-browser. This is a standard capability, not a special-case
-tool reserved for one role.
+Headless browser automation via `agent-browser`. This is a standard capability, not a
+special-case tool reserved for one role. Visual QA tasks should use the preinstalled
+browser workflow rather than trying to install Chromium or Playwright inside a task
+workspace.
 
 Use cases:
 

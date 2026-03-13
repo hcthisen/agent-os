@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 
+const EVENTS_PAGE_SIZE = 50;
+
 interface Event {
   id: string;
   event_type: string;
@@ -16,14 +18,35 @@ interface Event {
 export function EventsPage() {
   const [events, setEvents] = useState<Event[]>([]);
   const [filter, setFilter] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     void loadEvents();
   }, []);
 
-  async function loadEvents() {
-    const data = await api.getEvents();
-    setEvents(data || []);
+  async function loadEvents(options?: { append?: boolean }) {
+    const before =
+      options?.append && events.length > 0
+        ? events[events.length - 1].created_at
+        : undefined;
+    const data = await api.getEvents({
+      before,
+      limit: EVENTS_PAGE_SIZE,
+    });
+    const nextEvents = data || [];
+
+    setEvents((current) => (options?.append ? [...current, ...nextEvents] : nextEvents));
+    setHasMore(nextEvents.length === EVENTS_PAGE_SIZE);
+  }
+
+  async function loadMoreEvents() {
+    setLoadingMore(true);
+    try {
+      await loadEvents({ append: true });
+    } finally {
+      setLoadingMore(false);
+    }
   }
 
   const sevColor: Record<string, string> = {
@@ -63,6 +86,22 @@ export function EventsPage() {
         ))}
         {filtered.length === 0 && <p style={{ color: "#666", fontSize: 13 }}>No events.</p>}
       </div>
+
+      {hasMore && (
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "center" }}>
+          <button
+            onClick={() => void loadMoreEvents()}
+            disabled={loadingMore}
+            style={{
+              ...btnStyle,
+              background: loadingMore ? "#334155" : "#3b82f6",
+              opacity: loadingMore ? 0.8 : 1,
+            }}
+          >
+            {loadingMore ? "Loading..." : "Load More"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -76,4 +115,14 @@ const inputStyle: React.CSSProperties = {
   color: "#e0e0e8",
   fontSize: 13,
   outline: "none",
+};
+
+const btnStyle: React.CSSProperties = {
+  padding: "8px 16px",
+  border: "none",
+  borderRadius: 6,
+  color: "#fff",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: "pointer",
 };

@@ -93,6 +93,11 @@ the `service_control` MCP tool if the target service is supported there. Do not 
 that control path with direct Docker commands unless your task explicitly requires lower-
 level infrastructure work that has already been approved.
 
+For browser-based work such as visual QA, screenshots, page interaction, or login flows,
+use the preinstalled `agent-browser` workflow or the managed browser path already
+provided by the system. Do not waste time trying to install Chromium, Playwright, or
+other browser runtimes inside the task workspace.
+
 ### 4. End every session with a handoff note
 
 Before you finish, you must call `task_update` or `handoff_create` with a structured

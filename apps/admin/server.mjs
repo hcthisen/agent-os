@@ -864,10 +864,16 @@ async function handleApi(req, res, url) {
 
   if (pathname === "/api/tasks" && req.method === "GET") {
     const state = searchParams.get("state");
+    const before = searchParams.get("before");
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, 200))
+      : 50;
     const data = await postgrest("/tasks", {
       query: {
+        ...(before ? { created_at: `lt.${before}` } : {}),
         ...(state && state !== "all" ? { state: `eq.${state}` } : {}),
-        limit: "200",
+        limit: String(limit),
         order: "created_at.desc",
         select:
           "id,title,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id",
@@ -991,11 +997,17 @@ async function handleApi(req, res, url) {
 
   if (pathname === "/api/memories" && req.method === "GET") {
     const query = searchParams.get("q");
+    const before = searchParams.get("before");
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, 200))
+      : 50;
     const data = await postgrest("/memories", {
       query: {
+        ...(before ? { created_at: `lt.${before}` } : {}),
         ...(query ? { subject: `ilike.*${query}*` } : {}),
         is_active: "eq.true",
-        limit: "100",
+        limit: String(limit),
         order: "created_at.desc",
         select: "*",
       },
@@ -1017,9 +1029,15 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/events" && req.method === "GET") {
+    const before = searchParams.get("before");
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, 200))
+      : 50;
     const data = await postgrest("/events", {
       query: {
-        limit: "200",
+        ...(before ? { created_at: `lt.${before}` } : {}),
+        limit: String(limit),
         order: "created_at.desc",
         select: "*",
       },
