@@ -21,9 +21,21 @@ import {
   publicSitePublish,
 } from "./tools/public_site_publish.js";
 import {
+  publicSiteRouteDef,
+  publicSiteRoute,
+} from "./tools/public_site_route.js";
+import {
+  publicSiteVerifyDef,
+  publicSiteVerify,
+} from "./tools/public_site_verify.js";
+import {
   approvalRequestDef,
   approvalRequest,
 } from "./tools/approval_request.js";
+import {
+  observabilitySnapshotDef,
+  observabilitySnapshot,
+} from "./tools/observability_snapshot.js";
 import {
   serviceControlDef,
   serviceControl,
@@ -33,6 +45,10 @@ import {
   contextRefresh,
 } from "./tools/context_refresh.js";
 import { messageSendDef, messageSend } from "./tools/message_send.js";
+import {
+  serviceRequireDef,
+  serviceRequire,
+} from "./tools/service_require.js";
 import {
   scheduleUpdateDef,
   scheduleUpdate,
@@ -54,8 +70,12 @@ const tools = [
   artifactPutDef,
   handoffCreateDef,
   publicSitePublishDef,
+  publicSiteRouteDef,
+  publicSiteVerifyDef,
   approvalRequestDef,
+  observabilitySnapshotDef,
   serviceControlDef,
+  serviceRequireDef,
   contextRefreshDef,
   messageSendDef,
   scheduleUpdateDef,
@@ -74,8 +94,12 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   artifact_put: artifactPut,
   handoff_create: handoffCreate,
   public_site_publish: publicSitePublish,
+  public_site_route: publicSiteRoute,
+  public_site_verify: publicSiteVerify,
   approval_request: approvalRequest,
+  observability_snapshot: observabilitySnapshot,
   service_control: serviceControl,
+  service_require: serviceRequire,
   context_refresh: contextRefresh,
   message_send: messageSend,
   schedule_update: scheduleUpdate,
@@ -118,6 +142,29 @@ async function extractPolicyAction(
       taskId,
       desc: `Upload artifact: ${args.name || "unnamed artifact"}`,
     };
+  }
+
+  if (name === "public_site_route") {
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    const hostname = String(args?.hostname || "unknown host").trim() || "unknown host";
+    const action = String(args?.action || "upsert").trim() || "upsert";
+    if (action === "verify") {
+      return null;
+    }
+
+    return {
+      type: "system.modify",
+      taskId,
+      desc: `${action} public route: ${hostname}`,
+    };
+  }
+
+  if (name === "public_site_verify" || name === "service_require") {
+    return null;
   }
 
   if (name === "schedule_update") {

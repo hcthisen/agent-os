@@ -17,6 +17,8 @@ export const config = {
   workspacesDir: process.env.WORKSPACES_DIR || "/app/workspaces",
   publicLiveDir: process.env.PUBLIC_LIVE_DIR || "/app/public-live",
   publicSiteUrl: process.env.PUBLIC_SITE_URL || "",
+  rootDomain: process.env.ROOT_DOMAIN || "",
+  caddySiteSnippetsDir: process.env.CADDY_SITE_SNIPPETS_DIR || "",
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || "5000", 10),
   scheduleCheckIntervalMs: parseInt(process.env.SCHEDULE_CHECK_MS || "30000", 10),
   taskAttentionCheckIntervalMs: parseInt(

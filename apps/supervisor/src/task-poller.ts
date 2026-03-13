@@ -1,5 +1,10 @@
 import { getDb } from "./db.js";
 import { hasCapacity, launchAgent } from "./process-manager.js";
+import {
+  buildDependencyWaitNote,
+  isTaskLaunchable,
+  loadDependencyTaskStateMap,
+} from "./task-dependencies.js";
 
 /**
  * Poll for ready tasks and launch agents when capacity is available.
@@ -12,16 +17,33 @@ export async function pollForTasks(): Promise<void> {
   // Find ready tasks ordered by priority
   const { data: tasks, error } = await db
     .from("tasks")
-    .select("id, assigned_role, priority, last_handoff_note, state")
+    .select("id, assigned_role, depends_on, last_handoff_note, priority, state, title")
     .in("state", ["ready", "in_review"])
     .order("priority")
     .order("created_at")
-    .limit(5);
+    .limit(20);
 
   if (error || !tasks?.length) return;
 
+  const dependencyStateMap = await loadDependencyTaskStateMap(tasks);
+
   for (const task of tasks) {
     if (!hasCapacity()) break;
+
+    if (task.state === "ready" && !isTaskLaunchable(task, dependencyStateMap)) {
+      const note = buildDependencyWaitNote(task, dependencyStateMap);
+      if (note && task.last_handoff_note !== note) {
+        await db
+          .from("tasks")
+          .update({
+            last_handoff_note: note,
+          })
+          .eq("id", task.id)
+          .eq("state", "ready");
+      }
+      continue;
+    }
+
     const launchRole = task.state === "in_review" ? "reviewer" : task.assigned_role;
 
     // Find an active agent for this role

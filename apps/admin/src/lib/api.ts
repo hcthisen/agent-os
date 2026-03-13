@@ -47,6 +47,21 @@ export function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, { body, method: "POST" });
 }
 
+function buildQueryString(params: Record<string, string | number | undefined>): string {
+  const searchParams = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+
+    searchParams.set(key, String(value));
+  }
+
+  const query = searchParams.toString();
+  return query ? `?${query}` : "";
+}
+
 export const api = {
   approveApproval: (approvalId: string) =>
     apiPost<void>(`/approvals/${approvalId}/decision`, {
@@ -60,8 +75,14 @@ export const api = {
     apiGet<any[]>(
       `/memories${query ? `?q=${encodeURIComponent(query)}` : ""}`
     ),
-  getMessages: (): Promise<any[]> =>
-    apiGet<any[]>("/messages?channel=admin_chat&limit=100"),
+  getMessages: (options?: { before?: string; limit?: number }): Promise<any[]> =>
+    apiGet<any[]>(
+      `/messages${buildQueryString({
+        before: options?.before,
+        channel: "admin_chat",
+        limit: options?.limit || 50,
+      })}`
+    ),
   getRoles: (): Promise<any[]> => apiGet<any[]>("/roles"),
   getRuntimeProvider: (): Promise<any> => apiGet<any>("/runtime/provider"),
   getOpenAiDeviceAuth: (): Promise<any> =>

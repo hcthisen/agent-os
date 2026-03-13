@@ -3,7 +3,8 @@ import { enforceScope, getCurrentTaskContext } from "../scope.js";
 
 export const taskCreateDef = {
   name: "task_create",
-  description: "Create a new task or sub-task, delegated to a specific role.",
+  description:
+    "Create a new task or sub-task, delegated to a specific role. Use depends_on to create staged follow-up tasks that stay queued until prerequisite tasks complete.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -22,6 +23,12 @@ export const taskCreateDef = {
       parent_task_id: {
         type: "string",
         description: "Parent task UUID for sub-tasks",
+      },
+      depends_on: {
+        type: "array",
+        description:
+          "Optional prerequisite task UUIDs. The new task stays queued until every dependency is completed.",
+        items: { type: "string" },
       },
       project_id: { type: "string" },
       requires_approval: { type: "boolean", default: false },
@@ -43,6 +50,7 @@ export async function taskCreate(args: {
   assigned_role: string;
   priority?: string;
   parent_task_id?: string;
+  depends_on?: string[];
   project_id?: string;
   requires_approval?: boolean;
   is_system_modification?: boolean;
@@ -51,6 +59,7 @@ export async function taskCreate(args: {
   const db = getDb();
   const currentTask = await getCurrentTaskContext();
   const parentTaskId = args.parent_task_id || currentTask?.id || null;
+  const dependencyIds = [...new Set((args.depends_on || []).map((value) => value.trim()).filter(Boolean))];
   let projectId = args.project_id || null;
   let parentProjectId: string | null = null;
 
@@ -95,6 +104,102 @@ export async function taskCreate(args: {
     };
   }
 
+  if (dependencyIds.length) {
+    for (const dependencyId of dependencyIds) {
+      await enforceScope("task", dependencyId);
+    }
+
+    const { data: dependencyTasks, error: dependencyError } = await db
+      .from("tasks")
+      .select("id, project_id")
+      .in("id", dependencyIds)
+      .returns<Array<{ id: string; project_id: string | null }>>();
+
+    if (dependencyError) {
+      return { success: false, error: dependencyError.message };
+    }
+
+    const dependencyMap = new Map(
+      (dependencyTasks || []).map((task) => [task.id, task])
+    );
+
+    for (const dependencyId of dependencyIds) {
+      const dependencyTask = dependencyMap.get(dependencyId);
+      if (!dependencyTask) {
+        return {
+          success: false,
+          error: `Dependency task '${dependencyId}' not found`,
+        };
+      }
+
+      if (
+        projectId &&
+        dependencyTask.project_id &&
+        dependencyTask.project_id !== projectId
+      ) {
+        return {
+          success: false,
+          error: `Dependency task '${dependencyId}' belongs to a different project`,
+        };
+      }
+    }
+  }
+
+  let duplicateQuery = db
+    .from("tasks")
+    .select("id,state,acceptance_criteria,depends_on")
+    .eq("title", args.title)
+    .eq("objective", args.objective)
+    .eq("assigned_role", args.assigned_role)
+    .in("state", [
+      "backlog",
+      "ready",
+      "claimed",
+      "running",
+      "blocked_on_human",
+      "blocked_on_agent",
+      "in_review",
+    ]);
+
+  duplicateQuery = parentTaskId
+    ? duplicateQuery.eq("parent_task_id", parentTaskId)
+    : duplicateQuery.is("parent_task_id", null);
+  duplicateQuery = projectId
+    ? duplicateQuery.eq("project_id", projectId)
+    : duplicateQuery.is("project_id", null);
+
+  const { data: existingTask, error: existingTaskError } = await duplicateQuery.returns<
+    Array<{
+      acceptance_criteria: string[] | null;
+      depends_on: string[] | null;
+      id: string;
+      state: string;
+    }>
+  >();
+
+  if (existingTaskError) {
+    return { success: false, error: existingTaskError.message };
+  }
+
+  const normalizedAcceptanceCriteria = JSON.stringify(args.acceptance_criteria || []);
+  const normalizedDependencies = JSON.stringify([...dependencyIds].sort());
+  const duplicateTask = (existingTask || []).find((task) => {
+    const existingAcceptanceCriteria = JSON.stringify(task.acceptance_criteria || []);
+    const existingDependencies = JSON.stringify([...(task.depends_on || [])].sort());
+    return (
+      existingAcceptanceCriteria === normalizedAcceptanceCriteria &&
+      existingDependencies === normalizedDependencies
+    );
+  });
+
+  if (duplicateTask) {
+    return {
+      success: true,
+      task: duplicateTask,
+      deduplicated: true,
+    };
+  }
+
   const { data, error } = await db
     .from("tasks")
     .insert({
@@ -104,6 +209,7 @@ export async function taskCreate(args: {
       assigned_role: args.assigned_role,
       priority: args.priority || "normal",
       parent_task_id: parentTaskId,
+      depends_on: dependencyIds,
       project_id: projectId,
       requires_approval: args.requires_approval || false,
       is_system_modification: args.is_system_modification || false,

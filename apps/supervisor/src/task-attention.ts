@@ -1,6 +1,11 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
 import { queueOperatorRelayMessage } from "./operator-delivery.js";
+import {
+  buildDependencyWaitNote,
+  getUnsatisfiedDependencies,
+  loadDependencyTaskStateMap,
+} from "./task-dependencies.js";
 
 type AttentionState =
   | "blocked_on_agent"
@@ -18,6 +23,7 @@ interface AttentionTask {
   blocked_reason: string | null;
   claimed_by: string | null;
   created_at: string;
+  depends_on: string[] | null;
   id: string;
   last_handoff_note: string | null;
   parent_task_id: string | null;
@@ -55,7 +61,7 @@ export async function monitorTaskAttention(): Promise<void> {
   const { data: tasks, error } = await db
     .from("tasks")
     .select(
-      "id,title,state,priority,assigned_role,parent_task_id,blocked_reason,last_handoff_note,attempt_count,claimed_by,created_at,updated_at"
+      "id,title,state,priority,assigned_role,parent_task_id,blocked_reason,last_handoff_note,attempt_count,claimed_by,created_at,updated_at,depends_on"
     )
     .in("state", ATTENTION_STATES);
 
@@ -65,11 +71,24 @@ export async function monitorTaskAttention(): Promise<void> {
   }
 
   const taskList = (tasks || []) as AttentionTask[];
+  const dependencyStateMap = await loadDependencyTaskStateMap(taskList);
   const activityMap = await loadLatestTaskActivity(taskList.map((task) => task.id));
 
   for (const task of taskList) {
+    if (task.state === "ready") {
+      const waitNote = buildDependencyWaitNote(task, dependencyStateMap);
+      if (waitNote && task.last_handoff_note !== waitNote) {
+        await db
+          .from("tasks")
+          .update({ last_handoff_note: waitNote })
+          .eq("id", task.id)
+          .eq("state", "ready");
+        task.last_handoff_note = waitNote;
+      }
+    }
+
     const activity = activityMap.get(task.id) || null;
-    const notificationKey = getNotificationKey(task, activity);
+    const notificationKey = getNotificationKey(task, activity, dependencyStateMap);
     if (!notificationKey) {
       continue;
     }
@@ -91,13 +110,21 @@ export async function monitorTaskAttention(): Promise<void> {
 
 function getNotificationKey(
   task: AttentionTask,
-  activity: TaskActivity | null
+  activity: TaskActivity | null,
+  dependencyStateMap: Map<string, { id: string; state: string; title: string }>
 ): string | null {
   if (
     task.state === "ready" &&
     task.last_handoff_note?.startsWith("Supervisor could not start this task")
   ) {
     return `queue:blocker:${task.updated_at}`;
+  }
+
+  if (
+    task.state === "ready" &&
+    getUnsatisfiedDependencies(task, dependencyStateMap).length > 0
+  ) {
+    return null;
   }
 
   if (
@@ -226,20 +253,15 @@ async function loadLatestTaskActivity(
   taskIds: string[]
 ): Promise<Map<string, TaskActivity>> {
   const db = getDb();
-  const taskIdSet = new Set(taskIds);
   const activityMap = new Map<string, TaskActivity>();
 
   if (!taskIds.length) {
     return activityMap;
   }
 
-  const { data, error } = await db
-    .from("events")
-    .select("scope_id,summary,created_at")
-    .eq("scope_type", "task")
-    .in("event_type", ["task.heartbeat", "task.started"])
-    .order("created_at", { ascending: false })
-    .limit(Math.max(500, taskIds.length * 4));
+  const { data, error } = await db.rpc("latest_task_activity", {
+    p_task_ids: taskIds,
+  });
 
   if (error) {
     console.error("Failed to load latest task activity:", error);
@@ -249,7 +271,7 @@ async function loadLatestTaskActivity(
   for (const row of data || []) {
     const scopeId =
       row && typeof row.scope_id === "string" ? row.scope_id : null;
-    if (!scopeId || !taskIdSet.has(scopeId) || activityMap.has(scopeId)) {
+    if (!scopeId || activityMap.has(scopeId)) {
       continue;
     }
 

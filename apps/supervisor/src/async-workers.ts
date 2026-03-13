@@ -31,6 +31,8 @@ interface MemoryRow {
   content: string;
   scope_type: string;
   scope_id: string;
+  layer?: string;
+  tags?: string[];
 }
 
 interface ChunkSourceRow {
@@ -38,6 +40,7 @@ interface ChunkSourceRow {
 }
 
 interface ArtifactRow {
+  external_url: string | null;
   id: string;
   name: string;
   storage_path: string | null;
@@ -45,6 +48,14 @@ interface ArtifactRow {
   metadata: Record<string, unknown> | null;
   project_id: string | null;
   task_id: string | null;
+}
+
+interface EmbeddingResponse {
+  data: { embedding: number[]; index: number }[];
+  usage?: {
+    prompt_tokens?: number;
+    total_tokens?: number;
+  };
 }
 
 /**
@@ -149,9 +160,15 @@ export async function processEmbeddings(): Promise<void> {
       return;
     }
 
-    const result = (await response.json()) as {
-      data: { embedding: number[]; index: number }[];
-    };
+    const result = (await response.json()) as EmbeddingResponse;
+
+    await recordProviderUsage({
+      batchSize: chunks.length,
+      model: OPENAI_EMBEDDING_MODEL,
+      promptTokens: result.usage?.prompt_tokens,
+      serviceName: OPENAI_SERVICE_NAME,
+      totalTokens: result.usage?.total_tokens,
+    });
 
     for (const item of result.data) {
       const chunk = chunks[item.index];
@@ -175,28 +192,9 @@ export async function processEmbeddings(): Promise<void> {
  */
 export async function processDistillation(): Promise<void> {
   const db = getDb();
-
-  // Find episodic memories that do not have corresponding semantic memories yet.
-  // This is tracked by checking if a semantic memory exists with the same scope
-  // and a more recent created_at. The sentinel handles the actual LLM-based distillation.
-  // Here we just ensure memory_chunks exist for all recent memories.
-  const { data: memories } = await db
-    .from("memories")
-    .select("id, subject, content, scope_type, scope_id")
-    .eq("is_active", true)
-    .not(
-      "id",
-      "in",
-      `(SELECT source_id FROM memory_chunks WHERE source_type = 'memory')`
-    )
-    .limit(20)
-    .returns<MemoryRow[]>();
-
-  // Note: The above subquery syntax does not work with Supabase PostgREST.
-  // Instead, use a second query to find memories without chunks.
   const { data: allMemories } = await db
     .from("memories")
-    .select("id, subject, content, scope_type, scope_id")
+    .select("id, layer, subject, content, scope_type, scope_id, tags")
     .eq("is_active", true)
     .order("created_at", { ascending: false })
     .limit(50)
@@ -232,6 +230,72 @@ export async function processDistillation(): Promise<void> {
   } else {
     console.log(`Created ${chunks.length} memory chunks`);
   }
+
+  const episodicMemories = allMemories.filter((memory) => memory.layer === "episodic");
+  if (!episodicMemories.length) return;
+
+  const { data: semanticMemories } = await db
+    .from("memories")
+    .select("scope_type, scope_id, subject, content")
+    .eq("layer", "semantic")
+    .eq("is_active", true);
+
+  const semanticKeys = new Set(
+    (semanticMemories || []).map((memory) =>
+      buildSemanticKey(memory.scope_type, memory.scope_id, memory.subject, memory.content)
+    )
+  );
+
+  const distilled = episodicMemories
+    .filter(shouldDistillEpisodicMemory)
+    .filter(
+      (memory) =>
+        !semanticKeys.has(
+          buildSemanticKey(memory.scope_type, memory.scope_id, memory.subject, memory.content)
+        )
+    )
+    .slice(0, 10);
+
+  if (!distilled.length) return;
+
+  const { data: insertedSemantic, error: insertSemanticError } = await db
+    .from("memories")
+    .insert(
+      distilled.map((memory) => ({
+        confidence: 0.8,
+        content: memory.content,
+        layer: "semantic",
+        scope_id: memory.scope_id,
+        scope_type: memory.scope_type,
+        subject: memory.subject,
+        tags: [...new Set([...(memory.tags || []), "auto_distilled"])],
+      }))
+    )
+    .select("id, subject, content, scope_type, scope_id")
+    .returns<MemoryRow[]>();
+
+  if (insertSemanticError) {
+    console.error("Semantic distillation insert error:", insertSemanticError);
+    return;
+  }
+
+  if (!insertedSemantic?.length) return;
+
+  const { error: semanticChunkError } = await db.from("memory_chunks").insert(
+    insertedSemantic.map((memory) => ({
+      source_type: "memory",
+      source_id: memory.id,
+      scope_type: memory.scope_type,
+      scope_id: memory.scope_id,
+      content: `${memory.subject}: ${memory.content}`,
+    }))
+  );
+
+  if (semanticChunkError) {
+    console.error("Semantic chunk creation error:", semanticChunkError);
+  } else {
+    console.log(`Distilled ${insertedSemantic.length} semantic memories`);
+  }
 }
 
 /**
@@ -242,7 +306,7 @@ export async function processArtifactChunks(): Promise<void> {
 
   const { data: artifacts } = await db
     .from("artifacts")
-    .select("id, name, storage_path, mime_type, metadata, project_id, task_id")
+    .select("id, name, storage_path, external_url, mime_type, metadata, project_id, task_id")
     .in("mime_type", ["text/plain", "text/markdown", "application/json", "text/html"])
     .order("created_at", { ascending: false })
     .limit(20)
@@ -250,31 +314,27 @@ export async function processArtifactChunks(): Promise<void> {
 
   if (!artifacts?.length) return;
 
-  const { data: existingChunks } = await db
+  await db
     .from("memory_chunks")
-    .select("source_id")
+    .delete()
     .eq("source_type", "artifact")
-    .in("source_id", artifacts.map((artifact) => artifact.id))
-    .returns<ChunkSourceRow[]>();
+    .in("source_id", artifacts.map((artifact) => artifact.id));
 
-  const existingIds = new Set(
-    (existingChunks || []).map((chunk) => chunk.source_id)
+  const chunks = artifacts.flatMap((artifact) =>
+    buildArtifactChunks(artifact).map((content) => ({
+      source_type: "artifact",
+      source_id: artifact.id,
+      scope_type: artifact.task_id
+        ? "task"
+        : artifact.project_id
+          ? "project"
+          : ("company" as string),
+      scope_id: artifact.task_id || artifact.project_id || "global",
+      content,
+    }))
   );
-  const missing = artifacts.filter((artifact) => !existingIds.has(artifact.id));
 
-  if (!missing.length) return;
-
-  const chunks = missing.map((artifact) => ({
-    source_type: "artifact",
-    source_id: artifact.id,
-    scope_type: artifact.task_id
-      ? "task"
-      : artifact.project_id
-        ? "project"
-        : ("company" as string),
-    scope_id: artifact.task_id || artifact.project_id || "global",
-    content: `Artifact: ${artifact.name} (${artifact.mime_type})`,
-  }));
+  if (!chunks.length) return;
 
   const { error } = await db.from("memory_chunks").insert(chunks);
   if (error) {
@@ -282,6 +342,103 @@ export async function processArtifactChunks(): Promise<void> {
   } else {
     console.log(`Created ${chunks.length} artifact chunks`);
   }
+}
+
+function shouldDistillEpisodicMemory(memory: MemoryRow): boolean {
+  const tags = new Set((memory.tags || []).map((tag) => tag.toLowerCase()));
+  return (
+    tags.has("operator_preference") ||
+    tags.has("preference") ||
+    tags.has("constraint") ||
+    tags.has("decision") ||
+    memory.subject.toLowerCase().includes("preference")
+  );
+}
+
+function buildSemanticKey(
+  scopeType: string,
+  scopeId: string,
+  subject: string,
+  content: string
+): string {
+  return `${scopeType}::${scopeId}::${subject}::${content}`;
+}
+
+function buildArtifactChunks(artifact: ArtifactRow): string[] {
+  const content = extractArtifactText(artifact);
+  const scopeLabel = artifact.task_id || artifact.project_id || "company";
+
+  if (!content) {
+    return [`Artifact ${artifact.name} (${artifact.mime_type || "unknown"}) for ${scopeLabel}`];
+  }
+
+  return chunkText(content, 1400, 200).map(
+    (chunk, index) =>
+      `Artifact: ${artifact.name}\nType: ${artifact.mime_type || "unknown"}\nChunk: ${index + 1}\n\n${chunk}`
+  );
+}
+
+function extractArtifactText(artifact: ArtifactRow): string {
+  const metadata = artifact.metadata || {};
+  const candidateFields = [
+    metadata.indexable_content,
+    metadata.content,
+    metadata.body,
+    metadata.markdown,
+    metadata.summary,
+    metadata.text,
+  ];
+  const directText = candidateFields.find(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
+
+  if (typeof directText === "string" && directText.trim()) {
+    return directText.trim();
+  }
+
+  const fallbackParts = [
+    artifact.name ? `Name: ${artifact.name}` : "",
+    artifact.mime_type ? `Mime: ${artifact.mime_type}` : "",
+    artifact.external_url ? `URL: ${artifact.external_url}` : "",
+    artifact.storage_path ? `Storage: ${artifact.storage_path}` : "",
+    typeof metadata.description === "string" ? `Description: ${metadata.description}` : "",
+  ].filter(Boolean);
+
+  return fallbackParts.join("\n");
+}
+
+function chunkText(text: string, maxChars: number, overlap: number): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  if (normalized.length <= maxChars) {
+    return [normalized];
+  }
+
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < normalized.length) {
+    let end = Math.min(normalized.length, start + maxChars);
+
+    if (end < normalized.length) {
+      const boundary = normalized.lastIndexOf("\n", end);
+      if (boundary > start + Math.floor(maxChars / 2)) {
+        end = boundary;
+      }
+    }
+
+    chunks.push(normalized.slice(start, end).trim());
+    if (end >= normalized.length) {
+      break;
+    }
+
+    start = Math.max(end - overlap, start + 1);
+  }
+
+  return chunks.filter(Boolean);
 }
 
 async function ensureOpenAiServiceKeyNeeded(
@@ -484,6 +641,59 @@ async function serviceNotificationAlreadySent(
   }
 
   return Boolean(count && count > 0);
+}
+
+async function recordProviderUsage(args: {
+  batchSize: number;
+  model: string;
+  promptTokens?: number;
+  serviceName: string;
+  totalTokens?: number;
+}): Promise<void> {
+  const promptTokens =
+    typeof args.promptTokens === "number" && Number.isFinite(args.promptTokens)
+      ? args.promptTokens
+      : null;
+  const totalTokens =
+    typeof args.totalTokens === "number" && Number.isFinite(args.totalTokens)
+      ? args.totalTokens
+      : promptTokens;
+
+  if (promptTokens === null && totalTokens === null) {
+    return;
+  }
+
+  const db = getDb();
+  const summaryParts = [];
+  if (promptTokens !== null) {
+    summaryParts.push(`${promptTokens} prompt tokens`);
+  }
+  if (totalTokens !== null && totalTokens !== promptTokens) {
+    summaryParts.push(`${totalTokens} total tokens`);
+  }
+
+  const { error } = await db.from("events").insert({
+    trace_id: null,
+    agent_id: null,
+    event_type: "provider.usage",
+    severity: "info",
+    scope_type: "company",
+    scope_id: "system",
+    summary: `Recorded ${args.serviceName} usage for ${args.model}: ${summaryParts.join(", ")}`,
+    detail: {
+      batch_size: args.batchSize,
+      endpoint: "embeddings",
+      model: args.model,
+      prompt_tokens: promptTokens,
+      provider: "openai",
+      service_name: args.serviceName,
+      total_tokens: totalTokens,
+    },
+  });
+
+  if (error) {
+    console.error("Failed to record provider usage event:", error);
+  }
 }
 
 let asyncInterval: ReturnType<typeof setInterval> | null = null;

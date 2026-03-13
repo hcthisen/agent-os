@@ -1,72 +1,24 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import {
+  MANAGED_SERVICES,
+  inspectContainers,
+  inspectServices,
+  resolveComposeRuntime,
+  runDocker,
+  type ManagedServiceName,
+  type ManagedServiceStatus,
+} from "../compose_runtime.js";
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { getCurrentTaskContext } from "../scope.js";
-
-const ALLOWED_SERVICES = [
-  "admin",
-  "auth",
-  "autoheal",
-  "browser",
-  "caddy",
-  "db",
-  "mcp",
-  "public",
-  "realtime",
-  "rest",
-  "storage",
-  "supervisor",
-] as const;
 
 const RELOAD_COMMANDS: Record<string, string[]> = {
   caddy: ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
   public: ["nginx", "-s", "reload"],
 };
 
-type AllowedService = (typeof ALLOWED_SERVICES)[number];
+type AllowedService = ManagedServiceName;
 type ServiceControlAction = "reload" | "restart" | "status";
-
-interface DockerInspectState {
-  ExitCode?: number;
-  Health?: {
-    Status?: string;
-  };
-  Running?: boolean;
-  StartedAt?: string;
-  Status?: string;
-}
-
-interface DockerInspectConfig {
-  Labels?: Record<string, string>;
-}
-
-interface DockerInspectNetworkSettings {
-  Networks?: Record<string, { IPAddress?: string }>;
-}
-
-interface DockerInspectResult {
-  Config?: DockerInspectConfig;
-  Id: string;
-  Name?: string;
-  NetworkSettings?: DockerInspectNetworkSettings;
-  State?: DockerInspectState;
-}
-
-interface ComposeRuntime {
-  currentContainerId: string;
-  currentService: string;
-  project: string;
-}
-
-interface ManagedServiceStatus {
-  container_id: string | null;
-  container_name: string | null;
-  health: string | null;
-  ip_addresses: string[];
-  self_target: boolean;
-  service: string;
-  state: string;
-}
 
 export const serviceControlDef = {
   name: "service_control",
@@ -179,7 +131,7 @@ function normalizeRequestedServices(
 
   if (!combined.length) {
     if (action === "status") {
-      return [...ALLOWED_SERVICES];
+      return [...MANAGED_SERVICES];
     }
 
     throw new Error("service_control restart/reload requires service or services");
@@ -187,7 +139,7 @@ function normalizeRequestedServices(
 
   const deduped = [...new Set(combined)];
   for (const service of deduped) {
-    if (!ALLOWED_SERVICES.includes(service as AllowedService)) {
+    if (!MANAGED_SERVICES.includes(service as AllowedService)) {
       throw new Error(`service_control does not allow service '${service}'`);
     }
   }
@@ -195,87 +147,13 @@ function normalizeRequestedServices(
   return deduped as AllowedService[];
 }
 
-function resolveComposeRuntime(): ComposeRuntime {
-  const currentContainerId = String(process.env.HOSTNAME || "").trim();
-  if (!currentContainerId) {
-    throw new Error("service_control requires HOSTNAME to resolve the current container");
-  }
-
-  const [inspect] = inspectContainers([currentContainerId]);
-  const labels = inspect?.Config?.Labels || {};
-  const project = labels["com.docker.compose.project"];
-  const currentService = labels["com.docker.compose.service"];
-
-  if (!project || !currentService) {
-    throw new Error("service_control could not resolve the current Compose project");
-  }
-
-  return {
-    currentContainerId,
-    currentService,
-    project,
-  };
-}
-
-function inspectServices(
-  runtime: ComposeRuntime,
-  services: AllowedService[]
-): ManagedServiceStatus[] {
-  return services.map((service) => inspectService(runtime, service));
-}
-
-function inspectService(
-  runtime: ComposeRuntime,
-  service: AllowedService
-): ManagedServiceStatus {
-  const containerId = runDocker([
-    "ps",
-    "-aq",
-    "--no-trunc",
-    "--filter",
-    `label=com.docker.compose.project=${runtime.project}`,
-    "--filter",
-    `label=com.docker.compose.service=${service}`,
-    "--latest",
-  ]).trim();
-
-  if (!containerId) {
-    return {
-      container_id: null,
-      container_name: null,
-      health: null,
-      ip_addresses: [],
-      self_target: false,
-      service,
-      state: "missing",
-    };
-  }
-
-  const [inspect] = inspectContainers([containerId]);
-  const state = inspect?.State || {};
-  const networks = inspect?.NetworkSettings?.Networks || {};
-  const health = state.Health?.Status || null;
-
-  return {
-    container_id: inspect.Id,
-    container_name: inspect.Name ? inspect.Name.replace(/^\/+/, "") : null,
-    health,
-    ip_addresses: Object.values(networks)
-      .map((network) => network.IPAddress || "")
-      .filter(Boolean),
-    self_target: inspect.Id.startsWith(runtime.currentContainerId),
-    service,
-    state: state.Status || (state.Running ? "running" : "stopped") || "unknown",
-  };
-}
-
 async function restartService(
   serviceState: ManagedServiceStatus,
-  currentContainerId: string
+  currentContainerId: string | null
 ): Promise<Record<string, unknown>> {
   const containerId = serviceState.container_id!;
 
-  if (containerId.startsWith(currentContainerId)) {
+  if (currentContainerId && containerId.startsWith(currentContainerId)) {
     queueSelfRestart(containerId);
     return {
       action: "restart",
@@ -361,30 +239,4 @@ function queueSelfRestart(containerId: string): void {
   });
 
   child.unref();
-}
-
-function inspectContainers(containerIds: string[]): DockerInspectResult[] {
-  if (!containerIds.length) {
-    return [];
-  }
-
-  const output = runDocker(["inspect", ...containerIds]);
-  return JSON.parse(output) as DockerInspectResult[];
-}
-
-function runDocker(args: string[]): string {
-  const result = spawnSync("docker", args, {
-    encoding: "utf8",
-    timeout: 30000,
-  });
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || "docker command failed").trim());
-  }
-
-  return result.stdout.trim();
 }

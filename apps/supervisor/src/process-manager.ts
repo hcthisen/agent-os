@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   access,
@@ -138,6 +138,7 @@ export async function launchAgent(
     activeProvider === "openai"
       ? await prepareCodexHome(workDir)
       : config.agentHomeDir;
+  const composeRuntimeEnv = getComposeRuntimeEnv();
 
   // Write MCP config with env vars resolved
   const mcpConfig = {
@@ -150,7 +151,13 @@ export async function launchAgent(
             process.env.POSTGREST_URL || process.env.SUPABASE_URL || "",
           SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || "",
           AGENT_ID: agentId,
+          CADDY_SITE_SNIPPETS_DIR: config.caddySiteSnippetsDir,
+          COMPOSE_CURRENT_CONTAINER_ID:
+            composeRuntimeEnv.COMPOSE_CURRENT_CONTAINER_ID || "",
+          COMPOSE_CURRENT_SERVICE: composeRuntimeEnv.COMPOSE_CURRENT_SERVICE || "",
+          COMPOSE_PROJECT: composeRuntimeEnv.COMPOSE_PROJECT || "",
           TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
+          ROOT_DOMAIN: config.rootDomain,
           WORKSPACE_DIR: workDir,
           PUBLIC_LIVE_DIR: config.publicLiveDir,
           PUBLIC_SITE_URL: config.publicSiteUrl,
@@ -372,7 +379,7 @@ async function handleProcessExit(
       const fallbackState = shouldAutoReviewOnSuccess(active.roleId)
         ? "in_review"
         : "completed";
-      await db
+      const { error: fallbackError } = await db
         .from("tasks")
         .update({
           state: fallbackState,
@@ -380,6 +387,23 @@ async function handleProcessExit(
             handoffNote || buildFallbackHandoffNote(active.roleId, fallbackState),
         })
         .eq("id", active.taskId);
+
+      if (fallbackError) {
+        console.warn(
+          `Fallback task completion for ${active.taskId} was blocked: ${fallbackError.message}`
+        );
+        await db
+          .from("tasks")
+          .update({
+            blocked_reason: `Automatic completion blocked: ${fallbackError.message}`,
+            last_handoff_note:
+              handoffNote ||
+              `Automatic completion was blocked. Resolve the outstanding task requirements and continue from review.`,
+            state: "blocked_on_agent",
+          })
+          .eq("id", active.taskId)
+          .eq("state", "running");
+      }
     }
   } else {
     // Mark task as failed
@@ -615,11 +639,14 @@ interface BuildLaunchSpecInput {
   workDir: string;
 }
 
+let composeRuntimeEnvCache: Record<string, string> | null = null;
+
 function buildLaunchSpec(input: BuildLaunchSpecInput): {
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
 } {
+  const composeRuntimeEnv = getComposeRuntimeEnv();
   const commonEnv = {
     ...process.env,
     HOME: input.homeDir,
@@ -652,7 +679,13 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
     POSTGREST_URL: process.env.POSTGREST_URL || process.env.SUPABASE_URL || "",
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || "",
     AGENT_ID: input.agentId,
+    CADDY_SITE_SNIPPETS_DIR: config.caddySiteSnippetsDir,
+    COMPOSE_CURRENT_CONTAINER_ID:
+      composeRuntimeEnv.COMPOSE_CURRENT_CONTAINER_ID || "",
+    COMPOSE_CURRENT_SERVICE: composeRuntimeEnv.COMPOSE_CURRENT_SERVICE || "",
+    COMPOSE_PROJECT: composeRuntimeEnv.COMPOSE_PROJECT || "",
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
+    ROOT_DOMAIN: config.rootDomain,
     WORKSPACE_DIR: input.workDir,
     PUBLIC_LIVE_DIR: config.publicLiveDir,
     PUBLIC_SITE_URL: config.publicSiteUrl,
@@ -841,6 +874,74 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
+function getComposeRuntimeEnv(): Record<string, string> {
+  if (composeRuntimeEnvCache) {
+    return composeRuntimeEnvCache;
+  }
+
+  const explicitProject = String(process.env.COMPOSE_PROJECT || "").trim();
+  const explicitService = String(process.env.COMPOSE_CURRENT_SERVICE || "").trim();
+  const explicitContainerId = String(
+    process.env.COMPOSE_CURRENT_CONTAINER_ID || ""
+  ).trim();
+
+  if (explicitProject && explicitService) {
+    composeRuntimeEnvCache = {
+      COMPOSE_CURRENT_CONTAINER_ID: explicitContainerId,
+      COMPOSE_CURRENT_SERVICE: explicitService,
+      COMPOSE_PROJECT: explicitProject,
+    };
+    return composeRuntimeEnvCache;
+  }
+
+  const currentContainerId =
+    explicitContainerId || String(process.env.HOSTNAME || "").trim();
+  if (!currentContainerId) {
+    composeRuntimeEnvCache = {
+      COMPOSE_CURRENT_CONTAINER_ID: "",
+      COMPOSE_CURRENT_SERVICE: "",
+      COMPOSE_PROJECT: "",
+    };
+    return composeRuntimeEnvCache;
+  }
+
+  const inspectResult = spawnSync("docker", ["inspect", currentContainerId], {
+    encoding: "utf8",
+    timeout: 30000,
+  });
+
+  if (inspectResult.error || inspectResult.status !== 0) {
+    composeRuntimeEnvCache = {
+      COMPOSE_CURRENT_CONTAINER_ID: currentContainerId,
+      COMPOSE_CURRENT_SERVICE: "",
+      COMPOSE_PROJECT: "",
+    };
+    return composeRuntimeEnvCache;
+  }
+
+  try {
+    const [inspect] = JSON.parse(inspectResult.stdout) as Array<{
+      Config?: { Labels?: Record<string, string> };
+      Id?: string;
+    }>;
+    const labels = inspect?.Config?.Labels || {};
+
+    composeRuntimeEnvCache = {
+      COMPOSE_CURRENT_CONTAINER_ID: inspect?.Id || currentContainerId,
+      COMPOSE_CURRENT_SERVICE: labels["com.docker.compose.service"] || "",
+      COMPOSE_PROJECT: labels["com.docker.compose.project"] || "",
+    };
+  } catch {
+    composeRuntimeEnvCache = {
+      COMPOSE_CURRENT_CONTAINER_ID: currentContainerId,
+      COMPOSE_CURRENT_SERVICE: "",
+      COMPOSE_PROJECT: "",
+    };
+  }
+
+  return composeRuntimeEnvCache;
+}
+
 function formatBriefing(contextPack: Record<string, unknown>): string {
   const {
     agent_identity: _agentIdentity,
@@ -983,6 +1084,9 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 - When done, update the task state and write a handoff note.
 - Log all side effects via event_log.
 - Write durable facts to memory via memory_write.
+- Use task_create with depends_on when the work benefits from a staged task graph. You can start implementation now and queue follow-up review or remediation tasks that wait on prerequisite tasks automatically.
+- Use service_require before credentialed third-party integrations and block if the service is not active yet.
+- Use public_site_verify for public-facing changes and public_site_route for hostname lifecycle changes; do not mark the task complete without verification evidence.
 `;
 
   if (lastHandoff) {

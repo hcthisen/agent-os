@@ -179,6 +179,20 @@ export interface Artifact {
   created_at: string;
 }
 
+export interface TaskRequirement {
+  id: string;
+  task_id: string;
+  requirement_type: string;
+  target: string;
+  expected: Record<string, unknown>;
+  status: string;
+  required_for_completion: boolean;
+  last_result: Record<string, unknown>;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Handoff {
   id: string;
   task_id: string;
@@ -247,4 +261,7 @@ export interface ContextPack {
   recent_events: Event[];
   related_memories: Memory[];
   related_artifacts: Artifact[];
+  dependency_tasks: Task[];
+  child_tasks: Task[];
+  task_requirements: TaskRequirement[];
 }

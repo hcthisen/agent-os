@@ -26,6 +26,11 @@ export const artifactPutDef = {
       },
       mime_type: { type: "string" },
       size_bytes: { type: "number" },
+      content: {
+        type: "string",
+        description:
+          "Optional text content or summary to index for retrieval. Use for reports, plans, docs, and similar artifacts.",
+      },
       metadata: { type: "object" },
     },
     required: ["name", "artifact_type"],
@@ -41,6 +46,7 @@ export async function artifactPut(args: {
   external_url?: string;
   mime_type?: string;
   size_bytes?: number;
+  content?: string;
   metadata?: Record<string, unknown>;
 }): Promise<unknown> {
   const db = getDb();
@@ -60,6 +66,12 @@ export async function artifactPut(args: {
     taskId = (await requireCurrentTaskContext()).id;
   }
 
+  const content = String(args.content || "").trim();
+  const metadata = {
+    ...(args.metadata || {}),
+    ...(content ? { indexable_content: content } : {}),
+  };
+
   const { data, error } = await db
     .from("artifacts")
     .insert({
@@ -71,7 +83,7 @@ export async function artifactPut(args: {
       external_url: args.external_url || null,
       mime_type: args.mime_type || null,
       size_bytes: args.size_bytes || null,
-      metadata: args.metadata || {},
+      metadata,
       created_by: ctx.agent_id,
     })
     .select()

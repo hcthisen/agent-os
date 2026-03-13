@@ -460,7 +460,12 @@ Current message:
 ${message.content}
 
 Recent conversation transcript:
-${transcript}`;
+${transcript}
+
+Routing reminders:
+- If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless an approved plan already exists.
+- If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
+- If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.`;
 }
 
 function formatConversationMessage(message) {
@@ -536,28 +541,25 @@ async function callSupervisor(path, options = {}) {
 }
 
 async function loadLatestTaskActivityMap(taskIds) {
-  const taskIdSet = new Set(
-    (Array.isArray(taskIds) ? taskIds : []).filter((taskId) => typeof taskId === "string")
+  const normalizedTaskIds = (Array.isArray(taskIds) ? taskIds : []).filter(
+    (taskId) => typeof taskId === "string"
   );
   const activityMap = new Map();
 
-  if (!taskIdSet.size) {
+  if (!normalizedTaskIds.length) {
     return activityMap;
   }
 
-  const rows = await postgrest("/events", {
-    query: {
-      event_type: "in.(task.heartbeat,task.started)",
-      limit: String(Math.max(500, taskIdSet.size * 4)),
-      order: "created_at.desc",
-      scope_type: "eq.task",
-      select: "scope_id,summary,created_at",
+  const rows = await postgrest("/rpc/latest_task_activity", {
+    body: {
+      p_task_ids: normalizedTaskIds,
     },
+    method: "POST",
   }).catch(() => []);
 
   for (const row of Array.isArray(rows) ? rows : []) {
     const taskId = typeof row?.scope_id === "string" ? row.scope_id : null;
-    if (!taskId || !taskIdSet.has(taskId) || activityMap.has(taskId)) {
+    if (!taskId || activityMap.has(taskId)) {
       continue;
     }
 
@@ -770,11 +772,17 @@ async function handleApi(req, res, url) {
 
   if (pathname === "/api/messages" && req.method === "GET") {
     const channel = searchParams.get("channel") || "admin_chat";
+    const before = searchParams.get("before");
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, 200))
+      : 50;
     const data = await postgrest("/messages", {
       query: {
+        ...(before ? { created_at: `lt.${before}` } : {}),
         channel: `eq.${channel}`,
-        limit: "100",
-        order: "created_at.asc",
+        limit: String(limit),
+        order: "created_at.desc",
         select: "id,direction,sender,content,created_at,task_id,metadata",
       },
     });
@@ -782,7 +790,11 @@ async function handleApi(req, res, url) {
       channel === "admin_chat" && Array.isArray(data)
         ? data.filter((message) => !shouldHideAdminMessage(message))
         : data || [];
-    sendJson(res, 200, visibleData);
+    sendJson(
+      res,
+      200,
+      Array.isArray(visibleData) ? [...visibleData].reverse() : visibleData
+    );
     return;
   }
 

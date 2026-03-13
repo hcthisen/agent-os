@@ -87,6 +87,12 @@ export async function memoryWrite(args: {
       .from("memories")
       .update({ is_active: false })
       .eq("id", args.supersedes_memory_id);
+
+    await db
+      .from("memory_chunks")
+      .delete()
+      .eq("source_type", "memory")
+      .eq("source_id", args.supersedes_memory_id);
   }
 
   const { data, error } = await db

@@ -168,6 +168,7 @@ services:
     entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
     command: ["node", "apps/supervisor/dist/index.js"]
     environment:
+      CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
       POSTGREST_URL: http://rest:3000
       MCP_CONFIG_PATH: /app/mcp-config.json
       AGENT_HOME_DIR: /home/node
@@ -176,6 +177,7 @@ services:
       CONCURRENCY_LIMIT: 5
       PUBLIC_LIVE_DIR: /app/public-live
       PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-}
+      ROOT_DOMAIN: ${ROOT_DOMAIN:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro
@@ -204,7 +206,9 @@ services:
     entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
     command: ["node", "apps/mcp/dist/index.js"]
     environment:
+      CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
       POSTGREST_URL: http://rest:3000
+      ROOT_DOMAIN: ${ROOT_DOMAIN:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro
