@@ -83,8 +83,10 @@ You have access to the MCP server tools. Use them. Do not:
 - Hardcode API keys, secrets, or credentials anywhere.
 
 If you need an external service (Stripe, email, TTS, etc.), check the service registry
-via the MCP server. If the key is missing, use `approval_request` to ask the operator to
-provide it. Do not proceed without it.
+via the MCP server. Use `service_require` when that tool is available. If the service is
+missing or inactive, stop and ask the operator to configure it in Service Connections.
+Do not proceed without it and do not ship a placeholder implementation pretending the
+real integration is complete.
 
 When the task requires inspecting, restarting, or reloading managed VPS services, use
 the `service_control` MCP tool if the target service is supported there. Do not bypass
@@ -173,6 +175,11 @@ Then **stop and ask**. Use `approval_request` for decisions requiring human sign
 Use `task_create` to request another role's input. Use `handoff_create` to pass the
 task if it is outside your domain.
 
+When a task has multiple stages, prefer creating a task graph instead of relying on
+manual follow-up. `task_create` supports `depends_on`, so you can queue later review,
+verification, or remediation tasks now and let the scheduler wait automatically for the
+prerequisite work to finish.
+
 The cost of pausing is always less than the cost of a confident mistake.
 
 ## Runtime Documents
@@ -230,6 +237,9 @@ Before you were launched, the supervisor built a context pack for your task. Thi
 - **related_memories**: Relevant memories, scoped from narrowest (task) to broadest
   (company).
 - **related_artifacts**: Files, docs, PRs linked to this task.
+- **dependency_tasks**: Tasks that must complete before this one can start.
+- **child_tasks**: Direct follow-up tasks already attached to this task.
+- **task_requirements**: Service or verification requirements that block completion.
 
 If you need more context mid-run, use `context_refresh` to get an updated pack, or
 `memory_search` for specific queries.

@@ -259,6 +259,10 @@ Responsibilities:
 7. Record the run outcome and update the task.
 8. Recover orphaned work after restarts.
 
+Task eligibility is dependency-aware. A task can be created early with `depends_on`
+prerequisites and remain queued until each dependency task is `completed`. This lets the
+system execute multi-phase plans autonomously without manually waiting between steps.
+
 ### 5. MCP Server
 
 The MCP server is the agent's only sanctioned control plane. Agents do not connect to the
@@ -280,15 +284,19 @@ Current tools:
 |------|---------|
 | `task_claim` | Claim the next ready task for your role |
 | `task_update` | Update task state and handoff details |
-| `task_create` | Create sub-tasks or delegated work |
+| `task_create` | Create sub-tasks or delegated work, including dependency-aware follow-up tasks |
 | `memory_search` | Scoped hybrid memory retrieval |
 | `memory_write` | Write semantic or episodic memory |
 | `event_log` | Record a side effect or operational event |
 | `artifact_put` | Register a file, report, PR, or other artifact |
 | `handoff_create` | Explicitly hand work to another role or agent |
 | `public_site_publish` | Publish a new atomic release of the public site |
+| `public_site_route` | Create, remove, or verify public hostname routing |
+| `public_site_verify` | Verify public URLs and record route evidence |
 | `approval_request` | Ask the operator for a high-stakes approval |
+| `observability_snapshot` | Read queue, auth, service, approval, and usage health for sentinel checks |
 | `service_control` | Check, restart, or reload allowlisted VPS services |
+| `service_require` | Require a configured third-party service before implementation proceeds |
 | `context_refresh` | Rebuild the current context pack mid-run |
 | `message_send` | Send an operator-facing message |
 | `schedule_update` | Modify an existing recurring schedule |
@@ -391,6 +399,7 @@ judgment contaminates future sessions, not just the current task.
 The sentinel monitors:
 
 - queue depth and throughput
+- launchable queue versus dependency-waiting backlog
 - stuck tasks
 - provider auth validity
 - service health
@@ -446,6 +455,22 @@ Human message
 ```
 
 Every transition out of `running`, blocked, or failed requires a handoff note.
+
+### Dependency-Aware Task Graphs
+
+The queue supports DAG-style execution through `tasks.depends_on`.
+
+Typical pattern:
+
+1. Sage creates an implementation task.
+2. Sage creates desktop and mobile review tasks that both depend on the implementation
+   task.
+3. Sage, builder, or reviewer creates a follow-up remediation or re-planning task that
+   depends on both reviews.
+
+Those follow-up tasks can be created immediately. They remain in `ready`, but the
+supervisor and `task_claim` only treat them as launchable after every dependency is
+completed. Dependency-waiting tasks are not treated as stale queue failures.
 
 ## Memory System
 
@@ -519,6 +544,15 @@ When an agent needs an external capability:
 5. the task resumes
 
 Agents do not receive decrypted secrets directly.
+
+For credentialed third-party work, the intended execution path is:
+
+1. plan first when the work is non-trivial
+2. call `service_require`
+3. if the service is missing or inactive, stop and request operator configuration
+4. only implement after the service is active
+
+Shipping a placeholder integration without the required service is considered incorrect.
 
 ## Security Model
 

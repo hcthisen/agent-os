@@ -128,6 +128,20 @@ The atomic unit of work. **Strict state machine enforced by database trigger.**
 
 **Indexes:** state, project_id, claimed_by, parent_task_id, (priority + state).
 
+`depends_on` is not just metadata. Scheduler behavior must treat a task in `ready` as
+launchable only when every referenced dependency task is `completed`. Dependency-waiting
+tasks may remain in `ready` with a descriptive handoff note and must not be counted as
+ordinary stale queue failures.
+
+Typical usage:
+
+1. Create the implementation task.
+2. Create review tasks that depend on the implementation task.
+3. Create remediation or follow-up planning tasks that depend on one or more review
+   tasks.
+
+The system should allow those follow-up tasks to exist before their prerequisites finish.
+
 #### Task State Machine
 
 Enforced by a `BEFORE UPDATE` trigger. The trigger must:
@@ -319,6 +333,49 @@ Human-in-the-loop gate for high-stakes actions.
 
 **Indexes:** task_id, status WHERE status = 'pending'.
 
+### task_requirements
+
+Completion gates attached to tasks. These let the system block a task from moving to
+`in_review` or `completed` until required service, route, or verification checks pass.
+
+| Column                  | Type      | Notes                                              |
+|-------------------------|-----------|----------------------------------------------------|
+| id                      | uuid PK   |                                                    |
+| task_id                 | uuid FK→tasks |                                              |
+| requirement_type        | text      | `service_active`, `public_route`, `url_status`.    |
+| target                  | text      | Service name, hostname, or URL target.             |
+| expected                | jsonb     | Expected outcome details.                          |
+| status                  | text      | `pending`, `passed`, `failed`, `blocked`.          |
+| required_for_completion | bool      | Default true.                                      |
+| last_result             | jsonb     | Latest verification payload.                       |
+| created_by              | uuid FK→agents |                                              |
+| created_at              | timestamptz |                                                |
+| updated_at              | timestamptz |                                                |
+
+**Indexes:** task_id, (task_id + status).
+
+### public_site_routes
+
+Durable lifecycle state for public hostnames managed by the system.
+
+| Column            | Type      | Notes                                         |
+|-------------------|-----------|-----------------------------------------------|
+| id                | uuid PK   |                                               |
+| hostname          | text UQ   | Public hostname, e.g. `weather.domain.com`.   |
+| target_path       | text      | Local published path when active.             |
+| desired_state     | text      | `active`, `removed`.                          |
+| observed_state    | text      | `pending`, `active`, `removed`, `error`.      |
+| last_http_status  | int       | Latest external HTTP status.                  |
+| last_verified_url | text      | URL checked during verification.              |
+| last_verified_at  | timestamptz |                                             |
+| last_error        | text      | Latest verification or routing error.         |
+| last_task_id      | uuid FK→tasks |                                         |
+| created_by        | uuid FK→agents |                                         |
+| created_at        | timestamptz |                                             |
+| updated_at        | timestamptz |                                             |
+
+**Indexes:** last_task_id, (desired_state + observed_state).
+
 ### artifacts
 
 Index of files, PRs, docs, reports, and other work products. The actual files live in
@@ -500,7 +557,10 @@ supervisor before launching a native coding CLI process.
     /* + memories scoped to company (limit 10) */
     /* ordered: task scope first, then project, then role, then company */
   ],
-  "related_artifacts": [ /* artifacts linked to this task */ ]
+  "related_artifacts": [ /* artifacts linked to this task */ ],
+  "dependency_tasks": [ /* full task rows referenced by task.depends_on */ ],
+  "child_tasks": [ /* direct child tasks where parent_task_id = this task */ ],
+  "task_requirements": [ /* completion-gate requirements for this task */ ]
 }
 ```
 
@@ -511,6 +571,12 @@ resolves those into the active provider's concrete launch settings.
 **The supervisor takes this JSON and generates runtime docs** such as
 `ROLE_POLICY.md`, `ROLE_DIRECTORY.md`, `AGENT_IDENTITY.md`, and `TASK_BRIEFING.md`.
 `AGENTS_INSCTRUCTIONS.md` remains the single foundational repo file used at launch.
+
+The context pack should preserve the task-graph view needed for autonomous orchestration:
+
+- `dependency_tasks` tells an agent what must finish before this task can run.
+- `child_tasks` lets an agent see already-created follow-up work.
+- `task_requirements` exposes service and verification gates that block completion.
 
 ## Row Level Security
 
@@ -552,3 +618,25 @@ Three operations happen asynchronously after the agent's session:
 
 These async processes write to `memory_chunks`. They never modify the source `memories`
 or `artifacts` tables — those are the source of truth.
+
+## Operational Semantics
+
+### Dependency-aware claiming
+
+- `task_claim` should return only launchable `ready` tasks for the current role.
+- If only dependency-waiting tasks exist, it should report that no launchable task is
+  currently available rather than claiming one prematurely.
+- The supervisor poller must follow the same rule so direct claiming and background
+  scheduling behave consistently.
+
+### External-service workflow
+
+For credentialed third-party integrations, the documented path is:
+
+1. plan the work when non-trivial
+2. create or verify the service slot
+3. wait for operator-provided credentials when needed
+4. implement only after the service is active
+
+`task_requirements` is the durable mechanism that prevents the task from being marked
+done before those checks pass.
