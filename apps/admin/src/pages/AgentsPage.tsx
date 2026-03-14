@@ -115,7 +115,7 @@ const OPENAI_AUTH_STATUS_LABELS: Record<OpenAiDeviceAuthResponse["status"], stri
   failed: "Failed",
   idle: "Idle",
   starting: "Starting",
-  waiting: "Waiting for approval",
+  waiting: "Waiting for sign-in",
 };
 
 const OPENAI_AUTH_STATUS_COLORS: Record<OpenAiDeviceAuthResponse["status"], string> = {

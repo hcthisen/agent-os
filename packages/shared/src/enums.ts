@@ -3,7 +3,6 @@ export const TaskState = {
   READY: "ready",
   CLAIMED: "claimed",
   RUNNING: "running",
-  BLOCKED_ON_HUMAN: "blocked_on_human",
   BLOCKED_ON_AGENT: "blocked_on_agent",
   IN_REVIEW: "in_review",
   COMPLETED: "completed",
@@ -44,15 +43,6 @@ export const MemoryLayer = {
   PROCEDURAL: "procedural",
 } as const;
 export type MemoryLayer = (typeof MemoryLayer)[keyof typeof MemoryLayer];
-
-export const ApprovalStatus = {
-  PENDING: "pending",
-  APPROVED: "approved",
-  REJECTED: "rejected",
-  EXPIRED: "expired",
-} as const;
-export type ApprovalStatus =
-  (typeof ApprovalStatus)[keyof typeof ApprovalStatus];
 
 export const AgentStatus = {
   ACTIVE: "active",

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { formatDateTime, parseTagInput, safeJsonParse, safeJsonStringify, toTagInput } from "../lib/format";
+import { formatDateTime, safeJsonParse, safeJsonStringify } from "../lib/format";
 import type { AgentActivityRecord, AgentRecord, RoleRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
@@ -36,7 +36,6 @@ const EMPTY_ROLE_FORM = {
   max_concurrent_tasks: 3,
   model: "sonnet",
   policy_doc: "",
-  requires_approval_for: "",
   usage_summary: "",
 };
 
@@ -123,7 +122,6 @@ export function AgentsControlPage() {
             max_concurrent_tasks: detail.max_concurrent_tasks || 3,
             model: detail.model || "sonnet",
             policy_doc: detail.policy_doc || "",
-            requires_approval_for: toTagInput(detail.requires_approval_for),
             usage_summary: detail.usage_summary || "",
           });
         }
@@ -187,7 +185,6 @@ export function AgentsControlPage() {
         max_concurrent_tasks: Number(roleForm.max_concurrent_tasks) || 3,
         model: roleForm.model,
         policy_doc: roleForm.policy_doc,
-        requires_approval_for: parseTagInput(roleForm.requires_approval_for),
         usage_summary: roleForm.usage_summary,
       };
 
@@ -641,20 +638,6 @@ export function AgentsControlPage() {
                   </select>
                 </div>
               </div>
-              <div>
-                <label style={shellStyles.label}>Requires Approval For</label>
-                <input
-                  onChange={(event) =>
-                    setRoleForm((current) => ({
-                      ...current,
-                      requires_approval_for: event.target.value,
-                    }))
-                  }
-                  placeholder="system.modify, service.manage"
-                  style={{ ...shellStyles.input, width: "100%" }}
-                  value={roleForm.requires_approval_for}
-                />
-              </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button
                   disabled={savingRole}
@@ -790,4 +773,3 @@ export function AgentsControlPage() {
     </div>
   );
 }
-

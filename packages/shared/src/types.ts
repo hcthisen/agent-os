@@ -4,7 +4,6 @@ import type {
   ScopeType,
   EventSeverity,
   MemoryLayer,
-  ApprovalStatus,
   AgentStatus,
   ServiceStatus,
   ClaudeModel,
@@ -22,7 +21,6 @@ export interface Role {
   model: ClaudeModel;
   effort: ClaudeEffort;
   max_concurrent_tasks: number;
-  requires_approval_for: string[];
   is_system_role: boolean;
   created_at: string;
   updated_at: string;
@@ -77,7 +75,6 @@ export interface Task {
   max_attempts: number;
   blocked_reason: string | null;
   depends_on: string[];
-  requires_approval: boolean;
   is_system_modification: boolean;
   last_handoff_note: string | null;
   due_at: string | null;
@@ -146,21 +143,6 @@ export interface MemoryChunk {
   scope_id: string;
   content: string;
   embedding: number[] | null;
-  created_at: string;
-}
-
-export interface Approval {
-  id: string;
-  task_id: string;
-  agent_id: string;
-  action_type: string;
-  description: string;
-  context: Record<string, unknown>;
-  status: ApprovalStatus;
-  decided_by: string | null;
-  decided_at: string | null;
-  reason: string | null;
-  expires_at: string;
   created_at: string;
 }
 
@@ -285,7 +267,6 @@ export interface ContextPack {
   model: ClaudeModel;
   effort: ClaudeEffort;
   last_handoff: Handoff | null;
-  pending_approvals: Approval[];
   recent_events: Event[];
   related_memories: Memory[];
   relevant_skills?: Skill[];

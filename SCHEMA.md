@@ -1,4 +1,4 @@
-# Schema
+﻿# Schema
 
 This document describes the data model for the Supabase control plane. It is not SQL —
 the coding agent generates the actual migrations. This document captures the tables,
@@ -16,7 +16,7 @@ implement.
 ### roles
 
 The job description table. Defines what an agent can do, which base reasoning profile it
-uses, and what actions require human approval.
+uses, and how it should operate.
 
 | Column                  | Type     | Notes                                          |
 |-------------------------|----------|-------------------------------------------------|
@@ -30,8 +30,6 @@ uses, and what actions require human approval.
 | effort                  | text     | Default reasoning effort: `low`, `medium`, `high`, `xhigh`. |
 | max_concurrent_tasks    | int      | Default 3. How many tasks this role can have in |
 |                         |          | `claimed` or `running` simultaneously.          |
-| requires_approval_for   | jsonb    | Array of action types needing human sign-off.   |
-|                         |          | e.g. `["payment", "deploy_prod", "data_delete"]`|
 | is_system_role          | bool     | True for the 6 foundational roles. System roles |
 |                         |          | cannot be deleted, only modified by architect.  |
 | created_at              | timestamptz | Auto.                                        |
@@ -116,9 +114,8 @@ The atomic unit of work. **Strict state machine enforced by database trigger.**
 | max_attempts        | int          | Default 3. Dead letter threshold.           |
 | blocked_reason      | text         | Required when moving to blocked state.      |
 | depends_on          | uuid[]       | Task IDs that must complete first.          |
-| requires_approval   | bool         | Default false.                              |
 | is_system_modification | bool      | True if this task modifies roles/agents/    |
-|                     |              | policies. Requires architect approval.      |
+|                     |              | policies. Route through architect-owned work. |
 | last_handoff_note   | text         | Updated on every handoff.                   |
 | due_at              | timestamptz  | Optional deadline.                          |
 | started_at          | timestamptz  | Set by trigger when entering running.       |
@@ -147,9 +144,8 @@ The system should allow those follow-up tasks to exist before their prerequisite
 Enforced by a `BEFORE UPDATE` trigger. The trigger must:
 
 1. Validate the transition against the allowed transitions map.
-2. Require `last_handoff_note` when leaving `running`, `blocked_on_human`,
-   `blocked_on_agent`, or `failed`.
-3. Require `blocked_reason` when entering `blocked_on_human` or `blocked_on_agent`.
+2. Require `last_handoff_note` when leaving `running`, `blocked_on_agent`, or `failed`.
+3. Require `blocked_reason` when entering `blocked_on_agent`.
 4. Increment `attempt_count` when entering `failed`.
 5. Auto-route to `dead_letter` if `attempt_count >= max_attempts`.
 6. Set `claimed_at` when entering `claimed`.
@@ -163,8 +159,7 @@ Allowed transitions:
 backlog          → ready, failed
 ready            → claimed, backlog
 claimed          → running, ready
-running          → blocked_on_human, blocked_on_agent, in_review, completed, failed
-blocked_on_human → running, ready, failed
+running          → blocked_on_agent, in_review, completed, failed
 blocked_on_agent → running, ready, failed
 in_review        → completed, running, failed
 completed        → (terminal)
@@ -311,71 +306,7 @@ handles this: it takes the agent's text query, generates an embedding (via the A
 in the service registry, e.g. OpenAI `text-embedding-ada-002` or a Supabase-hosted
 model), and passes both the text and embedding to this function. If no embedding service
 is configured, the function falls back to FTS-only mode.
-
-### approvals
-
-Human-in-the-loop gate for high-stakes actions.
-
-| Column      | Type        | Notes                                            |
-|-------------|-------------|--------------------------------------------------|
-| id          | uuid PK     |                                                  |
-| task_id     | uuid FK→tasks |                                                |
-| agent_id    | uuid FK→agents | Who requested.                                |
-| action_type | text        | e.g. `payment`, `deploy_prod`, `system_modify`. |
-| description | text        | What the agent wants to do and why.              |
-| context     | jsonb       | Relevant data: amounts, affected items, risk.    |
-| status      | enum        | `pending`, `approved`, `rejected`, `expired`.    |
-| decided_by  | text        | Human identifier (from admin panel).             |
-| decided_at  | timestamptz |                                                  |
-| reason      | text        | Human's explanation (optional).                  |
-| expires_at  | timestamptz | Default now() + 24 hours.                        |
-| created_at  | timestamptz |                                                  |
-
-**Indexes:** task_id, status WHERE status = 'pending'.
-
-### task_requirements
-
-Completion gates attached to tasks. These let the system block a task from moving to
-`in_review` or `completed` until required service, route, or verification checks pass.
-
-| Column                  | Type      | Notes                                              |
-|-------------------------|-----------|----------------------------------------------------|
-| id                      | uuid PK   |                                                    |
-| task_id                 | uuid FK→tasks |                                              |
-| requirement_type        | text      | `service_active`, `public_route`, `url_status`.    |
-| target                  | text      | Service name, hostname, or URL target.             |
-| expected                | jsonb     | Expected outcome details.                          |
-| status                  | text      | `pending`, `passed`, `failed`, `blocked`.          |
-| required_for_completion | bool      | Default true.                                      |
-| last_result             | jsonb     | Latest verification payload.                       |
-| created_by              | uuid FK→agents |                                              |
-| created_at              | timestamptz |                                                |
-| updated_at              | timestamptz |                                                |
-
-**Indexes:** task_id, (task_id + status).
-
-### public_site_routes
-
-Durable lifecycle state for public hostnames managed by the system.
-
-| Column            | Type      | Notes                                         |
-|-------------------|-----------|-----------------------------------------------|
-| id                | uuid PK   |                                               |
-| hostname          | text UQ   | Public hostname, e.g. `weather.domain.com`.   |
-| target_path       | text      | Local published path when active.             |
-| desired_state     | text      | `active`, `removed`.                          |
-| observed_state    | text      | `pending`, `active`, `removed`, `error`.      |
-| last_http_status  | int       | Latest external HTTP status.                  |
-| last_verified_url | text      | URL checked during verification.              |
-| last_verified_at  | timestamptz |                                             |
-| last_error        | text      | Latest verification or routing error.         |
-| last_task_id      | uuid FK→tasks |                                         |
-| created_by        | uuid FK→agents |                                         |
-| created_at        | timestamptz |                                             |
-| updated_at        | timestamptz |                                             |
-
-**Indexes:** last_task_id, (desired_state + observed_state).
-
+
 ### artifacts
 
 Index of files, PRs, docs, reports, and other work products. The actual files live in
@@ -548,7 +479,6 @@ supervisor before launching a native coding CLI process.
   "model": "opus",
   "effort": "high",
   "last_handoff": { /* most recent handoff for this task */ },
-  "pending_approvals": [ /* approvals with status=pending for this task */ ],
   "recent_events": [ /* last 20 events scoped to this task */ ],
   "related_memories": [
     /* memories scoped to this task (all) */
@@ -640,3 +570,4 @@ For credentialed third-party integrations, the documented path is:
 
 `task_requirements` is the durable mechanism that prevents the task from being marked
 done before those checks pass.
+

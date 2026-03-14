@@ -31,7 +31,6 @@ export const taskCreateDef = {
         items: { type: "string" },
       },
       project_id: { type: "string" },
-      requires_approval: { type: "boolean", default: false },
       is_system_modification: { type: "boolean", default: false },
       state: {
         type: "string",
@@ -52,7 +51,6 @@ export async function taskCreate(args: {
   parent_task_id?: string;
   depends_on?: string[];
   project_id?: string;
-  requires_approval?: boolean;
   is_system_modification?: boolean;
   state?: string;
 }): Promise<unknown> {
@@ -156,7 +154,6 @@ export async function taskCreate(args: {
       "ready",
       "claimed",
       "running",
-      "blocked_on_human",
       "blocked_on_agent",
       "in_review",
     ]);
@@ -211,7 +208,6 @@ export async function taskCreate(args: {
       parent_task_id: parentTaskId,
       depends_on: dependencyIds,
       project_id: projectId,
-      requires_approval: args.requires_approval || false,
       is_system_modification: args.is_system_modification || false,
       state: args.state || "ready",
     })

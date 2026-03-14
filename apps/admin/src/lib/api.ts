@@ -1,7 +1,6 @@
 import type {
   AgentActivityRecord,
   AgentRecord,
-  ApprovalRecord,
   ArtifactRecord,
   EventRecord,
   MemoryRecord,
@@ -98,10 +97,6 @@ function buildQueryString(
 }
 
 export const api = {
-  approveApproval: (approvalId: string) =>
-    apiPost<void>(`/approvals/${approvalId}/decision`, {
-      decision: "approved",
-    }),
   cancelOpenAiDeviceAuth: (): Promise<any> =>
     apiPost<any>("/runtime/provider/openai/device-auth/cancel"),
   createAgent: (payload: Partial<AgentRecord> & { name: string; role_id: string }) =>
@@ -146,7 +141,6 @@ export const api = {
   getAgentActivity: (agentId: string) =>
     apiGet<AgentActivityRecord>(`/agents/${agentId}/activity`),
   getAgents: (): Promise<AgentRecord[]> => apiGet<AgentRecord[]>("/agents"),
-  getApprovals: (): Promise<ApprovalRecord[]> => apiGet<ApprovalRecord[]>("/approvals"),
   getArtifact: (artifactId: string) =>
     apiGet<ArtifactRecord>(`/artifacts/${artifactId}`),
   getArtifacts: (options?: {
@@ -248,10 +242,6 @@ export const api = {
   login: (user: string, pass: string): Promise<any> =>
     apiPost<any>("/auth/login", { pass, user }),
   logout: () => apiPost<void>("/auth/logout"),
-  rejectApproval: (approvalId: string) =>
-    apiPost<void>(`/approvals/${approvalId}/decision`, {
-      decision: "rejected",
-    }),
   retryTask: (taskId: string) => apiPost<void>(`/tasks/${taskId}/retry`),
   saveRuntimeProvider: (
     activeProvider: string,

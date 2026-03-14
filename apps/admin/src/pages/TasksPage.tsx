@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime, formatDurationMs } from "../lib/format";
-import type { ApprovalRecord, ProjectRecord, RoleRecord, TaskDetailRecord, TaskRecord } from "../lib/types";
+import type { ProjectRecord, RoleRecord, TaskDetailRecord, TaskRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const TASK_PAGE_SIZE = 50;
 const STATE_COLORS: Record<string, string> = {
   blocked_on_agent: "#f59e0b",
-  blocked_on_human: "#f59e0b",
   claimed: "#a855f7",
   completed: "#10b981",
   dead_letter: "#dc2626",
@@ -34,7 +33,6 @@ export function TasksPage({
   onOpenProject?: (projectId: string) => void;
 }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
-  const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [roles, setRoles] = useState<RoleRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [detail, setDetail] = useState<TaskDetailRecord | null>(null);
@@ -64,19 +62,17 @@ export function TasksPage({
   }
 
   async function refresh() {
-    const [tasksData, approvalsData, rolesData, projectsData] = await Promise.all([
+    const [tasksData, rolesData, projectsData] = await Promise.all([
       api.getTasks({
         limit: TASK_PAGE_SIZE,
         project_id: projectFilter || undefined,
         q: search.trim() || undefined,
         state: filter === "all" ? undefined : filter,
       }),
-      api.getApprovals(),
       api.getRoles(),
       api.getProjects(),
     ]);
     setTasks(tasksData || []);
-    setApprovals(approvalsData || []);
     setRoles(rolesData || []);
     setProjects(projectsData || []);
     setHasMore((tasksData || []).length === TASK_PAGE_SIZE);
@@ -119,15 +115,6 @@ export function TasksPage({
         setError(nextError instanceof Error ? nextError.message : "Failed to load task detail.")
       );
   }, [selectedTaskId]);
-
-  async function handleApproval(id: string, decision: "approved" | "rejected") {
-    if (decision === "approved") {
-      await api.approveApproval(id);
-    } else {
-      await api.rejectApproval(id);
-    }
-    await refresh();
-  }
 
   async function retryTask(taskId: string) {
     await api.retryTask(taskId);
@@ -175,45 +162,12 @@ export function TasksPage({
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Tasks</h2>
           <p style={{ ...shellStyles.muted, margin: 0 }}>
-            Task queue, approvals, run history, artifacts, and task creation.
+            Task queue, run history, artifacts, and task creation.
           </p>
         </div>
       </div>
 
       {error && <div style={{ color: "#fca5a5", marginBottom: 12 }}>{error}</div>}
-
-      {approvals.length > 0 && (
-        <div style={{ ...shellStyles.card, border: "1px solid #f59e0b55", marginBottom: 16 }}>
-          <h3 style={{ color: "#fbbf24", fontSize: 15, fontWeight: 600, marginBottom: 10 }}>
-            Pending Approvals ({approvals.length})
-          </h3>
-          {approvals.map((approval) => (
-            <div
-              key={approval.id}
-              style={{ alignItems: "center", display: "flex", gap: 12, marginBottom: 8 }}
-            >
-              <div style={{ flex: 1 }}>
-                <div style={{ color: "#cbd5e1", fontSize: 12 }}>{approval.action_type}</div>
-                <div style={{ color: "#e5e7eb", fontSize: 13 }}>{approval.description}</div>
-              </div>
-              <button
-                onClick={() => void handleApproval(approval.id, "approved")}
-                style={{ ...shellStyles.button, background: "#15803d" }}
-                type="button"
-              >
-                Approve
-              </button>
-              <button
-                onClick={() => void handleApproval(approval.id, "rejected")}
-                style={{ ...shellStyles.button, background: "#b91c1c" }}
-                type="button"
-              >
-                Reject
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
 
       <div style={{ display: "grid", gap: 16, gridTemplateColumns: "minmax(340px, 0.9fr) minmax(0, 1.1fr)" }}>
         <div style={{ display: "grid", gap: 16 }}>
@@ -327,7 +281,6 @@ export function TasksPage({
                 "ready",
                 "claimed",
                 "running",
-                "blocked_on_human",
                 "blocked_on_agent",
                 "in_review",
                 "completed",

@@ -82,13 +82,13 @@ phase turns the admin panel into a real employee management dashboard.
 ### 1.1 Role detail and policy editor `[Agents tab]`
 
 **Context:** `GET /api/roles` already returns full role rows including `policy_doc`,
-`description`, `usage_summary`, `handoff_when`, `requires_approval_for`. The Agents tab
+`description`, `usage_summary`, and `handoff_when`. The Agents tab
 just doesn't display them.
 
 #### Backend:
 - [x] Add `PATCH /api/roles/:id` endpoint in `server.mjs`. Accept: `policy_doc`,
   `description`, `usage_summary`, `handoff_when`, `model`, `effort`,
-  `max_concurrent_tasks`, `requires_approval_for`. Reject attempts to delete system
+  `max_concurrent_tasks`. Reject attempts to delete system
   roles. Validate that `model` is one of haiku/sonnet/opus and `effort` is one of
   low/medium/high/xhigh.
 - [x] Add `POST /api/roles` endpoint for creating new custom roles. Require: `id`
@@ -101,7 +101,6 @@ just doesn't display them.
   clicked, expand or navigate to a detail view showing:
   - `policy_doc` in a textarea/code editor with markdown preview
   - Editable fields: `description`, `usage_summary`, `handoff_when`
-  - `requires_approval_for` as editable tag chips
   - `model`/`effort`/`max_concurrent_tasks` selectors (reuse existing role config UI)
   - Save button calling `PATCH /api/roles/:id`
   - List of agents assigned to this role (filtered from existing agents data)

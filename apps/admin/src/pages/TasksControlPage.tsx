@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime, formatDurationMs } from "../lib/format";
 import type {
-  ApprovalRecord,
   ProjectRecord,
   RoleRecord,
   TaskDetailRecord,
@@ -15,7 +14,6 @@ const TASK_PAGE_SIZE = 50;
 const STATE_COLORS: Record<string, string> = {
   backlog: "#64748b",
   blocked_on_agent: "#f59e0b",
-  blocked_on_human: "#f59e0b",
   claimed: "#a855f7",
   completed: "#10b981",
   dead_letter: "#dc2626",
@@ -50,7 +48,6 @@ export function TasksControlPage({
   onOpenProject?: (projectId: string) => void;
 }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
-  const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [roles, setRoles] = useState<RoleRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [filter, setFilter] = useState("all");
@@ -105,11 +102,6 @@ export function TasksControlPage({
     setHasMore(nextTasks.length === TASK_PAGE_SIZE);
   }
 
-  async function loadApprovals() {
-    const data = await api.getApprovals();
-    setApprovals(data || []);
-  }
-
   async function loadMetadata() {
     const [rolesData, projectsData] = await Promise.all([
       api.getRoles(),
@@ -162,7 +154,7 @@ export function TasksControlPage({
       }
 
       try {
-        await Promise.all([loadTasks(), loadApprovals(), loadMetadata()]);
+        await Promise.all([loadTasks(), loadMetadata()]);
       } catch (nextError) {
         if (!cancelled) {
           setError(nextError instanceof Error ? nextError.message : "Failed to load tasks.");
@@ -186,19 +178,6 @@ export function TasksControlPage({
       void selectTask(focusTaskId);
     }
   }, [focusTaskId]);
-
-  async function handleApproval(id: string, decision: "approved" | "rejected") {
-    if (decision === "approved") {
-      await api.approveApproval(id);
-    } else {
-      await api.rejectApproval(id);
-    }
-
-    await Promise.all([loadApprovals(), loadTasks()]);
-    if (selectedTaskId) {
-      await selectTask(selectedTaskId);
-    }
-  }
 
   async function retryDeadLetter(taskId: string) {
     await api.retryTask(taskId);
@@ -232,7 +211,7 @@ export function TasksControlPage({
         const created = await api.createTask(payload);
         setShowCreateForm(false);
         setTaskForm(EMPTY_TASK_FORM);
-        await Promise.all([loadTasks(), loadApprovals()]);
+        await Promise.all([loadTasks()]);
         if (created?.id) {
           await selectTask(created.id);
         }
@@ -275,53 +254,6 @@ export function TasksControlPage({
       </div>
 
       {error && <div style={{ color: "#fca5a5", marginBottom: 12 }}>{error}</div>}
-
-      {approvals.length > 0 && (
-        <div
-          style={{
-            ...shellStyles.card,
-            border: "1px solid #f59e0b33",
-            marginBottom: 20,
-          }}
-        >
-          <h3 style={{ color: "#f59e0b", fontSize: 14, marginBottom: 12 }}>
-            Pending Approvals ({approvals.length})
-          </h3>
-          {approvals.map((approval) => (
-            <div
-              key={approval.id}
-              style={{
-                alignItems: "center",
-                borderBottom: "1px solid #2a2a3a",
-                display: "flex",
-                gap: 12,
-                marginBottom: 8,
-                paddingBottom: 8,
-              }}
-            >
-              <div style={{ flex: 1 }}>
-                <div style={shellStyles.muted}>{approval.action_type}</div>
-                <div style={{ fontSize: 13 }}>{approval.description}</div>
-              </div>
-              <button
-                onClick={() => void handleApproval(approval.id, "approved")}
-                style={{ ...shellStyles.button, background: "#166534" }}
-                type="button"
-              >
-                Approve
-              </button>
-              <button
-                onClick={() => void handleApproval(approval.id, "rejected")}
-                style={{ ...shellStyles.button, background: "#991b1b" }}
-                type="button"
-              >
-                Reject
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 220px 180px auto", marginBottom: 16 }}>
         <input
           onChange={(event) => setQuery(event.target.value)}
@@ -350,7 +282,6 @@ export function TasksControlPage({
           <option value="ready">ready</option>
           <option value="claimed">claimed</option>
           <option value="running">running</option>
-          <option value="blocked_on_human">blocked_on_human</option>
           <option value="blocked_on_agent">blocked_on_agent</option>
           <option value="in_review">in_review</option>
           <option value="completed">completed</option>
@@ -748,4 +679,3 @@ export function TasksControlPage({
     </div>
   );
 }
-

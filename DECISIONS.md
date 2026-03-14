@@ -4,7 +4,7 @@ This document records the major architectural decisions in Agent-OS, what was ch
 what was rejected, and why.
 
 Do not change these decisions casually. If a decision should be revisited, create an
-architect-approved task with the reasoning and the expected impact.
+system-design task routed through the architect with the reasoning and the expected impact.
 
 ---
 
@@ -211,10 +211,11 @@ to a stronger provider-specific launch profile.
 
 ---
 
-## D-015: Only the Architect Can Approve System Modifications
+## D-015: The Architect Owns System Modifications
 
-**Decision:** System-modification tasks require architect approval. Builders can
-implement the change, but they cannot self-approve it.
+**Decision:** System-modification tasks route through architect-owned planning and
+delegation. Builders can implement the change when the work is assigned; the control
+point is task routing, not extra manual confirmation.
 
 **Why:** Changes to roles, agents, policy, routing, schema, or infrastructure affect all
 future sessions and need a single control point.

@@ -9,15 +9,6 @@ export interface MessageRecord {
   metadata: Record<string, unknown>;
 }
 
-export interface ApprovalRecord {
-  id: string;
-  task_id: string;
-  action_type: string;
-  description: string;
-  status: string;
-  created_at: string;
-}
-
 export interface RoleRecord {
   id: string;
   display_name: string;
@@ -28,7 +19,6 @@ export interface RoleRecord {
   model: string;
   effort: string;
   max_concurrent_tasks: number;
-  requires_approval_for: string[];
   is_system_role: boolean;
   created_at?: string;
   updated_at?: string;
@@ -244,4 +234,3 @@ export interface UsageSummaryRecord {
   recent_artifacts: ArtifactRecord[];
   recent_projects: ProjectRecord[];
 }
-

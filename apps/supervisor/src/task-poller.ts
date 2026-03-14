@@ -6,13 +6,6 @@ import {
   loadDependencyTaskStateMap,
 } from "./task-dependencies.js";
 
-interface ApprovedApproval {
-  action_type: string;
-  decided_at: string | null;
-  description: string;
-  task_id: string;
-}
-
 interface RelevantSkill {
   description: string;
   display_name: string;
@@ -54,7 +47,6 @@ interface SkillMemoryRow {
  */
 export async function pollForTasks(): Promise<void> {
   const db = getDb();
-  await releaseApprovedTasks(db);
 
   if (!hasCapacity()) return;
 
@@ -426,67 +418,4 @@ function resolveSkillScopeRank(scopeType: string): number {
   }
 
   return 2;
-}
-
-async function releaseApprovedTasks(db: ReturnType<typeof getDb>): Promise<void> {
-  const { data: approvals, error: approvalError } = await db
-    .from("approvals")
-    .select("task_id,action_type,description,decided_at")
-    .eq("status", "approved")
-    .order("decided_at", { ascending: false })
-    .returns<ApprovedApproval[]>();
-
-  if (approvalError) {
-    console.error("Failed to query approved approvals for task release:", approvalError);
-    return;
-  }
-
-  if (!approvals?.length) {
-    return;
-  }
-
-  const latestApprovedByTask = new Map<string, ApprovedApproval>();
-  for (const approval of approvals) {
-    if (!latestApprovedByTask.has(approval.task_id)) {
-      latestApprovedByTask.set(approval.task_id, approval);
-    }
-  }
-
-  const taskIds = [...latestApprovedByTask.keys()];
-  const { data: pendingApprovals, error: pendingError } = await db
-    .from("approvals")
-    .select("task_id")
-    .eq("status", "pending")
-    .in("task_id", taskIds)
-    .returns<Array<{ task_id: string }>>();
-
-  if (pendingError) {
-    console.error("Failed to query pending approvals for task release:", pendingError);
-    return;
-  }
-
-  const pendingTaskIds = new Set(
-    (pendingApprovals || []).map((approval) => approval.task_id)
-  );
-
-  for (const [taskId, approval] of latestApprovedByTask.entries()) {
-    if (pendingTaskIds.has(taskId)) {
-      continue;
-    }
-
-    const { error: updateError } = await db
-      .from("tasks")
-      .update({
-        blocked_reason: null,
-        claimed_by: null,
-        last_handoff_note: `Approval granted for ${approval.action_type}: ${approval.description}`,
-        state: "ready",
-      })
-      .eq("id", taskId)
-      .eq("state", "blocked_on_human");
-
-    if (updateError) {
-      console.error(`Failed to release approved task ${taskId}:`, updateError);
-    }
-  }
 }

@@ -18,7 +18,6 @@ const STALE_THRESHOLDS_MS = {
 
 type QueueTaskState =
   | "blocked_on_agent"
-  | "blocked_on_human"
   | "claimed"
   | "dead_letter"
   | "failed"
@@ -35,15 +34,6 @@ interface QueueTaskRow {
   state: QueueTaskState;
   title: string;
   updated_at: string;
-}
-
-interface ApprovalRow {
-  action_type: string;
-  created_at: string;
-  description: string;
-  expires_at: string;
-  id: string;
-  task_id: string;
 }
 
 interface LatestTaskActivityRow {
@@ -71,7 +61,7 @@ interface ProviderUsageEventRow {
 export const observabilitySnapshotDef = {
   name: "observability_snapshot",
   description:
-    "Read a queue, approvals, provider-auth, service, and usage snapshot for sentinel-style health checks.",
+    "Read a queue, provider-auth, service, and usage snapshot for sentinel-style health checks.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -91,10 +81,9 @@ export async function observabilitySnapshot(args: {
   const db = getDb();
   const usageEventLimit = normalizeUsageEventLimit(args.usage_event_limit);
 
-  const [queue, approvals, serviceRegistry, runtimeProvider, usage] =
+  const [queue, serviceRegistry, runtimeProvider, usage] =
     await Promise.all([
       buildQueueSnapshot(),
-      buildApprovalSnapshot(),
       loadServiceRegistrySnapshot(),
       loadRuntimeProviderSnapshot(),
       loadProviderUsageSnapshot(usageEventLimit),
@@ -105,7 +94,6 @@ export async function observabilitySnapshot(args: {
   return {
     success: true,
     generated_at: new Date().toISOString(),
-    approvals,
     managed_services: managedServices,
     queue,
     runtime_provider: runtimeProvider,
@@ -119,7 +107,6 @@ export async function observabilitySnapshot(args: {
       "claimed",
       "running",
       "in_review",
-      "blocked_on_human",
       "blocked_on_agent",
       "failed",
       "dead_letter",
@@ -152,44 +139,9 @@ export async function observabilitySnapshot(args: {
       totals: {
         actionable:
           counts.ready + counts.claimed + counts.running + counts.in_review,
-        blocked: counts.blocked_on_agent + counts.blocked_on_human,
+        blocked: counts.blocked_on_agent,
         terminal_attention: counts.failed + counts.dead_letter,
       },
-    };
-  }
-
-  async function buildApprovalSnapshot(): Promise<Record<string, unknown>> {
-    const { data, error } = await db
-      .from("approvals")
-      .select("id,task_id,action_type,description,created_at,expires_at")
-      .eq("status", "pending")
-      .order("created_at", { ascending: true })
-      .returns<ApprovalRow[]>();
-
-    if (error) {
-      throw new Error(`Failed to load approval snapshot: ${error.message}`);
-    }
-
-    const rows = data || [];
-    const now = Date.now();
-    const overdue = rows.filter(
-      (row) => new Date(row.expires_at).getTime() <= now
-    );
-
-    return {
-      oldest_pending_minutes: rows.length
-        ? minutesSince(rows[0].created_at)
-        : null,
-      overdue_pending_count: overdue.length,
-      pending_count: rows.length,
-      sample: rows.slice(0, 10).map((row) => ({
-        action_type: row.action_type,
-        age_minutes: minutesSince(row.created_at),
-        description: row.description,
-        expires_in_minutes: minutesUntil(row.expires_at),
-        id: row.id,
-        task_id: row.task_id,
-      })),
     };
   }
 

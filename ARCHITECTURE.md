@@ -79,7 +79,7 @@ codex exec \
   "your task instructions"
 ```
 
-Headless bypass mode is required. Without it, the provider CLI stops for human approval
+Headless bypass mode is required. Without it, the provider CLI stops for interactive
 prompts and unattended operation becomes impossible.
 
 The system keeps this safe by running the agents inside Docker with scoped volumes and a
@@ -173,7 +173,7 @@ Seven major components run together on one VPS:
 ### 1. Supabase
 
 Supabase is the durable operating system. It holds tasks, agents, roles, memories,
-events, approvals, artifacts, schedules, service registry entries, system settings, and
+events, artifacts, schedules, service registry entries, system settings, and
 message history.
 
 It also provides Auth, Storage, Realtime, and Edge Functions. The admin UI uses the anon
@@ -188,7 +188,7 @@ basic credentials set at install time.
 The app provides:
 
 - Chat with the system
-- Task dashboard and approvals
+- Task dashboard and run control
 - Agent and role configuration
 - Runtime provider controls
 - Memory and event inspection
@@ -233,7 +233,7 @@ That allows the system to expose:
   public ingress
 
 Internal services such as Supabase stay internal unless a task explicitly requires public
-exposure and has the appropriate approval.
+exposure and that work is explicitly in scope.
 
 The root public site is published into a shared volume and switched atomically between
 release directories so updates do not take the domain offline mid-deploy.
@@ -272,7 +272,7 @@ a managed MCP action exists.
 The MCP server:
 
 - validates identity and scope
-- enforces approval policy
+- enforces task and role policy
 - writes events and memories
 - mediates access to service credentials
 - publishes the public site
@@ -293,8 +293,7 @@ Current tools:
 | `public_site_publish` | Publish a new atomic release of the public site |
 | `public_site_route` | Create, remove, or verify public hostname routing |
 | `public_site_verify` | Verify public URLs and record route evidence |
-| `approval_request` | Ask the operator for a high-stakes approval |
-| `observability_snapshot` | Read queue, auth, service, approval, and usage health for sentinel checks |
+| `observability_snapshot` | Read queue, auth, service, and usage health for sentinel checks |
 | `service_control` | Check, restart, or reload allowlisted VPS services |
 | `service_require` | Require a configured third-party service before implementation proceeds |
 | `context_refresh` | Rebuild the current context pack mid-run |
@@ -374,7 +373,7 @@ sage runs less often than the builder, so quality dominates speed.
 ### Builder
 
 The builder is the workhorse. It writes code, content, integrations, scripts, and system
-configuration changes that have already been approved.
+configuration changes that are already in task scope.
 
 Why the frontier profile: the builder creates the thing that eventually ships. A failed
 build costs more than extra model usage.
@@ -389,9 +388,8 @@ will miss the builder's mistakes.
 
 ### Architect
 
-The architect is the only role that approves system modifications. It decides whether the
-system should add a new role, change a policy, alter routing, or evolve part of its own
-configuration.
+The architect owns system modifications. It decides whether the system should add a new
+role, change a policy, alter routing, or evolve part of its own configuration.
 
 Why the frontier profile: system-level errors have long half-lives. Bad architectural
 judgment contaminates future sessions, not just the current task.
@@ -405,7 +403,6 @@ The sentinel monitors:
 - stuck tasks
 - provider auth validity
 - service health
-- approval backlog
 - memory freshness
 - cost and rate-limit trends
 
@@ -422,7 +419,7 @@ New agents are not new binaries and not new containers. A new agent is:
 - optional RLS and schedule changes
 - optional tool permission changes
 
-The builder creates those artifacts under architect approval. The supervisor then sees
+The builder creates those artifacts within architect-owned system design work. The supervisor then sees
 the new role automatically in future context packs and can launch it through the same
 native provider CLI runtime.
 
@@ -451,7 +448,7 @@ Human message
      v                                     v
  backlog -> ready -> claimed -> running -> in_review -> completed
                              |        |
-                             |        +-> blocked_on_human / blocked_on_agent
+                             |        +-> blocked_on_agent
                              |
                              +-> failed -> dead_letter
 ```
@@ -575,10 +572,10 @@ Every MCP call is validated against `agent_id`, `role_id`, and `run_id`. Agents 
 data inside their scope chain unless the system explicitly hands them work that broadens
 that scope.
 
-### System Modification Requires Architect Approval
+### System Modification Routes Through the Architect
 
 Roles, agents, policy rules, core infrastructure, and similar system-level changes must
-go through architect-approved tasks.
+go through architect-owned tasks.
 
 ### Container Isolation Plus Managed Control Paths
 
@@ -588,7 +585,7 @@ Agent autonomy depends on container isolation and allowlisted tool paths:
 - workspaces are scoped
 - the database is reached through MCP, not raw credentials
 - service restarts and reloads should go through `service_control` when supported
-- high-impact host operations still require approval
+- high-impact host operations must stay within explicit task scope and role ownership
 
 ## Deployment
 
@@ -642,5 +639,5 @@ Caddy obtains and renews certificates for the hosts it serves.
 - extract or proxy provider subscription tokens
 - expose Supabase publicly by default
 - give agents unrestricted host control
-- let agents create arbitrary new infrastructure without approval
+- let agents create arbitrary new infrastructure outside explicit task scope
 - impose fake per-task token caps that break useful work

@@ -6,7 +6,6 @@ import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const STATE_COLORS: Record<string, string> = {
   blocked_on_agent: "#f59e0b",
-  blocked_on_human: "#f59e0b",
   claimed: "#a855f7",
   completed: "#10b981",
   dead_letter: "#dc2626",

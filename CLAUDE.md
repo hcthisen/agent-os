@@ -79,7 +79,7 @@ policy documents and permissions. They are not new binaries or new services.
 
 Defined in `SCHEMA.md`. Key tables: `roles`, `agents`, `projects`, `tasks` (strict state
 machine), `task_runs`, `events` (append-only), `memories`, `memory_chunks` (derived
-vector index), `approvals`, `artifacts`, `handoffs`, `schedules`, `service_registry`,
+vector index), `artifacts`, `handoffs`, `schedules`, `service_registry`,
 `messages`, and `system_settings`.
 
 Required Postgres extensions: `pgcrypto`, `vector` (pgvector), `pg_trgm`.
@@ -94,12 +94,12 @@ Current tool surface:
 
 `task_claim`, `task_update`, `task_create`, `memory_search`, `memory_write`,
 `event_log`, `artifact_put`, `handoff_create`, `public_site_publish`,
-`approval_request`, `service_control`, `context_refresh`, `message_send`,
+`service_control`, `context_refresh`, `message_send`,
 `schedule_update`, `schedule_create`, `role_upsert`, `agent_upsert`
 
 ## Protected Infrastructure
 
-Do not modify without explicit architect approval:
+Only modify shared infrastructure when the assigned task scope requires it:
 
 - `/apps/supervisor/`, `/apps/mcp/`, `/apps/admin/`, `/apps/browser/`
 - `/supabase/` (migrations and config)
@@ -137,9 +137,9 @@ External API keys are stored encrypted in `service_registry`.
 
 ## Task State Machine
 
-```
-backlog -> ready -> claimed -> running -> {blocked_on_human, blocked_on_agent, in_review, completed, failed}
-blocked_* -> {running, ready, failed}
+``` 
+backlog -> ready -> claimed -> running -> {blocked_on_agent, in_review, completed, failed}
+blocked_on_agent -> {running, ready, failed}
 in_review -> {completed, running, failed}
 failed -> {ready, dead_letter}
 dead_letter -> ready (human override only)

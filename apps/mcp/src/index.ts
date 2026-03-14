@@ -29,10 +29,6 @@ import {
   publicSiteVerify,
 } from "./tools/public_site_verify.js";
 import {
-  approvalRequestDef,
-  approvalRequest,
-} from "./tools/approval_request.js";
-import {
   observabilitySnapshotDef,
   observabilitySnapshot,
 } from "./tools/observability_snapshot.js";
@@ -76,7 +72,6 @@ const tools = [
   publicSitePublishDef,
   publicSiteRouteDef,
   publicSiteVerifyDef,
-  approvalRequestDef,
   observabilitySnapshotDef,
   serviceControlDef,
   serviceRequireDef,
@@ -104,7 +99,6 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   public_site_publish: publicSitePublish,
   public_site_route: publicSiteRoute,
   public_site_verify: publicSiteVerify,
-  approval_request: approvalRequest,
   observability_snapshot: observabilitySnapshot,
   service_control: serviceControl,
   service_require: serviceRequire,
@@ -124,10 +118,6 @@ async function extractPolicyAction(
   name: string,
   args: any
 ): Promise<{ type: string; taskId: string; desc: string } | null> {
-  if (name === "approval_request") {
-    return null;
-  }
-
   if (name === "task_create") {
     const taskId = args.parent_task_id || (await getCurrentTaskContext())?.id;
     if (!taskId) {
@@ -331,7 +321,6 @@ async function main() {
                   {
                     success: false,
                     blocked_by_policy: true,
-                    approval_id: policyResult.approval_id,
                     reason: policyResult.reason,
                   },
                   null,

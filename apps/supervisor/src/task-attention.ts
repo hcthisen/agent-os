@@ -9,7 +9,6 @@ import {
 
 type AttentionState =
   | "blocked_on_agent"
-  | "blocked_on_human"
   | "claimed"
   | "dead_letter"
   | "failed"
@@ -45,20 +44,11 @@ interface TaskActivity {
   summary: string | null;
 }
 
-interface PendingApproval {
-  action_type: string;
-  created_at: string;
-  description: string;
-  id: string;
-  task_id: string;
-}
-
 const ATTENTION_STATES: AttentionState[] = [
   "ready",
   "claimed",
   "running",
   "blocked_on_agent",
-  "blocked_on_human",
   "failed",
   "dead_letter",
   "in_review",
@@ -81,14 +71,6 @@ export async function monitorTaskAttention(): Promise<void> {
   const taskList = (tasks || []) as AttentionTask[];
   const dependencyStateMap = await loadDependencyTaskStateMap(taskList);
   const activityMap = await loadLatestTaskActivity(taskList.map((task) => task.id));
-  const taskMap = new Map(taskList.map((task) => [task.id, task]));
-  const pendingApprovalsByTask = await loadPendingApprovals(
-    taskList.map((task) => task.id)
-  );
-  const approvalBlockedAncestorIds = buildApprovalBlockedAncestorSet(
-    taskMap,
-    pendingApprovalsByTask
-  );
 
   for (const task of taskList) {
     if (task.state === "ready") {
@@ -104,13 +86,10 @@ export async function monitorTaskAttention(): Promise<void> {
     }
 
     const activity = activityMap.get(task.id) || null;
-    const pendingApproval = selectPendingApproval(task.id, pendingApprovalsByTask);
     const notificationKind = getNotificationKind(
       task,
       activity,
-      dependencyStateMap,
-      pendingApproval,
-      approvalBlockedAncestorIds
+      dependencyStateMap
     );
     if (!notificationKind) {
       continue;
@@ -126,10 +105,7 @@ export async function monitorTaskAttention(): Promise<void> {
     }
 
     const notificationKey = buildNotificationKey(notificationKind);
-    const content =
-      task.state === "blocked_on_human" && pendingApproval
-        ? formatApprovalMessage(task, rootTask, pendingApproval)
-        : formatAttentionMessage(task, rootTask, activity);
+    const content = formatAttentionMessage(task, rootTask, activity);
     await sendOperatorNotification(task, notificationKey, content);
   }
 }
@@ -137,9 +113,7 @@ export async function monitorTaskAttention(): Promise<void> {
 function getNotificationKind(
   task: AttentionTask,
   activity: TaskActivity | null,
-  dependencyStateMap: Map<string, { id: string; state: string; title: string }>,
-  pendingApproval: PendingApproval | null,
-  approvalBlockedAncestorIds: Set<string>
+  dependencyStateMap: Map<string, { id: string; state: string; title: string }>
 ): string | null {
   if (
     task.state === "ready" &&
@@ -155,21 +129,9 @@ function getNotificationKind(
     return null;
   }
 
-  if (task.state === "blocked_on_human" && pendingApproval) {
-    return `approval:${pendingApproval.id}`;
-  }
-
-  if (
-    task.state === "blocked_on_agent" &&
-    approvalBlockedAncestorIds.has(task.id)
-  ) {
-    return null;
-  }
-
   if (
     task.state === "failed" ||
     task.state === "dead_letter" ||
-    task.state === "blocked_on_human" ||
     task.state === "blocked_on_agent"
   ) {
     return `state:${task.state}`;
@@ -210,10 +172,6 @@ async function shouldNotifyOperator(
 ): Promise<boolean> {
   if (task.assigned_role === "sentinel" && !task.parent_task_id) {
     return false;
-  }
-
-  if (task.state === "blocked_on_human") {
-    return true;
   }
 
   if (rootTask) {
@@ -331,74 +289,6 @@ async function loadLatestTaskActivity(
   return activityMap;
 }
 
-async function loadPendingApprovals(
-  taskIds: string[]
-): Promise<Map<string, PendingApproval[]>> {
-  const db = getDb();
-  const approvalMap = new Map<string, PendingApproval[]>();
-
-  if (!taskIds.length) {
-    return approvalMap;
-  }
-
-  const { data, error } = await db
-    .from("approvals")
-    .select("id,task_id,action_type,description,created_at")
-    .eq("status", "pending")
-    .in("task_id", taskIds)
-    .order("created_at", { ascending: false })
-    .returns<PendingApproval[]>();
-
-  if (error) {
-    console.error("Failed to load pending approvals for task attention:", error);
-    return approvalMap;
-  }
-
-  for (const approval of data || []) {
-    const current = approvalMap.get(approval.task_id) || [];
-    current.push(approval);
-    approvalMap.set(approval.task_id, current);
-  }
-
-  return approvalMap;
-}
-
-function selectPendingApproval(
-  taskId: string,
-  pendingApprovalsByTask: Map<string, PendingApproval[]>
-): PendingApproval | null {
-  const approvals = pendingApprovalsByTask.get(taskId) || [];
-  return approvals[0] || null;
-}
-
-function buildApprovalBlockedAncestorSet(
-  taskMap: Map<string, AttentionTask>,
-  pendingApprovalsByTask: Map<string, PendingApproval[]>
-): Set<string> {
-  const ancestors = new Set<string>();
-
-  for (const task of taskMap.values()) {
-    if (
-      task.state !== "blocked_on_human" &&
-      !(pendingApprovalsByTask.get(task.id)?.length)
-    ) {
-      continue;
-    }
-
-    let parentTaskId = task.parent_task_id;
-    while (parentTaskId) {
-      if (ancestors.has(parentTaskId)) {
-        break;
-      }
-
-      ancestors.add(parentTaskId);
-      parentTaskId = taskMap.get(parentTaskId)?.parent_task_id || null;
-    }
-  }
-
-  return ancestors;
-}
-
 function resolveTaskActivityTimestamp(
   task: AttentionTask,
   activity: TaskActivity | null
@@ -413,22 +303,6 @@ function resolveTaskActivityTimestamp(
   return task.updated_at || task.created_at;
 }
 
-function formatApprovalMessage(
-  task: AttentionTask,
-  rootTask: OperatorRootTask | null,
-  approval: PendingApproval
-): string {
-  const role = task.assigned_role;
-  const shortId = task.id.slice(0, 8);
-  const rootSuffix =
-    rootTask && rootTask.id !== task.id
-      ? ` Root request: ${rootTask.title} (${rootTask.id.slice(0, 8)}).`
-      : "";
-  const description = normalizeApprovalDescription(approval.description);
-
-  return `Approval needed: ${role} task "${task.title}" (${shortId}) requested approval for ${approval.action_type}.${rootSuffix} Requested action: ${description}`;
-}
-
 function formatAttentionMessage(
   task: AttentionTask,
   rootTask: OperatorRootTask | null,
@@ -440,10 +314,6 @@ function formatAttentionMessage(
     rootTask && rootTask.id !== task.id
       ? ` Root request: ${rootTask.title} (${rootTask.id.slice(0, 8)}).`
       : "";
-
-  if (task.state === "blocked_on_human") {
-    return `Task attention: ${role} task "${task.title}" (${shortId}) is blocked on human input.${rootSuffix} Reason: ${task.blocked_reason || task.last_handoff_note || "No reason recorded."}`;
-  }
 
   if (task.state === "blocked_on_agent") {
     return `Task attention: ${role} task "${task.title}" (${shortId}) is blocked on another agent.${rootSuffix} Reason: ${task.blocked_reason || task.last_handoff_note || "No reason recorded."}`;
@@ -479,20 +349,13 @@ function formatAttentionMessage(
   return `Task attention: ${role} task "${task.title}" (${shortId}) has been running for about ${waitedMinutes} minutes without agent activity.${rootSuffix}${activitySuffix} Latest note: ${task.last_handoff_note || "No handoff note recorded."}`;
 }
 
-function normalizeApprovalDescription(description: string): string {
-  const normalized = description.replace(/^\[Auto-policy\]\s*/i, "").trim();
-  return normalized || "No approval description recorded.";
-}
-
 async function sendOperatorNotification(
   task: AttentionTask,
   notificationKey: string,
   content: string
 ): Promise<void> {
   const db = getDb();
-  const notificationType = notificationKey.startsWith("approval:")
-    ? "approval_required"
-    : "task_attention";
+  const notificationType = "task_attention";
   const delivery = await queueOperatorRelayMessage({
     content,
     metadata: {

@@ -26,8 +26,7 @@ can self-evolve by creating new roles and agents as data.
 - Context pack assembly gives agents everything they need at launch
 - Multi-provider support (Claude Code + OpenAI Codex) with per-role model mapping
 - Hybrid memory search (FTS + vector with RRF fusion)
-- Structured MCP tool surface with scoped reads/writes and approval hooks
-- Approval system for high-stakes actions
+- Structured MCP tool surface with scoped reads/writes and managed execution policy
 - Dependency-aware task graphs (DAG execution)
 - Operator notification pipeline (admin chat + Telegram)
 - Atomic public site deployments with Caddy routing
@@ -44,7 +43,7 @@ can self-evolve by creating new roles and agents as data.
 7. **No cost/usage dashboard** - backend usage aggregates exist, but there is no operator UI and no true run-level cost attribution
 8. **No project management UI** - projects table exists but admin has no project page
 9. **No workspace cleanup** - 221 workspace directories accumulating on the VPS (900KB listing)
-10. **Runtime trust boundary is softer than it appears** - agent subprocesses inherit the supervisor environment and run with provider-side sandbox/approval bypass flags
+10. **Runtime trust boundary is softer than it appears** - agent subprocesses inherit the supervisor environment and run with provider-side sandbox bypass flags
 11. **Most active admin surfaces use polling rather than live subscriptions** - chat and tasks refresh frequently, other views are mostly on-demand
 
 ---
@@ -122,7 +121,7 @@ launches agents, monitors heartbeats, handles exits, manages schedules.
 | No workspace cleanup | Medium | 221 workspace dirs on live VPS. No cleanup after task completion. Will fill disk. |
 | No task dependency cycle detection | Low | Circular depends_on would cause infinite waiting |
 | Scheduler has no lock or catch-up semantics | Medium | Multiple supervisor instances could double-fire schedules, and missed intervals are not backfilled. |
-| Runtime isolation is soft | High | Provider CLIs inherit the supervisor environment and run with sandbox/approval bypass flags. MCP is a workflow surface, not a hard security boundary. |
+| Runtime isolation is soft | High | Provider CLIs inherit the supervisor environment and run with sandbox bypass flags. MCP is a workflow surface, not a hard security boundary. |
 | Embedding retry strategy is simplistic | Low | Transient failures retry on the 30s worker cadence; 401/403 moves the embedding service to `error` and notifies the operator, but there is no true backoff/jitter strategy. |
 | No per-run cost attribution | Medium | `observability_snapshot` already aggregates `provider.usage`, but those events are not linked to `task_runs`, so accurate per-task cost is missing. |
 | Inactivity timeout only, no max-duration timeout | Low | A chatty agent that produces output can run forever |
@@ -131,7 +130,7 @@ launches agents, monitors heartbeats, handles exits, manages schedules.
 **Recommendations:**
 
 1. **Add workspace cleanup**: Delete workspace dirs for completed tasks after N hours (configurable). Keep last N for debugging.
-2. **Scrub the child process environment and tighten runtime permissions**: Do not pass the full supervisor env into provider subprocesses. Remove sandbox/approval bypass where possible.
+2. **Scrub the child process environment and tighten runtime permissions**: Do not pass the full supervisor env into provider subprocesses. Remove sandbox bypass where possible.
 3. **Add max-duration timeout**: Configurable per-role. Default 60 minutes. Kills process after that regardless of activity.
 4. **Use the existing usage aggregates in the admin UI, then add task/run attribution**: The aggregate data already exists; accurate per-task cost needs explicit linkage to `task_runs`.
 5. **Lazy workspace seeding**: Instead of copying the full monorepo, use symlinks or a read-only shared mount for static files, only copy writable dirs.
@@ -141,8 +140,8 @@ launches agents, monitors heartbeats, handles exits, manages schedules.
 
 ### 2.2 MCP Server (`apps/mcp/`)
 
-**What it does:** The agent's primary structured control plane. 21 tools for tasks,
-memory, events, artifacts, handoffs, public site, approvals, service management,
+**What it does:** The agent's primary structured control plane. 20 tools for tasks,
+memory, events, artifacts, handoffs, public site, service management,
 schedules, and role/agent CRUD.
 
 **Tools (21 total):**
@@ -160,7 +159,6 @@ schedules, and role/agent CRUD.
 | `public_site_publish` | Atomic site deployment | Solid. Release management with symlink swap. |
 | `public_site_route` | Caddy subdomain management | Solid. Supervisor delegation + verification. |
 | `public_site_verify` | HTTP endpoint verification | Solid. Records task requirements. |
-| `approval_request` | Human-in-the-loop gate | Solid. Deduplication, blocks task. |
 | `observability_snapshot` | System health check | Solid. Comprehensive data for sentinel. |
 | `service_control` | Docker service restart/reload | Solid. Allowlisted services only. |
 | `service_require` | Declare external service dependency | Solid. Creates key_needed entry. |
@@ -180,9 +178,9 @@ schedules, and role/agent CRUD.
 - Some tools intentionally operate outside claimed-task scope (`task_claim`, `observability_snapshot`, read-only status actions)
 
 **Policy enforcement:**
-- `system.modify` actions check `requires_approval_for` on role
+- `system.modify` actions are routed through role/task scope and system task ownership
 - Pattern matching: `*`, `system.*`, exact match
-- Creates approval + blocks task if policy requires it
+- Execution proceeds autonomously once the work is in scope
 
 **Issues found:**
 
@@ -227,7 +225,7 @@ router (conditional rendering in Dashboard). Polling-based updates.
   - Cannot reference a specific task or memory in a message
 
 #### Tasks Tab
-- **Works:** State filter buttons. Expandable task detail. Approval queue with approve/reject. Dead letter retry. Pagination.
+- **Works:** State filter buttons. Expandable task detail. Dead letter retry. Pagination.
 - **Missing:**
   - **No task creation UI** - operators must chat and hope the relay creates the right task
   - No task editing (can't change title, priority, assigned_role after creation)
@@ -252,7 +250,6 @@ router (conditional rendering in Dashboard). Polling-based updates.
   - No agent activity timeline (what has this agent done recently?)
   - No role policy preview - can't see what instructions a role gives its agents
   - Cannot see `usage_summary`, `handoff_when`, `description` for roles
-  - No way to edit `requires_approval_for` per role
   - Cannot edit `max_concurrent_tasks` per role
 
 #### Memory Tab
@@ -351,7 +348,7 @@ navigation, screenshots, content extraction.
 policies, and seed data.
 
 **Key tables:** roles, agents, projects, tasks, task_runs, events, memories,
-memory_chunks, approvals, artifacts, handoffs, schedules, service_registry, messages,
+memory_chunks, artifacts, handoffs, schedules, service_registry, messages,
 system_settings, task_requirements, public_site_routes.
 
 **Critical functions:**
@@ -462,7 +459,6 @@ The UI still **never displays or allows editing of:**
 - `description` (what the role does)
 - `usage_summary` (when to use this role)
 - `handoff_when` (when to delegate to this role)
-- `requires_approval_for` (which actions need human sign-off)
 
 This means the operator cannot:
 - See what instructions their agents are following
@@ -477,7 +473,6 @@ This means the operator cannot:
 1. **Role detail page** in admin with:
    - Read/edit `policy_doc` with markdown preview
    - Edit `description`, `usage_summary`, `handoff_when`
-   - Edit `requires_approval_for` as a tag list
    - Edit `model`, `effort`, `max_concurrent_tasks`
    - View all agents assigned to this role
    - View recent tasks executed by this role
@@ -681,7 +676,6 @@ panel doesn't use it.
 1. Use Supabase Realtime subscriptions for:
    - Messages (new messages appear instantly)
    - Tasks (state changes reflect immediately)
-   - Approvals (new approvals appear immediately)
 
 2. Or use Server-Sent Events from the admin server for simpler implementation.
 
@@ -970,8 +964,8 @@ on each `updated_at` change.
 | Provider auth handling | Mixed | Auth originates in `~/.claude` / `~/.codex`, but Codex auth is copied into per-run homes. Workspace cleanup and file permissions matter. |
 | Direct DB boundary | Weak in current runtime | Intended system actions go through MCP/admin APIs, but agent subprocesses inherit supervisor env and can inspect local secrets unless the env is scrubbed. |
 | Scope enforcement on MCP tools | Partial / soft | Task/project/role scope checks exist, but company scope is open and some tools intentionally operate outside claimed-task scope. |
-| Policy enforcement for system.modify | Correct | Architect approval required |
-| Container isolation | Partial | Agents run as subprocesses inside the supervisor container, not isolated per-task containers, and provider CLIs are launched with sandbox/approval bypass flags. |
+| Policy enforcement for system.modify | Correct | Architect-owned task routing exists, with runtime execution driven by task scope rather than operator sign-off |
+| Container isolation | Partial | Agents run as subprocesses inside the supervisor container, not isolated per-task containers, and provider CLIs are launched with sandbox bypass flags. |
 | Docker socket exposure on VPS | High-risk gap | The VPS overlay mounts `/var/run/docker.sock` into supervisor and MCP for service control. |
 | Service credentials never given to agents | Mostly correct | MCP uses service credentials on the agent's behalf, but unrelated supervisor env secrets may still leak to child processes. |
 | Admin auth | Basic but functional | HMAC-signed session cookies, 12-hour TTL |
@@ -1020,7 +1014,7 @@ on each `updated_at` change.
 ### Phase 0: Tighten the Runtime Boundary (2-3 days)
 
 1. Stop passing the full supervisor environment into agent subprocesses
-2. Revisit sandbox/approval bypass flags for provider CLIs
+2. Revisit sandbox bypass flags for provider CLIs
 3. Review Docker socket exposure and narrow it if possible
 4. Fix credential encryption on `service_registry`
 
@@ -1096,8 +1090,6 @@ on each `updated_at` change.
 | POST | /api/messages | Send message |
 | GET | /api/tasks | List tasks |
 | POST | /api/tasks/:id/retry | Retry dead letter |
-| GET | /api/approvals | List pending approvals |
-| POST | /api/approvals/:id/decision | Approve/reject |
 | GET | /api/agents | List agents (full rows) |
 | GET | /api/roles | List roles (full rows, including policy fields) |
 | GET | /api/memories | List/search memories |
@@ -1131,7 +1123,6 @@ on each `updated_at` change.
 | public_site_publish | Deployment |
 | public_site_route | Deployment |
 | public_site_verify | Deployment |
-| approval_request | Governance |
 | observability_snapshot | Monitoring |
 | service_control | Infrastructure |
 | service_require | Integration |
@@ -1184,5 +1175,6 @@ The three highest-impact changes to reach "digital employee" status are:
 Everything else is polish that makes the system more usable, more observable, and more
 reliable. But those four changes are the difference between "an interesting agent
 framework" and "a deployable digital employee."
+
 
 

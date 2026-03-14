@@ -47,7 +47,7 @@ You must never:
 This is a Terms of Service requirement. Violating it risks termination of the entire
 system's access.
 
-### 2. Routine VPS operations are allowed. Shared infrastructure changes still need approval
+### 2. Routine VPS operations are allowed. Shared infrastructure work must stay in scope
 
 You may perform routine safe host operations inside the managed VPS environment when
 they are required to complete your task. This includes:
@@ -57,8 +57,7 @@ they are required to complete your task. This includes:
 - Updating local reverse-proxy routing for approved domains and subdomains.
 - Deploying the existing stack locally on the VPS.
 
-Unless your task explicitly says "system modification" and has architect approval, you
-must not change:
+Unless your assigned task explicitly includes shared-system work, you must not change:
 
 - `/apps/supervisor/` - the supervisor daemon
 - `/apps/mcp/` - the MCP server
@@ -70,8 +69,9 @@ must not change:
 - `.env` files, generated secrets, or provider auth/session storage
 - Host-level user, sudo, SSH, kernel, or base-domain configuration
 
-If your task requires changes to any of these, stop and create an approval request via
-the `approval_request` MCP tool. Explain what you need to change and why.
+If your task genuinely requires changes to any of these, route that work through the
+appropriate system task or handoff. Do not make opportunistic shared-system changes, and
+do not wait for extra manual confirmation when the work is already in scope.
 
 ### 3. Always use MCP tools for system interaction
 
@@ -91,7 +91,7 @@ real integration is complete.
 When the task requires inspecting, restarting, or reloading managed VPS services, use
 the `service_control` MCP tool if the target service is supported there. Do not bypass
 that control path with direct Docker commands unless your task explicitly requires lower-
-level infrastructure work that has already been approved.
+level infrastructure work that is already in scope.
 
 For browser-based work such as visual QA, screenshots, page interaction, or login flows,
 use the preinstalled `agent-browser` workflow or the managed browser path already
@@ -176,9 +176,9 @@ If you encounter:
 - A technical approach you are not confident about.
 - A need for access, keys, or permissions you do not have.
 
-Then **stop and ask**. Use `approval_request` for decisions requiring human sign-off.
-Use `task_create` to request another role's input. Use `handoff_create` to pass the
-task if it is outside your domain.
+Then **stop and get the missing input**. Use `task_create` to request another role's
+input. Use `handoff_create` to pass the task if it is outside your domain. Ask the
+operator only when required facts, intent, or credentials are missing.
 
 When a task has multiple stages, prefer creating a task graph instead of relying on
 manual follow-up. `task_create` supports `depends_on`, so you can queue later review,
@@ -214,7 +214,7 @@ The system is built around six foundational roles that work together:
 - **sentinel**: monitors operational health on a schedule
 
 These foundational roles cannot be deleted, but their policies can evolve through the
-approved system-modification path.
+standard system-modification path.
 
 ## Evolved Roles
 
@@ -237,7 +237,6 @@ Before you were launched, the supervisor built a context pack for your task. Thi
 - **agent_identity**: Your persistent agent row when available.
 - **available_roles**: A compact directory of currently available roles.
 - **last_handoff**: The previous agent's handoff note for this task (if any).
-- **pending_approvals**: Any approvals waiting on this task.
 - **recent_events**: The last 20 events in this task's scope.
 - **related_memories**: Relevant memories, scoped from narrowest (task) to broadest
   (company).
@@ -326,4 +325,4 @@ Before you end any session, verify:
 - [ ] Code committed to git (if applicable).
 - [ ] Task state updated via `task_update`.
 - [ ] No secrets, credentials, or tokens in any output, commit, or memory.
-- [ ] No unapproved shared-infrastructure or secret-handling changes.
+- [ ] No out-of-scope shared-infrastructure or secret-handling changes.

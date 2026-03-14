@@ -13,7 +13,6 @@ export const taskUpdateDef = {
         type: "string",
         enum: [
           "running",
-          "blocked_on_human",
           "blocked_on_agent",
           "in_review",
           "completed",

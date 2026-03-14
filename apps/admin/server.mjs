@@ -1763,74 +1763,6 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (pathname === "/api/approvals" && req.method === "GET") {
-    const data = await postgrest("/approvals", {
-      query: {
-        limit: "100",
-        order: "created_at.desc",
-        select: "id,task_id,action_type,description,status,created_at",
-        status: "eq.pending",
-      },
-    });
-    sendJson(res, 200, data || []);
-    return;
-  }
-
-  const approvalMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/);
-  if (approvalMatch && req.method === "POST") {
-    const [, approvalId] = approvalMatch;
-    const body = await readJson(req);
-    const decision = body.decision === "approved" ? "approved" : "rejected";
-    const approvals = await postgrest("/approvals", {
-      query: {
-        id: `eq.${approvalId}`,
-        limit: "1",
-        select: "id,task_id,action_type,description,status",
-      },
-    });
-    const approval = approvals?.[0];
-
-    if (!approval) {
-      sendJson(res, 404, { error: "Approval not found" });
-      return;
-    }
-
-    await postgrest("/approvals", {
-      body: {
-        decided_at: new Date().toISOString(),
-        decided_by: "operator",
-        status: decision,
-      },
-      method: "PATCH",
-      query: { id: `eq.${approvalId}` },
-    });
-
-    if (decision === "approved") {
-      await postgrest("/tasks", {
-        body: {
-          blocked_reason: null,
-          last_handoff_note: `Approval granted for ${approval.action_type}: ${approval.description}`,
-          state: "ready",
-        },
-        method: "PATCH",
-        query: { id: `eq.${approval.task_id}` },
-      });
-    } else {
-      await postgrest("/tasks", {
-        body: {
-          blocked_reason: `Approval rejected for ${approval.action_type}`,
-          last_handoff_note: `Approval rejected for ${approval.action_type}: ${approval.description}`,
-          state: "failed",
-        },
-        method: "PATCH",
-        query: { id: `eq.${approval.task_id}` },
-      });
-    }
-
-    sendNoContent(res);
-    return;
-  }
-
   const retryMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/retry$/);
   if (retryMatch && req.method === "POST") {
     const [, taskId] = retryMatch;
@@ -2004,7 +1936,6 @@ async function handleApi(req, res, url) {
         max_concurrent_tasks: Number(body.max_concurrent_tasks || 3),
         model: MODEL_OPTIONS.has(model) ? model : "sonnet",
         policy_doc: body.policy_doc.trim(),
-        requires_approval_for: normalizeStringArray(body.requires_approval_for),
         usage_summary: normalizeString(body.usage_summary),
       },
       method: "POST",
@@ -2046,9 +1977,6 @@ async function handleApi(req, res, url) {
     }
     if (body.max_concurrent_tasks !== undefined) {
       patch.max_concurrent_tasks = Math.max(1, Number(body.max_concurrent_tasks || 1));
-    }
-    if (Array.isArray(body.requires_approval_for)) {
-      patch.requires_approval_for = normalizeStringArray(body.requires_approval_for);
     }
 
     const rows = await postgrest("/roles", {
@@ -2689,7 +2617,7 @@ async function handleApi(req, res, url) {
       postgrest("/tasks", {
         headers: { Prefer: "count=exact" },
         method: "HEAD",
-        query: { state: "eq.blocked_on_human" },
+        query: { state: "eq.blocked_on_agent" },
       }).catch(() => null),
       postgrest("/tasks", {
         headers: { Prefer: "count=exact" },
@@ -2701,7 +2629,7 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, {
       supervisor: healthResponse,
       summary: {
-        blocked_on_human: blocked,
+        blocked_on_agent: blocked,
         dead_letter: deadLetter,
         ready,
       },

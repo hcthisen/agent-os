@@ -20,7 +20,6 @@ export interface TaskContext {
 const ACTIVE_TASK_STATES = [
   "claimed",
   "running",
-  "blocked_on_human",
   "blocked_on_agent",
   "in_review",
 ] as const;

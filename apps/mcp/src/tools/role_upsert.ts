@@ -17,10 +17,6 @@ export const roleUpsertDef = {
       model: { type: "string" },
       effort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
       max_concurrent_tasks: { type: "integer" },
-      requires_approval_for: {
-        type: "array",
-        items: { type: "string" },
-      },
       is_system_role: { type: "boolean" },
     },
     required: [
@@ -46,7 +42,6 @@ export async function roleUpsert(args: {
   model: string;
   effort: string;
   max_concurrent_tasks?: number;
-  requires_approval_for?: string[];
   is_system_role?: boolean;
 }): Promise<unknown> {
   await requireCurrentTaskContext();
@@ -74,7 +69,6 @@ export async function roleUpsert(args: {
     model: args.model.trim(),
     effort: args.effort.trim().toLowerCase(),
     max_concurrent_tasks: args.max_concurrent_tasks || 3,
-    requires_approval_for: args.requires_approval_for || [],
     is_system_role: existing?.is_system_role ?? !!args.is_system_role,
   };
 
