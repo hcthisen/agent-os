@@ -2,6 +2,7 @@ import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
 import { withDecryptedCredential } from "../service-registry.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import { upsertTaskRequirement } from "../task_requirements.js";
 
 interface ServiceRow {
@@ -51,6 +52,7 @@ export async function serviceRequire(args: {
 }): Promise<unknown> {
   const db = getDb();
   const ctx = getAgentContext();
+  await assertTaskMutationAllowed("service_require");
   const task = await requireCurrentTaskContext();
   const serviceName = normalizeServiceName(args.service_name);
   const displayName = String(args.display_name || serviceName).trim() || serviceName;

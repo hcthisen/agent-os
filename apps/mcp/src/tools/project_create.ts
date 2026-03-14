@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const projectCreateDef = {
   name: "project_create",
@@ -23,6 +24,7 @@ export async function projectCreate(args: {
   description?: string;
   repo_url?: string;
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("project_create");
   await requireCurrentTaskContext();
 
   const db = getDb();

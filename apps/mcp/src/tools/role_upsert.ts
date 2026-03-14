@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const roleUpsertDef = {
   name: "role_upsert",
@@ -44,6 +45,7 @@ export async function roleUpsert(args: {
   max_concurrent_tasks?: number;
   is_system_role?: boolean;
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("role_upsert");
   await requireCurrentTaskContext();
 
   const db = getDb();

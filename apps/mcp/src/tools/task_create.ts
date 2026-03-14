@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { enforceScope, getCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const taskCreateDef = {
   name: "task_create",
@@ -59,6 +60,7 @@ export async function taskCreate(args: {
   state?: string;
 }): Promise<unknown> {
   const db = getDb();
+  await assertTaskMutationAllowed("task_create");
   const currentTask = await getCurrentTaskContext();
   const parentTaskId = args.parent_task_id || currentTask?.id || null;
   const dependencyIds = [...new Set((args.depends_on || []).map((value) => value.trim()).filter(Boolean))];

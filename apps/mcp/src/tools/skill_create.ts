@@ -1,4 +1,5 @@
 import { getCurrentTaskContext, requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import {
   buildDefaultSkillDisplayName,
   buildSkillChunkContent,
@@ -81,6 +82,7 @@ export async function skillCreate(args: {
   scope_id?: string;
   tags?: string[];
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("skill_create");
   const task = await requireCurrentTaskContext();
   const name = normalizeSkillName(args.name);
   const scopeType = (args.scope_type || "company").trim().toLowerCase();

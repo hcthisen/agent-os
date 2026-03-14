@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { enforceScope, requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const projectUpdateDef = {
   name: "project_update",
@@ -25,6 +26,7 @@ export async function projectUpdate(args: {
   description?: string;
   repo_url?: string;
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("project_update");
   await requireCurrentTaskContext();
 
   const projectId = String(args.project_id || "").trim();

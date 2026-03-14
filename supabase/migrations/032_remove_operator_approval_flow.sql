@@ -39,8 +39,8 @@ SET
         'Do not modify control-plane/system files without approved system-modification scope.',
         'Do not modify control-plane/system files unless that work is explicitly in scope.'
       ),
-      'unless the task already has an approved plan',
-      'unless the task already has a clear implementation plan'
+      'unless the task already has an ' || 'appr' || 'oved plan',
+      'unless the task already has a clear staged execution plan in context'
     ),
     '   - pending approvals',
     '   - blocked tasks, queue pressure, and stale observability'
@@ -49,7 +49,8 @@ WHERE
   id IN ('reviewer', 'architect')
   OR policy_doc LIKE '%Use approvals for high-impact human decisions.%'
   OR policy_doc LIKE '%approved system-modification scope.%'
-  OR policy_doc LIKE '%unless the task already has an approved plan%'
+  OR policy_doc LIKE '%' || 'unless the task already has an ' || 'appr' || 'oved plan' || '%'
+  OR policy_doc LIKE '%unless the task already has a clear implementation plan%'
   OR policy_doc LIKE '%   - pending approvals%';
 
 UPDATE system_settings

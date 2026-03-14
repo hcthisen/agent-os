@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import cronParser from "cron-parser";
 
 export const scheduleUpdateDef = {
@@ -35,6 +36,7 @@ export async function scheduleUpdate(args: {
   cron_expr?: string;
   enabled?: boolean;
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("schedule_update");
   await requireCurrentTaskContext();
 
   if (!args.schedule_id && !args.name) {

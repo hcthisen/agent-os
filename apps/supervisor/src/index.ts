@@ -8,6 +8,7 @@ import { startAsyncWorkers, stopAsyncWorkers } from "./async-workers.js";
 import { getRuntimeProviderStatus } from "./runtime-provider.js";
 import { monitorTaskAttention } from "./task-attention.js";
 import { monitorTaskOutcomes } from "./task-outcomes.js";
+import { sendManagedMessage } from "./operator-delivery.js";
 import {
   handlePublicSiteRouteControl,
   handleServiceControlControl,
@@ -176,6 +177,36 @@ async function main() {
       try {
         const payload = await readJsonBody(req);
         const result = await handleServiceControlControl(payload);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      }
+    } else if (req.url === "/control/message-send" && req.method === "POST") {
+      try {
+        const payload = await readJsonBody(req);
+        const result = await sendManagedMessage({
+          channel:
+            payload.channel === "telegram" ? "telegram" : "admin_chat",
+          content: String(payload.content || ""),
+          metadata:
+            payload.metadata && typeof payload.metadata === "object"
+              ? (payload.metadata as Record<string, unknown>)
+              : undefined,
+          sender:
+            typeof payload.sender === "string" && payload.sender.trim()
+              ? payload.sender.trim()
+              : undefined,
+          taskId:
+            typeof payload.task_id === "string" && payload.task_id.trim()
+              ? payload.task_id.trim()
+              : null,
+        });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (error) {

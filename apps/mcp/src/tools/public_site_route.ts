@@ -1,6 +1,7 @@
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import { callSupervisorControl } from "../supervisor-control.js";
 import { upsertTaskRequirement } from "../task_requirements.js";
 
@@ -66,6 +67,9 @@ export async function publicSiteRoute(args: {
 }): Promise<unknown> {
   const task = await requireCurrentTaskContext();
   const action = normalizeAction(args.action);
+  if (action !== "verify") {
+    await assertTaskMutationAllowed("public_site_route");
+  }
   const rootDomain = normalizeRootDomain(process.env.ROOT_DOMAIN);
   const hostname = normalizeHostname(args.hostname, rootDomain);
   const routeRow = await loadRoute(hostname);

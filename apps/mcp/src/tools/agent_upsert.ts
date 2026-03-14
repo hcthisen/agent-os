@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const agentUpsertDef = {
   name: "agent_upsert",
@@ -32,6 +33,7 @@ export async function agentUpsert(args: {
   status?: string;
   config?: Record<string, unknown>;
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("agent_upsert");
   await requireCurrentTaskContext();
 
   const db = getDb();

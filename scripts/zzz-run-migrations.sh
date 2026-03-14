@@ -29,4 +29,12 @@ for f in $(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null | sort); do
   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -f "$f"
 done
 
+echo "[migrations] Normalizing function grants that must be owned by supabase_admin..."
+PGPASSWORD="$POSTGRES_PASSWORD" psql -v ON_ERROR_STOP=1 --username "supabase_admin" --dbname "$POSTGRES_DB" <<'EOSQL'
+REVOKE ALL ON FUNCTION public.get_service_registry_runtime(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.get_service_registry_runtime(text) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.get_service_registry_runtime(text) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.get_service_registry_runtime(text) TO service_role;
+EOSQL
+
 echo "[migrations] All migrations applied successfully."

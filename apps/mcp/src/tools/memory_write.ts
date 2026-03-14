@@ -1,6 +1,7 @@
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export interface WriteMemoryRecordInput {
   chunk_content?: string;
@@ -81,6 +82,7 @@ export async function writeMemoryRecord(args: WriteMemoryRecordInput): Promise<{
 }> {
   const db = getDb();
   const ctx = getAgentContext();
+  await assertTaskMutationAllowed("memory_write");
 
   await enforceScope(args.scope_type, args.scope_id);
 

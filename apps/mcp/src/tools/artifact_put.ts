@@ -1,6 +1,7 @@
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope, requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const artifactPutDef = {
   name: "artifact_put",
@@ -51,6 +52,7 @@ export async function artifactPut(args: {
 }): Promise<unknown> {
   const db = getDb();
   const ctx = getAgentContext();
+  await assertTaskMutationAllowed("artifact_put");
   let taskId = args.task_id || null;
   const projectId = args.project_id || null;
 

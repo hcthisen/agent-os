@@ -160,6 +160,7 @@ export const api = {
       customer_id?: string | null;
       department_id?: string | null;
       objective: string;
+      simulation_only?: boolean;
       title: string;
     }
   ) => apiPost<TaskRecord>("/tasks", payload),
@@ -368,6 +369,7 @@ export const api = {
         | "objective"
         | "priority"
         | "project_id"
+        | "simulation_only"
         | "title"
       >
     >

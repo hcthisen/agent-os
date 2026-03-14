@@ -13,6 +13,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 const DEFAULT_SOURCE_CANDIDATES = [
   "sites/public/dist",
@@ -56,6 +57,7 @@ export async function publicSitePublish(args: {
 }): Promise<unknown> {
   const db = getDb();
   const ctx = getAgentContext();
+  await assertTaskMutationAllowed("public_site_publish");
   const task = await requireCurrentTaskContext();
   const workspaceDir = process.env.WORKSPACE_DIR || process.cwd();
   const deploymentRoot = process.env.PUBLIC_LIVE_DIR;

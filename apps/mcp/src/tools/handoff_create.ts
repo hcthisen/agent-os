@@ -1,6 +1,7 @@
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 
 export const handoffCreateDef = {
   name: "handoff_create",
@@ -52,6 +53,7 @@ export async function handoffCreate(args: {
 }): Promise<unknown> {
   const db = getDb();
   const ctx = getAgentContext();
+  await assertTaskMutationAllowed("handoff_create");
 
   await enforceScope("task", args.task_id);
 

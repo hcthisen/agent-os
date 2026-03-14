@@ -305,6 +305,7 @@ async function main() {
   const agentId = process.env.AGENT_ID;
   const roleId = process.env.ROLE_ID;
   const runId = process.env.RUN_ID;
+  const taskId = process.env.TASK_ID || null;
   const traceId = process.env.TRACE_ID || runId || "unknown";
 
   if (agentId && roleId && runId) {
@@ -312,6 +313,7 @@ async function main() {
       agent_id: agentId,
       role_id: roleId,
       run_id: runId,
+      task_id: taskId,
       trace_id: traceId,
     });
   }

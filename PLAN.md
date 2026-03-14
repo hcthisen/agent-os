@@ -637,12 +637,30 @@ and no max-duration safety net for agent runs. This phase addresses runtime reli
 - [x] Return 429 Too Many Requests when exceeded.
 
 ### 5.6 Phase 5 verification
-- [ ] Local Docker Desktop validation confirms the affected supervisor/admin runtime
+- [x] Local Docker Desktop validation confirms the affected supervisor/admin runtime
   changes behave correctly on a fresh stack before VPS rollout.
-- [ ] Workspace directory count stabilizes on VPS after cleanup runs.
-- [ ] A long-running agent is killed after max-duration timeout.
-- [ ] Notification spam for a stuck task is reduced to 1 per hour.
-- [ ] Concurrent scheduler instances do not double-fire.
+- [x] Workspace directory count stabilizes on VPS after cleanup runs.
+- [x] A long-running agent is killed after max-duration timeout.
+- [x] Notification spam for a stuck task is reduced to 1 per hour.
+- [x] Concurrent scheduler instances do not double-fire.
+Verification used: fresh local Docker Desktop bring-up validated admin and supervisor
+health, then `scripts/verify-phase5-runtime.mjs` ran in a one-off supervisor container
+to prove max-duration timeout (`task_runs.status = timeout` plus
+`task.max_duration_timeout`), event-based notification cooldown (second pass produced no
+replacement message after deleting the first relay row), and concurrent scheduler
+locking (three simultaneous `checkSchedules()` calls created exactly one task). Admin
+rate limiting was verified on the same fresh stack with failed login attempts returning
+`429` on the 11th request and authenticated API requests returning `429` on the 101st
+request. Evidence: `C:\Github\agent-os\.tmp\phase5-local-summary.json`,
+`C:\Github\agent-os\.tmp\phase5-local-runtime.json`,
+`C:\Github\agent-os\.tmp\phase5-local-admin-rate-limit.json`. Live VPS validation used
+the idle supervisor (`active_processes = 0`, running tasks = `0`) and two manual
+`cleanupWorkspaces()` executions with the supervisor runtime env loaded; workspace counts
+held steady at `61 -> 61 -> 61` with `0` stale directories older than the cleanup
+window before and after. Evidence:
+`C:\Github\agent-os\.tmp\phase5-vps-summary.json`,
+`C:\Github\agent-os\.tmp\phase5-vps-workspace-check.json`,
+`C:\Github\agent-os\.tmp\phase5-vps-workspace-check-fixed.json`.
 
 ---
 
@@ -700,6 +718,147 @@ foundation built in Phases 0-5.
 
 ---
 
+## Phase 7: Final Readiness Blockers
+
+**Why:** The plan implementation is functionally complete, but the final review found six
+remaining gaps that still block the stated goal of a trustworthy autonomous digital
+employee. These are not optional polish items. They affect secret isolation, credential
+exposure, task correctness, scope correctness, safe test execution, and prompt
+consistency.
+
+**Duration:** 3-6 days
+
+### 7.1 Remove control-plane secrets from agent-readable workspace files
+- [ ] In `apps/supervisor/src/process-manager.ts`, stop writing
+  `SUPABASE_SERVICE_KEY`, `TELEGRAM_BOT_TOKEN`, and other control-plane secrets into
+  agent-readable files such as `mcp-config.json` and Codex `config.toml`.
+- [ ] Redesign MCP bootstrap so the launched agent can still reach MCP tools without being
+  handed raw control-plane credentials in its own workspace. Options:
+  1. Run MCP behind a supervisor-owned local proxy and expose only the proxy endpoint to
+     the agent.
+  2. Or issue a least-privilege per-run token/JWT instead of the service-role key.
+- [ ] Audit `prepareCodexHome()`, `buildCodexConfigToml()`, and any provider-home files to
+  ensure no control-plane secrets are copied into the task workspace.
+
+**Why this matters:** The current Phase 0 env scrub is undermined if the same secrets are
+written to files the agent can read. A bypassed agent subprocess can still recover DB and
+runtime secrets from the workspace and escape the intended trust boundary.
+
+**Must test before complete:**
+- [ ] Local Docker Desktop: launch a real task, inspect the task workspace, and verify no
+  service-role key, Telegram token, JWT secret, or DB password appears in
+  `mcp-config.json`, provider config, or copied auth files.
+- [ ] Local Docker Desktop: verify the task can still use MCP tools successfully after the
+  redesign.
+- [ ] Live VPS: run one disposable verification task, confirm MCP still works, and then
+  search the live workspace for leaked secrets before cleaning up the task and workspace.
+
+### 7.2 Restrict decrypted service credential access to trusted runtime paths
+- [ ] In `supabase/migrations/031_service_registry_runtime_rpc.sql`, remove
+  `authenticated` execute access from `get_service_registry_runtime(text)`.
+- [ ] Re-grant the RPC only to the narrowest role that actually needs plaintext
+  credentials at runtime.
+- [ ] Audit every caller in supervisor/MCP/admin to confirm no authenticated client path
+  depends on the broader grant.
+
+**Why this matters:** `get_service_registry_runtime()` is `SECURITY DEFINER` and returns
+decrypted credentials. If ordinary authenticated callers can execute it, any authenticated
+DB client can read plaintext third-party secrets.
+
+**Must test before complete:**
+- [ ] Local Docker Desktop: verify a normal authenticated caller can no longer execute the
+  RPC.
+- [ ] Local Docker Desktop: verify supervisor/MCP service flows that need credentials still
+  succeed.
+- [ ] Live VPS: re-run one credentialed service lookup path and confirm the service still
+  works, then verify the RPC is no longer exposed to non-service callers.
+
+### 7.3 Make task claiming single-winner and race-safe
+- [ ] In `apps/supervisor/src/task-poller.ts`, replace the current optimistic
+  `ready -> claimed -> running` sequence with a single-winner claim flow that verifies the
+  current poller actually claimed the row before launching.
+- [ ] Include `claimed_by = agent.id` in the `claimed -> running` transition so one poller
+  cannot advance another poller's claim.
+- [ ] Add a second line of defense at the DB/task-run level if needed, such as a
+  uniqueness rule preventing multiple active launches for the same task.
+
+**Why this matters:** Double-launching the same task is one of the fastest ways to produce
+duplicate external actions, conflicting memory writes, and broken task state.
+
+**Must test before complete:**
+- [ ] Local Docker Desktop: run a concurrency harness that triggers multiple pollers
+  against the same ready task and verify exactly one agent launch and one active run.
+- [ ] Local Docker Desktop: verify the losing poller does not move the task to `running`.
+- [ ] Live VPS: perform one selective concurrency verification with disposable tasks only
+  if it can be done without operator noise, then delete the test rows.
+
+### 7.4 Make MCP context run-scoped and enforce `max_concurrent_tasks`
+- [ ] In `apps/supervisor/src/process-manager.ts`, pass `TASK_ID` into the per-run MCP
+  environment.
+- [ ] In `apps/mcp/src/context.ts` and `apps/mcp/src/scope.ts`, resolve the active task
+  from the explicit run/task context instead of "latest task claimed by this agent".
+- [ ] Update memory, skill, service, and task tools that depend on current task scope to
+  use the explicit task id.
+- [ ] In `apps/supervisor/src/task-poller.ts`, enforce `max_concurrent_tasks` before
+  selecting/launching an agent.
+
+**Why this matters:** Without a run-scoped task id, agents with more than one active task
+can attach memory, skills, service requirements, or customer/department scope to the
+wrong task. Exposing `max_concurrent_tasks` in the admin while not enforcing it also gives
+operators a false sense of control.
+
+**Must test before complete:**
+- [ ] Local Docker Desktop: set `max_concurrent_tasks = 1` and verify a second ready task
+  for the same agent does not launch.
+- [ ] Local Docker Desktop: set `max_concurrent_tasks = 2`, create two scoped tasks for
+  the same agent, and verify each run reads/writes against the correct task/project/
+  customer/department context.
+- [ ] Live VPS: run a minimal disposable verification of the enforced cap and explicit
+  task context, then remove all test tasks and related rows.
+
+### 7.5 Make skill "dry-run" tests truly non-destructive
+- [ ] Add an explicit backend task flag such as `test_mode`, `simulation_only`, or
+  equivalent rather than relying on objective text.
+- [ ] Carry that flag into task briefing/context pack generation so execution roles know
+  they are in simulation mode.
+- [ ] Enforce the flag in the execution layer for any tool or workflow that can mutate
+  external systems.
+- [ ] Update the Skills admin UI copy so operators understand the exact safety guarantee.
+
+**Why this matters:** A "dry-run" button that creates an ordinary ready task is not a dry
+run. It is real work queued for real execution, which is unsafe for a system that can act
+autonomously.
+
+**Must test before complete:**
+- [ ] Local Docker Desktop: create a dry-run skill test task and verify it is marked as
+  simulation/test mode end to end.
+- [ ] Local Docker Desktop: verify mutation-capable tools refuse or safely no-op in that
+  mode.
+- [ ] Live VPS: run one disposable dry-run verification and confirm no external state is
+  changed, then remove the test task.
+
+### 7.6 Remove the remaining approval-era prompt language
+- [ ] Remove the remaining approval-era relay wording from
+  `apps/supervisor/src/message-router.ts` and `apps/admin/server.mjs`.
+- [ ] Audit the latest seed/update migrations and living docs so fresh installs and live
+  upgrades do not reintroduce approval-era wording.
+- [ ] Add one normalization migration if needed so the live database content matches the
+  new autonomous model everywhere.
+
+**Why this matters:** The operator approval flow has been removed. Leaving approval-era
+prompt language behind can still bias relay routing, planning behavior, and future seed
+state away from the intended autonomous execution model.
+
+**Must test before complete:**
+- [ ] Repo audit: grep for the banned approval-era phrases and confirm they are gone from
+  active runtime code and current docs.
+- [ ] Local Docker Desktop fresh deployment: verify seeded role/policy content and relay
+  routing prompts no longer mention approval-era behavior.
+- [ ] Live VPS: send one controlled relay message, inspect the generated routing objective,
+  and confirm the outdated approval wording is gone.
+
+---
+
 ## Reference: Files Modified Per Phase
 
 | Phase | Files |
@@ -711,6 +870,7 @@ foundation built in Phases 0-5.
 | 4 | `apps/admin/server.mjs`, `apps/admin/src/pages/TasksPage.tsx`, `apps/admin/src/pages/Dashboard.tsx`, `apps/admin/src/lib/api.ts`, new page files for artifacts/projects if separate tabs |
 | 5 | `apps/supervisor/src/process-manager.ts` or new `workspace-cleanup.ts`, `apps/supervisor/src/config.ts`, `apps/supervisor/src/index.ts`, `apps/supervisor/src/task-attention.ts`, `apps/supervisor/src/scheduler.ts`, `apps/admin/server.mjs` |
 | 6 | Various - depends on selected features |
+| 7 | `apps/supervisor/src/process-manager.ts`, `apps/supervisor/src/task-poller.ts`, `apps/mcp/src/context.ts`, `apps/mcp/src/scope.ts`, `apps/admin/server.mjs`, `apps/admin/src/pages/SkillsPage.tsx`, `supabase/migrations/031_*.sql`, follow-up migrations/docs as needed |
 
 ---
 
@@ -725,12 +885,13 @@ foundation built in Phases 0-5.
 - 2026-03-14: Phase 6.6 bulk import verification passed locally on a fresh Docker Desktop stack and on the live VPS. A two-paragraph document imported as two semantic company memories tagged `operator_taught`, and the temporary live verification memories were deleted afterward.
 - 2026-03-14: Phase 6.4 verification passed locally and on the live VPS. Local Docker Desktop validation created customer-scoped and department-scoped memories plus skills, then confirmed `build_context_pack()` included them for a scoped task (`.tmp/phase6-local-context-summary.json`). Live VPS validation repeated the same check with a backlog-only task via direct `build_context_pack()` SQL and the temporary live rows were deleted afterward.
 - 2026-03-14: Phase 6.7 verification passed locally and on the live VPS. Admin chat now surfaces procedural training as a pending skill draft with save/discard controls, explicit confirmation saves the skill, and the saved skill becomes searchable immediately. Local UI evidence: `C:\Github\agent-os\.tmp\phase6-chat-draft-local.png`. The temporary live draft, messages, skills, memories, and scoped task were deleted afterward.
+- 2026-03-14: Phase 5 verification passed. Local Docker Desktop evidence in `C:\Github\agent-os\.tmp\phase5-local-summary.json` showed max-duration timeout, notification cooldown, scheduler locking, and admin API rate limiting on a fresh stack; the disposable stack was torn down afterward. Live VPS evidence in `C:\Github\agent-os\.tmp\phase5-vps-summary.json` showed the supervisor idle, `cleanupWorkspaces()` safe to run manually, and workspace counts stable at `61` with `0` stale directories before and after two cleanup passes.
 
 - [x] Phase 0 - Runtime Boundary Hardening
 - [x] Phase 1 - Admin Panel Control Plane
 - [x] Phase 2 - Shared Skill System
 - [x] Phase 3 - Training and Knowledge Management
 - [x] Phase 4 - Observability and Polish
-- [ ] Phase 5 - Operational Hardening
+- [x] Phase 5 - Operational Hardening
 - [x] Phase 6 - Extended Capabilities (future, not blocking)
-
+- [ ] Phase 7 - Final Readiness Blockers

@@ -87,6 +87,7 @@ export interface TaskRecord {
   parent_task_id: string | null;
   customer_id?: string | null;
   department_id?: string | null;
+  simulation_only?: boolean;
   depends_on?: string[] | null;
   title: string;
   objective?: string;

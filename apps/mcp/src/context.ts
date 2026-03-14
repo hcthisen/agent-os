@@ -6,6 +6,7 @@ export interface AgentContext {
   agent_id: string;
   role_id: string;
   run_id: string;
+  task_id: string | null;
   trace_id: string;
 }
 

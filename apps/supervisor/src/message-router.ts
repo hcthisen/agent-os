@@ -135,7 +135,7 @@ Recent conversation transcript:
 ${transcript}
 
 Routing reminders:
-- If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless an approved plan already exists.
+- If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless the task already has a clear staged execution plan in context.
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
 - If the request is multi-phase, prefer a staged task graph with explicit depends_on prerequisites so follow-up work waits automatically instead of starting in parallel by accident.

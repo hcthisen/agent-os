@@ -42,6 +42,13 @@ interface SkillMemoryRow {
   updated_at: string;
 }
 
+interface LaunchAgentCandidate {
+  config?: Record<string, unknown> | null;
+  id: string;
+  name: string;
+  role_id: string;
+}
+
 /**
  * Poll for ready tasks and launch agents when capacity is available.
  */
@@ -84,29 +91,14 @@ export async function pollForTasks(): Promise<void> {
 
     const launchRole = task.state === "in_review" ? "reviewer" : task.assigned_role;
 
-    // Find an active agent for this role
-    const { data: agent } = await db
+    // Find active agents for this role. The poller chooses the first agent with spare capacity.
+    const { data: roleAgents, error: agentError } = await db
       .from("agents")
       .select("id, name, role_id, config")
       .eq("role_id", launchRole)
       .eq("status", "active")
-      .limit(1)
-      .single();
-
-    if (!agent) {
-      console.warn(`No active agent for role: ${launchRole}`);
-      const note = `Supervisor could not start this task because no active agent is configured for role '${launchRole}'. Task remains queued in ${task.state}.`;
-      if (task.last_handoff_note !== note) {
-        await db
-          .from("tasks")
-          .update({
-            last_handoff_note: note,
-          })
-          .eq("id", task.id)
-          .eq("state", "ready");
-      }
-      continue;
-    }
+      .order("created_at")
+      .returns<LaunchAgentCandidate[]>();
 
     // Get role config
     const { data: role } = await db
@@ -130,6 +122,46 @@ export async function pollForTasks(): Promise<void> {
       continue;
     }
 
+    if (agentError || !roleAgents?.length) {
+      console.warn(`No active agent for role: ${launchRole}`);
+      const note = `Supervisor could not start this task because no active agent is configured for role '${launchRole}'. Task remains queued in ${task.state}.`;
+      if (task.last_handoff_note !== note) {
+        await db
+          .from("tasks")
+          .update({
+            last_handoff_note: note,
+          })
+          .eq("id", task.id)
+          .eq("state", task.state);
+      }
+      continue;
+    }
+
+    const maxConcurrentTasks = resolveMaxConcurrentTasks(role);
+    let agent: LaunchAgentCandidate | null = null;
+
+    for (const candidate of roleAgents) {
+      const activeTaskCount = await countActiveTasksForAgent(candidate.id);
+      if (activeTaskCount < maxConcurrentTasks) {
+        agent = candidate;
+        break;
+      }
+    }
+
+    if (!agent) {
+      const note = `Supervisor deferred this task because all active agents for '${launchRole}' are already at the max concurrent task limit (${maxConcurrentTasks}). Task remains queued in ${task.state}.`;
+      if (task.last_handoff_note !== note) {
+        await db
+          .from("tasks")
+          .update({
+            last_handoff_note: note,
+          })
+          .eq("id", task.id)
+          .eq("state", task.state);
+      }
+      continue;
+    }
+
     // Apply agent config overrides
     const model = (agent.config as any)?.model || role.model;
     const effort = (agent.config as any)?.effort || role.effort;
@@ -137,47 +169,86 @@ export async function pollForTasks(): Promise<void> {
 
     if (task.state === "ready") {
       // Claim the task
-      const { error: claimErr } = await db
+      const { data: claimedTask, error: claimErr } = await db
         .from("tasks")
         .update({ state: "claimed", claimed_by: agent.id })
         .eq("id", task.id)
-        .eq("state", "ready"); // optimistic lock
+        .eq("state", "ready")
+        .select("id, claimed_by, state")
+        .maybeSingle<{
+          claimed_by: string | null;
+          id: string;
+          state: string;
+        }>();
 
-      if (claimErr) continue; // another poller got it
+      if (
+        claimErr ||
+        !claimedTask ||
+        claimedTask.claimed_by !== agent.id ||
+        claimedTask.state !== "claimed"
+      ) {
+        continue;
+      }
 
-      // Move to running
-      const { error: runErr } = await db
+      // Move to running only if this poller still owns the claim.
+      const { data: runningTask, error: runErr } = await db
         .from("tasks")
         .update({ state: "running" })
         .eq("id", task.id)
-        .eq("state", "claimed");
+        .eq("state", "claimed")
+        .eq("claimed_by", agent.id)
+        .select("id, claimed_by, state")
+        .maybeSingle<{
+          claimed_by: string | null;
+          id: string;
+          state: string;
+        }>();
 
-      if (runErr) {
+      if (
+        runErr ||
+        !runningTask ||
+        runningTask.claimed_by !== agent.id ||
+        runningTask.state !== "running"
+      ) {
         console.error(`Failed to move task ${task.id} to running:`, runErr);
+        const runErrorMessage = runErr?.message || "task claim was lost before launch";
         await db
           .from("tasks")
           .update({
             state: "ready",
             claimed_by: null,
-            last_handoff_note: `Supervisor claimed this task but could not transition it to running: ${runErr.message}`,
+            last_handoff_note: `Supervisor claimed this task but could not transition it to running: ${runErrorMessage}`,
           })
           .eq("id", task.id)
           .eq("state", "claimed");
         continue;
       }
     } else {
-      const { error: reviewRunErr } = await db
+      const { data: reviewerRun, error: reviewRunErr } = await db
         .from("tasks")
         .update({ state: "running", claimed_by: agent.id })
         .eq("id", task.id)
-        .eq("state", "in_review");
+        .eq("state", "in_review")
+        .select("id, claimed_by, state")
+        .maybeSingle<{
+          claimed_by: string | null;
+          id: string;
+          state: string;
+        }>();
 
-      if (reviewRunErr) {
+      if (
+        reviewRunErr ||
+        !reviewerRun ||
+        reviewerRun.claimed_by !== agent.id ||
+        reviewerRun.state !== "running"
+      ) {
         console.error(`Failed to start reviewer run for task ${task.id}:`, reviewRunErr);
+        const reviewRunErrorMessage =
+          reviewRunErr?.message || "reviewer launch claim was lost";
         await db
           .from("tasks")
           .update({
-            last_handoff_note: `Supervisor could not start reviewer pass: ${reviewRunErr.message}`,
+            last_handoff_note: `Supervisor could not start reviewer pass: ${reviewRunErrorMessage}`,
           })
           .eq("id", task.id)
           .eq("state", "in_review");
@@ -255,6 +326,35 @@ function resolveMaxRunDurationMs(role: Record<string, unknown>): number | undefi
         : NaN;
 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function resolveMaxConcurrentTasks(role: Record<string, unknown>): number {
+  const rawValue = role.max_concurrent_tasks;
+  const parsed =
+    typeof rawValue === "number"
+      ? rawValue
+      : typeof rawValue === "string"
+        ? parseInt(rawValue, 10)
+        : NaN;
+
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+async function countActiveTasksForAgent(agentId: string): Promise<number> {
+  const db = getDb();
+  const { count, error } = await db
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("claimed_by", agentId)
+    .in("state", ["claimed", "running", "blocked_on_agent", "in_review"]);
+
+  if (error) {
+    throw new Error(
+      `Failed to count active tasks for agent '${agentId}': ${error.message}`
+    );
+  }
+
+  return count || 0;
 }
 
 async function loadRelevantSkills(

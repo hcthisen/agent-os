@@ -562,7 +562,7 @@ async function loadTasksFeed(options = {}) {
       limit: String(limit),
       order: "created_at.desc",
       select:
-        "id,title,objective,acceptance_criteria,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id,project_id,due_at",
+        "id,title,objective,acceptance_criteria,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id,project_id,due_at,customer_id,department_id,simulation_only",
     },
   });
   const activityMap = await loadLatestTaskActivityMap(
@@ -586,7 +586,7 @@ async function loadLiveActivity() {
       limit: "12",
       order: "updated_at.desc",
       select:
-        "id,title,state,assigned_role,claimed_by,created_at,updated_at",
+        "id,title,state,assigned_role,claimed_by,created_at,updated_at,simulation_only",
       state: "in.(claimed,running,blocked_on_agent,in_review)",
     },
   }).catch(() => []);
@@ -1342,7 +1342,7 @@ Recent conversation transcript:
 ${transcript}
 
 Routing reminders:
-- If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless an approved plan already exists.
+- If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless the task already has a clear staged execution plan in context.
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
 - If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
@@ -2968,6 +2968,7 @@ async function handleApi(req, res, url) {
   if (pathname === "/api/tasks" && req.method === "POST") {
     const body = await readJson(req);
     const assignedRole = normalizeString(body.assigned_role).toLowerCase();
+    const simulationOnly = body.simulation_only === true;
     const title = normalizeString(body.title);
     const objective = normalizeString(body.objective);
 
@@ -2996,6 +2997,7 @@ async function handleApi(req, res, url) {
         parent_task_id: normalizeString(body.parent_task_id) || null,
         priority: normalizeString(body.priority, "normal") || "normal",
         project_id: normalizeString(body.project_id) || null,
+        simulation_only: simulationOnly,
         state: "ready",
         title,
       },
@@ -3051,6 +3053,19 @@ async function handleApi(req, res, url) {
     if (typeof body.due_at === "string") {
       patch.due_at = body.due_at.trim() || null;
     }
+    if (typeof body.simulation_only === "boolean") {
+      patch.simulation_only = body.simulation_only;
+    }
+
+    if (patch.assigned_role) {
+      const role = await postgrest("/roles", {
+        query: { id: `eq.${patch.assigned_role}`, limit: "1", select: "id" },
+      });
+      if (!role?.[0]?.id) {
+        sendJson(res, 400, { error: `Role '${patch.assigned_role}' does not exist` });
+        return;
+      }
+    }
 
     const rows = await postgrest("/tasks", {
       body: patch,
@@ -3088,7 +3103,7 @@ async function handleApi(req, res, url) {
                 id: `eq.${task.parent_task_id}`,
                 limit: "1",
                 select:
-                  "id,title,state,priority,assigned_role,parent_task_id,project_id,customer_id,department_id,created_at,updated_at",
+                  "id,title,state,priority,assigned_role,parent_task_id,project_id,customer_id,department_id,simulation_only,created_at,updated_at",
               },
             })
           )?.[0] || null

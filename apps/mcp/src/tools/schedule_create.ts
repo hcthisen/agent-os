@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import cronParser from "cron-parser";
 
 export const scheduleCreateDef = {
@@ -63,6 +64,7 @@ export async function scheduleCreate(args: {
   enabled?: boolean;
   project_id?: string;
 }): Promise<unknown> {
+  await assertTaskMutationAllowed("schedule_create");
   await requireCurrentTaskContext();
 
   const db = getDb();

@@ -265,6 +265,7 @@ export async function launchAgent(
     agentId,
     roleId,
     runId,
+    taskId,
     traceId,
     workDir,
   });
@@ -317,6 +318,7 @@ export async function launchAgent(
     responsePath,
     roleId,
     runId,
+    taskId,
     traceId,
     workDir,
   });
@@ -847,6 +849,7 @@ interface BuildLaunchSpecInput {
   responsePath: string | null;
   roleId: string;
   runId: string;
+  taskId: string;
   traceId: string;
   workDir: string;
 }
@@ -868,6 +871,7 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
     ROLE_ID: input.roleId,
     ROOT_DOMAIN: config.rootDomain,
     RUN_ID: input.runId,
+    TASK_ID: input.taskId,
     TRACE_ID: input.traceId,
     USERPROFILE: input.homeDir,
     WORKSPACE_DIR: input.workDir,
@@ -948,6 +952,7 @@ function buildPerTaskMcpEnv(input: {
   agentId: string;
   roleId: string;
   runId: string;
+  taskId: string;
   traceId: string;
   workDir: string;
 }): Record<string, string> {
@@ -962,12 +967,12 @@ function buildPerTaskMcpEnv(input: {
     COMPOSE_CURRENT_SERVICE: composeRuntimeEnv.COMPOSE_CURRENT_SERVICE || "",
     COMPOSE_PROJECT: composeRuntimeEnv.COMPOSE_PROJECT || "",
     ROOT_DOMAIN: config.rootDomain,
-    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
     WORKSPACE_DIR: input.workDir,
     PUBLIC_LIVE_DIR: config.publicLiveDir,
     PUBLIC_SITE_URL: config.publicSiteUrl,
     ROLE_ID: input.roleId,
     RUN_ID: input.runId,
+    TASK_ID: input.taskId,
     TRACE_ID: input.traceId,
   };
 }
@@ -1233,10 +1238,24 @@ function formatBriefing(contextPack: Record<string, unknown>): string {
     ...briefingContext
   } = contextPack;
   const skillSection = formatRelevantSkills(relevantSkills);
+  const simulationOnly = Boolean(
+    (briefingContext.task as { simulation_only?: unknown } | undefined)
+      ?.simulation_only
+  );
+  const simulationSection = simulationOnly
+    ? `## Simulation Mode
+
+This task is running in simulation-only mode.
+- Do not mutate external systems.
+- Do not create durable runtime changes such as new tasks, schedules, shared skills, projects, or outbound operator messages.
+- Report the intended procedure and expected outcomes in your task handoff instead.
+
+`
+    : "";
 
   return `# Task Briefing
 
-${JSON.stringify(briefingContext, null, 2)}
+${simulationSection}${JSON.stringify(briefingContext, null, 2)}
 ${skillSection}
 `;
 }

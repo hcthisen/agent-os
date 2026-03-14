@@ -47,7 +47,7 @@ function buildFormPreviewSkill(form: ReturnType<typeof createEmptySkillForm>): S
 
 function buildTaskBriefingPreview(skill: SkillRecord): string {
   const steps = skill.steps.length ? skill.steps.map((step) => `${step.order}. ${step.instruction}`) : ["1. Review the skill definition in memory before acting."];
-  return `# Task Briefing\n\n{\n  "task": {\n    "title": "Preview task using ${skill.display_name}",\n    "objective": "${skill.trigger_when || "Use the shared skill when the trigger applies."}"\n  }\n}\n\n## Relevant Skills\n\n### Skill: ${skill.display_name}\nTrigger: ${skill.trigger_when || "Not specified"}\nSteps:\n${steps.join("\n")}`;
+  return `# Task Briefing\n\n## Simulation Mode\nThis preview task runs in simulation-only mode. Report the intended procedure without mutating runtime or external systems.\n\n{\n  "task": {\n    "title": "Preview task using ${skill.display_name}",\n    "objective": "${skill.trigger_when || "Use the shared skill when the trigger applies."}",\n    "simulation_only": true\n  }\n}\n\n## Relevant Skills\n\n### Skill: ${skill.display_name}\nTrigger: ${skill.trigger_when || "Not specified"}\nSteps:\n${steps.join("\n")}`;
 }
 
 function parseImportedSkillText(raw: string): Partial<ReturnType<typeof createEmptySkillForm>> {
@@ -256,12 +256,13 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
         acceptance_criteria: [
           "Confirm whether the shared skill appears in TASK_BRIEFING.",
           "Summarize how the skill would be applied for the request.",
-          "Do not contact external users or mutate external systems during this test.",
+          "Stay in simulation mode and avoid durable runtime or external mutations.",
         ],
         assigned_role: roleId,
-        objective: [`Safely validate the shared skill \"${activeSkill.display_name}\".`, activeSkill.trigger_when ? `Trigger pattern: ${activeSkill.trigger_when}` : null, "Treat this as a dry run and report your intended procedure only."].filter(Boolean).join(" "),
+        objective: [`Safely validate the shared skill \"${activeSkill.display_name}\".`, activeSkill.trigger_when ? `Trigger pattern: ${activeSkill.trigger_when}` : null, "This is a simulation-only task. Report your intended procedure only."].filter(Boolean).join(" "),
         priority: "normal",
         project_id: testProjectId || null,
+        simulation_only: true,
         title: `Test skill: ${activeSkill.display_name}`,
       });
       setLastTestTaskId(created?.id || null);
@@ -285,7 +286,7 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
       {error && <div style={{ color: "#fca5a5", marginBottom: 12 }}>{error}</div>}
       {lastTestTaskId && (
         <div style={{ ...shellStyles.card, alignItems: "center", display: "flex", gap: 10, marginBottom: 12, padding: 12 }}>
-          <span style={shellStyles.muted}>Created dry-run test task {lastTestTaskId.slice(0, 8)}.</span>
+          <span style={shellStyles.muted}>Created simulation test task {lastTestTaskId.slice(0, 8)}.</span>
           {onOpenTask && (
             <button onClick={() => onOpenTask(lastTestTaskId)} style={{ ...shellStyles.button, ...shellStyles.buttonSecondary }} type="button">
               Open Task
@@ -479,7 +480,7 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
                 </select>
               </div>
             </div>
-            <button disabled={testing} onClick={() => void createTestTask()} style={{ ...shellStyles.button, marginTop: 12, opacity: testing ? 0.7 : 1 }} type="button">{testing ? "Creating Test Task..." : "Create Dry-Run Test Task"}</button>
+            <button disabled={testing} onClick={() => void createTestTask()} style={{ ...shellStyles.button, marginTop: 12, opacity: testing ? 0.7 : 1 }} type="button">{testing ? "Creating Test Task..." : "Create Simulation Test Task"}</button>
           </div>
 
           <div style={shellStyles.card}>

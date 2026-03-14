@@ -1,6 +1,7 @@
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { getCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import {
   buildSkillContent,
   loadLatestSkillMemoryByName,
@@ -37,6 +38,7 @@ export async function skillLogUse(args: {
 }): Promise<unknown> {
   const db = getDb();
   const ctx = getAgentContext();
+  await assertTaskMutationAllowed("skill_log_use");
   const currentTask = await getCurrentTaskContext();
   const memory = args.id
     ? await loadSkillMemoryById(String(args.id).trim())

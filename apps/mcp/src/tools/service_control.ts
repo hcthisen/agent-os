@@ -1,6 +1,7 @@
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { getCurrentTaskContext } from "../scope.js";
+import { assertTaskMutationAllowed } from "../simulation.js";
 import { callSupervisorControl } from "../supervisor-control.js";
 
 const MANAGED_SERVICES = [
@@ -58,6 +59,9 @@ export async function serviceControl(args: {
 }): Promise<unknown> {
   const action = normalizeAction(args.action);
   const requestedServices = normalizeRequestedServices(args, action);
+  if (action !== "status") {
+    await assertTaskMutationAllowed("service_control");
+  }
   const task = await getCurrentTaskContext();
 
   if (action !== "status" && !task) {

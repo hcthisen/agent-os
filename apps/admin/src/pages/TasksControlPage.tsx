@@ -33,6 +33,7 @@ const EMPTY_TASK_FORM = {
   parent_task_id: "",
   priority: "normal",
   project_id: "",
+  simulation_only: false,
   title: "",
 };
 
@@ -163,6 +164,7 @@ export function TasksControlPage({
           parent_task_id: detail.task.parent_task_id || "",
           priority: detail.task.priority || "normal",
           project_id: detail.task.project_id || "",
+          simulation_only: detail.task.simulation_only === true,
           title: detail.task.title || "",
         });
       }
@@ -262,6 +264,7 @@ export function TasksControlPage({
         parent_task_id: taskForm.parent_task_id || null,
         priority: taskForm.priority,
         project_id: taskForm.project_id || null,
+        simulation_only: taskForm.simulation_only,
         title: taskForm.title,
       };
 
@@ -385,6 +388,7 @@ export function TasksControlPage({
                     </div>
                     <div style={shellStyles.muted}>
                       {formatAssignedAgent(task.assigned_role)}
+                      {task.simulation_only ? " • simulation" : ""}
                       {task.project?.display_name ? ` • ${task.project.display_name}` : ""}
                       {task.customer_id ? ` • customer:${task.customer_id}` : ""}
                       {task.department_id ? ` • department:${task.department_id}` : ""}
@@ -558,6 +562,21 @@ export function TasksControlPage({
                   />
                 </div>
               </div>
+              <label style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                <input
+                  checked={taskForm.simulation_only}
+                  onChange={(event) =>
+                    setTaskForm((current) => ({
+                      ...current,
+                      simulation_only: event.target.checked,
+                    }))
+                  }
+                  type="checkbox"
+                />
+                <span style={shellStyles.muted}>
+                  Simulation-only task. Execution may read context but must not create durable runtime or external mutations.
+                </span>
+              </label>
               <div>
                 <label style={shellStyles.label}>Acceptance Criteria (one per line)</label>
                 <textarea
@@ -613,6 +632,9 @@ export function TasksControlPage({
                     <span style={statusChipStyle(STATE_COLORS[taskDetail.task.state] || "#6b7280")}>
                       {taskDetail.task.state}
                     </span>
+                    {taskDetail.task.simulation_only && (
+                      <span style={statusChipStyle("#f59e0b")}>simulation</span>
+                    )}
                     <span style={shellStyles.muted}>
                       {taskDetail.task.priority} • {formatAssignedAgent(taskDetail.task.assigned_role)}
                     </span>
@@ -622,6 +644,7 @@ export function TasksControlPage({
                   </div>
                   <div style={{ ...shellStyles.muted, marginTop: 6 }}>
                     ID {taskDetail.task.id}
+                    {taskDetail.task.simulation_only ? " â€¢ simulation-only" : ""}
                     {taskDetail.project ? ` • ${taskDetail.project.display_name}` : ""}
                     {taskDetail.task.customer_id
                       ? ` • customer:${taskDetail.task.customer_id}`

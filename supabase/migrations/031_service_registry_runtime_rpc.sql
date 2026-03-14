@@ -44,5 +44,6 @@ AS $$
 $$;
 
 REVOKE ALL ON FUNCTION get_service_registry_runtime(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION get_service_registry_runtime(text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION get_service_registry_runtime(text) FROM anon;
+REVOKE EXECUTE ON FUNCTION get_service_registry_runtime(text) FROM authenticated;
 GRANT EXECUTE ON FUNCTION get_service_registry_runtime(text) TO service_role;
