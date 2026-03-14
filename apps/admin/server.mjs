@@ -78,6 +78,20 @@ const SCOPE_TYPE_OPTIONS = new Set([
   "company",
 ]);
 const SKILL_TAG = "skill";
+const SKILL_DRAFT_STATUS_OPTIONS = new Set([
+  "pending",
+  "confirmed",
+  "rejected",
+  "expired",
+]);
+const KNOWLEDGE_BASE_TAGS = new Set([
+  "operator-preference",
+  "operator-taught",
+  "operator-training",
+  "operator_preference",
+  "operator_taught",
+  "operator_training",
+]);
 const rateLimitBuckets = new Map();
 const streamClients = new Set();
 let streamHeartbeatCounter = 0;
@@ -263,6 +277,20 @@ function normalizeStringArray(value) {
       .map((entry) => normalizeString(entry))
       .filter(Boolean)
   )];
+}
+
+function isKnowledgeBaseMemory(memory) {
+  if (!memory || typeof memory !== "object") {
+    return false;
+  }
+
+  if (memory.source_agent_id === null) {
+    return true;
+  }
+
+  return normalizeStringArray(memory.tags).some((tag) =>
+    KNOWLEDGE_BASE_TAGS.has(tag.toLowerCase())
+  );
 }
 
 function splitKnowledgeImportContent(content, splitMode) {
@@ -965,6 +993,156 @@ async function postgrest(path, options = {}) {
   return data;
 }
 
+function normalizeAgentRoleBaseId(name) {
+  const normalized = normalizeString(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+  return normalized || "agent";
+}
+
+function buildRoleProfilePatch(body, options = {}) {
+  const patch = {};
+  const displayNameFallback = normalizeString(options.displayNameFallback);
+
+  if (typeof body.display_name === "string") {
+    patch.display_name = body.display_name.trim();
+  } else if (displayNameFallback) {
+    patch.display_name = displayNameFallback;
+  }
+
+  for (const field of [
+    "description",
+    "handoff_when",
+    "policy_doc",
+    "usage_summary",
+  ]) {
+    if (typeof body[field] === "string") {
+      patch[field] = body[field].trim();
+    }
+  }
+
+  if (typeof body.model === "string" && MODEL_OPTIONS.has(body.model.trim())) {
+    patch.model = body.model.trim();
+  } else if (options.requireCreate) {
+    patch.model = "sonnet";
+  }
+
+  if (typeof body.effort === "string" && EFFORT_OPTIONS.has(body.effort.trim())) {
+    patch.effort = body.effort.trim();
+  } else if (options.requireCreate) {
+    patch.effort = "medium";
+  }
+
+  if (body.max_concurrent_tasks !== undefined) {
+    patch.max_concurrent_tasks = Math.max(1, Number(body.max_concurrent_tasks || 1));
+  } else if (options.requireCreate) {
+    patch.max_concurrent_tasks = 3;
+  }
+
+  if (options.requireCreate) {
+    patch.display_name = requireTrimmedString(
+      patch.display_name,
+      "display_name"
+    );
+    patch.description = requireTrimmedString(
+      patch.description,
+      "description"
+    );
+    patch.policy_doc = requireTrimmedString(
+      patch.policy_doc,
+      "policy_doc"
+    );
+  }
+
+  return patch;
+}
+
+async function loadRoleById(roleId) {
+  const rows = await postgrest("/roles", {
+    query: { id: `eq.${roleId}`, limit: "1", select: "*" },
+  });
+  return rows?.[0] || null;
+}
+
+async function loadAgentById(agentId) {
+  const rows = await postgrest("/agents", {
+    query: { id: `eq.${agentId}`, limit: "1", select: "*" },
+  });
+  return rows?.[0] || null;
+}
+
+async function loadAgentByRoleId(roleId) {
+  const rows = await postgrest("/agents", {
+    query: { role_id: `eq.${roleId}`, limit: "1", select: "*" },
+  });
+  return rows?.[0] || null;
+}
+
+async function allocateAgentRoleId(name) {
+  const baseId = normalizeAgentRoleBaseId(name);
+  let candidate = baseId;
+  let suffix = 2;
+
+  while (await loadRoleById(candidate)) {
+    candidate = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+async function hydrateAgentsWithRoleProfiles(agents) {
+  const rows = Array.isArray(agents) ? agents : [];
+  const roleIds = [...new Set(rows.map((agent) => agent.role_id).filter(Boolean))];
+
+  if (!roleIds.length) {
+    return rows.map((agent) => ({ ...agent, role_profile: null }));
+  }
+
+  const roles = await postgrest("/roles", {
+    query: {
+      id: `in.(${roleIds.join(",")})`,
+      select: "*",
+    },
+  });
+  const roleMap = new Map((roles || []).map((role) => [role.id, role]));
+
+  return rows.map((agent) => ({
+    ...agent,
+    role_profile: roleMap.get(agent.role_id) || null,
+  }));
+}
+
+async function loadAgentsWithRoleProfiles() {
+  const agents = await postgrest("/agents", {
+    query: { order: "name.asc", select: "*" },
+  });
+  const hydrated = await hydrateAgentsWithRoleProfiles(agents || []);
+  return hydrated.sort((left, right) => {
+    const leftName =
+      normalizeString(left.role_profile?.display_name) ||
+      normalizeString(left.name) ||
+      normalizeString(left.role_id);
+    const rightName =
+      normalizeString(right.role_profile?.display_name) ||
+      normalizeString(right.name) ||
+      normalizeString(right.role_id);
+    return leftName.localeCompare(rightName);
+  });
+}
+
+async function loadAgentWithRoleProfile(agentId) {
+  const agent = await loadAgentById(agentId);
+  if (!agent) {
+    return null;
+  }
+
+  const hydrated = await hydrateAgentsWithRoleProfiles([agent]);
+  return hydrated[0] || null;
+}
+
 async function requireAuth(req, res) {
   if (!getSession(req)) {
     sendJson(res, 401, { error: "Unauthorized" });
@@ -1108,17 +1286,13 @@ async function getSupervisorRuntimeProvider() {
 
 async function createRelayTaskForInboundMessage(message) {
   const title = `Process message: ${message.content.slice(0, 50)}...`;
-  const objective = await buildRelayObjective(message);
+  const relayRouting = await prepareRelayTaskRouting(message);
 
   const rows = await postgrest("/tasks", {
     body: {
-      acceptance_criteria: [
-        "Message classified",
-        "Appropriate action taken or task created",
-        "Response sent",
-      ],
+      acceptance_criteria: buildRelayAcceptanceCriteria(relayRouting),
       assigned_role: "relay",
-      objective,
+      objective: relayRouting.objective,
       priority: "high",
       state: "ready",
       title,
@@ -1127,15 +1301,29 @@ async function createRelayTaskForInboundMessage(message) {
     preferRepresentation: true,
   });
 
-  return rows?.[0] || null;
+  const relayTask = rows?.[0] || null;
+  if (relayTask && relayRouting.requires_execution) {
+    await createRelayExecutionRequirement(relayTask.id, relayRouting);
+  }
+
+  return relayTask
+    ? {
+        ...relayTask,
+        routing_hints: relayRouting,
+      }
+    : null;
 }
 
-async function buildRelayObjective(message) {
+async function prepareRelayTaskRouting(message) {
   const content = normalizeString(message.content);
-  const teachMode =
-    /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+  const teachMode = detectRelayTeachMode(content);
   const history = await loadRecentConversationMessages(message);
   const matchedSkills = await loadRelayMatchedSkills(content);
+  const executionDecision = classifyRelayExecutionRequest(
+    content,
+    matchedSkills,
+    teachMode
+  );
   const transcript = [...history, {
     content,
     created_at: new Date().toISOString(),
@@ -1145,7 +1333,7 @@ async function buildRelayObjective(message) {
     .map(formatConversationMessage)
     .join("\n");
 
-  return `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
+  const objective = `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
 
 Current message:
 ${content}
@@ -1159,11 +1347,144 @@ Routing reminders:
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
 - If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can follow the existing procedure instead of recreating it.
+- When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role, reference the matched skill by name, and keep any operator reply to a brief acknowledgement instead of a false completion claim.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
 
-Teach mode detected: ${teachMode ? "yes" : "no"}.`;
+Teach mode detected: ${teachMode ? "yes" : "no"}.
+Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
+Recommended downstream role: ${executionDecision.recommendedRole || "none"}.
+Routing requirement: ${
+  executionDecision.requiresExecution
+    ? "Create at least one downstream child task before completing this relay task."
+    : "Direct answer is allowed when confidence is high."
+}`;
+
+  return {
+    execution_reason: executionDecision.reason,
+    matched_skills: matchedSkills,
+    objective,
+    recommended_role: executionDecision.recommendedRole,
+    requires_execution: executionDecision.requiresExecution,
+    teach_mode: teachMode,
+  };
+}
+
+function buildRelayAcceptanceCriteria(relayRouting) {
+  if (relayRouting?.requires_execution) {
+    return [
+      "Message classified",
+      "Appropriate downstream child task created",
+      "Operator kept informed without falsely claiming the work is already complete",
+    ];
+  }
+
+  return [
+    "Message classified",
+    "Appropriate action taken or task created",
+    "Response sent",
+  ];
+}
+
+async function createRelayExecutionRequirement(taskId, relayRouting) {
+  try {
+    await postgrest("/task_requirements", {
+      body: {
+        expected: {
+          execution_reason: relayRouting.execution_reason,
+          matched_skill_names: (relayRouting.matched_skills || []).map((skill) => skill.name),
+          recommended_role: relayRouting.recommended_role || "builder",
+        },
+        last_result: {},
+        required_for_completion: true,
+        requirement_type: "downstream_task",
+        status: "pending",
+        target: "execution",
+        task_id: taskId,
+      },
+      method: "POST",
+    });
+  } catch (error) {
+    console.error(
+      `[admin] Failed to create downstream-task requirement for relay task ${taskId}:`,
+      error
+    );
+  }
+}
+
+function detectRelayTeachMode(content) {
+  return /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+}
+
+function classifyRelayExecutionRequest(content, matchedSkills, teachMode) {
+  if (teachMode) {
+    return {
+      reason: "explicit_training",
+      recommendedRole: null,
+      requiresExecution: false,
+    };
+  }
+
+  if (!matchedSkills.length) {
+    return {
+      reason: "no_matched_skill",
+      recommendedRole: null,
+      requiresExecution: false,
+    };
+  }
+
+  const imperativeLead =
+    /^(please\s+)?(do|run|handle|follow|use|apply|execute|perform|send|deploy|fix|update|create|remove|delete|verify|check|review|build|make|treat)\b/i.test(
+      content
+    );
+  const actionPhrase =
+    /\b(please|go ahead|follow the|use the|apply the|run the|execute the|handle this|do this|verify this|treat this as|ship this|deploy this|fix this|update this|create this|remove this)\b/i.test(
+      content
+    );
+  const informationalQuestion = looksLikeInformationalRelayQuestion(content);
+  const requiresExecution = imperativeLead || actionPhrase || !informationalQuestion;
+
+  return {
+    reason: requiresExecution
+      ? imperativeLead || actionPhrase
+        ? "matched_skill_action_request"
+        : "matched_skill_non_question"
+      : "matched_skill_information_request",
+    recommendedRole: requiresExecution
+      ? determineRelayRecommendedRole(matchedSkills, content)
+      : null,
+    requiresExecution,
+  };
+}
+
+function looksLikeInformationalRelayQuestion(content) {
+  const normalized = normalizeString(content);
+  if (!normalized.endsWith("?")) {
+    return false;
+  }
+
+  return (
+    /^(what|why|how|when|where|who|which|is|are|does|do|did|can|could|would|should|will)\b/i.test(
+      normalized
+    ) &&
+    !/\b(use|follow|apply|run|execute|handle|do|send|fix|update|create|remove|deploy|verify|build|make|treat)\b/i.test(
+      normalized
+    )
+  );
+}
+
+function determineRelayRecommendedRole(matchedSkills, content) {
+  const requiresService =
+    matchedSkills.some(
+      (skill) =>
+        Array.isArray(skill.required_services) && skill.required_services.length > 0
+    ) ||
+    /\b(api key|credential|login|service connection|service slot|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain)\b/i.test(
+      content
+    );
+
+  return requiresService ? "sage" : "builder";
 }
 
 async function loadRelayMatchedSkills(content) {
@@ -1290,7 +1611,7 @@ function formatConversationMessage(message) {
 
 function shouldHideAdminMessage(message) {
   return (
-    message?.sender === "system" ||
+    (message?.sender === "system" && message?.metadata?.operator_visible !== true) ||
     message?.metadata?.hidden_from_operator === true ||
     message?.metadata?.operator_visible === false
   );
@@ -1713,6 +2034,471 @@ async function createSkillMemory(skillPayload, existingSkill = null) {
   return row;
 }
 
+function parseSkillDraftCommand(content) {
+  const normalized = normalizeString(content);
+  const confirmMatch = normalized.match(
+    /^(save|confirm|approve)\s+skill\s+draft\s+([0-9a-f-]{8,})$/i
+  );
+  if (confirmMatch) {
+    return {
+      action: "confirm",
+      draft_id: confirmMatch[2],
+    };
+  }
+
+  const rejectMatch = normalized.match(
+    /^(reject|discard|cancel)\s+skill\s+draft\s+([0-9a-f-]{8,})$/i
+  );
+  if (rejectMatch) {
+    return {
+      action: "reject",
+      draft_id: rejectMatch[2],
+    };
+  }
+
+  return null;
+}
+
+function isProceduralSkillDraftCandidate(content) {
+  const normalized = normalizeString(content);
+  if (!/^(remember:|always:|rule:|when\b)/i.test(normalized)) {
+    return false;
+  }
+
+  if (/^when\b.+\b(do|then)\b/i.test(normalized)) {
+    return true;
+  }
+
+  const explicitStepCount = extractSkillDraftSteps(normalized, normalized).length;
+  if (explicitStepCount >= 2) {
+    return true;
+  }
+
+  return /\b(first|then|after that|finally|next)\b/i.test(normalized);
+}
+
+function buildSkillDraftDisplayName(name) {
+  return name
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function buildSkillDraftName(seed) {
+  const collapsed = normalizeString(seed)
+    .toLowerCase()
+    .replace(/^(when|always|remember|rule)\b[:\s-]*/i, "")
+    .replace(/\b(do|then|first|next|finally)\b.*$/i, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return collapsed || `shared-skill-${Date.now().toString(36)}`;
+}
+
+function extractSkillDraftSteps(content, proceduralBody) {
+  const lines = normalizeString(content)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const explicitSteps = lines
+    .map(
+      (line) =>
+        line.match(/^\d+[.)]\s+(.*)$/)?.[1]?.trim() ||
+        line.match(/^[-*]\s+(.*)$/)?.[1]?.trim() ||
+        ""
+    )
+    .filter(Boolean);
+
+  if (explicitSteps.length >= 2) {
+    return explicitSteps.slice(0, 8);
+  }
+
+  const normalizedBody = normalizeString(proceduralBody)
+    .replace(/\b(and then|then|after that|next|finally)\b/gi, "|")
+    .replace(/\s*;\s*/g, "|")
+    .replace(/\.\s+/g, "|");
+  const fragments = normalizedBody
+    .split("|")
+    .map((fragment) =>
+      fragment
+        .replace(/^(do|always|remember to|rule:)\s+/i, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter((fragment) => fragment.length >= 10);
+
+  return [...new Set(fragments)].slice(0, 8);
+}
+
+function buildSkillDraftFromMessage(content) {
+  if (!isProceduralSkillDraftCandidate(content)) {
+    return null;
+  }
+
+  const normalized = normalizeString(content);
+  const cleaned = normalized.replace(/^(remember:|always:|rule:)\s*/i, "").trim();
+  const whenMatch =
+    cleaned.match(/^when\s+(.+?)\s+do\s+(.+)$/i) ||
+    cleaned.match(/^when\s+(.+?),(.+)$/i);
+  const triggerWhen = whenMatch
+    ? `When ${normalizeString(whenMatch[1])}`
+    : normalizeString(cleaned.split(/\r?\n/, 1)[0]).slice(0, 180);
+  const proceduralBody = whenMatch ? normalizeString(whenMatch[2]) : cleaned;
+  const steps = extractSkillDraftSteps(cleaned, proceduralBody);
+
+  if (steps.length < 2) {
+    return null;
+  }
+
+  const name = buildSkillDraftName(triggerWhen || steps[0]);
+  return {
+    description: cleaned,
+    display_name: buildSkillDraftDisplayName(name),
+    input_schema: {},
+    name,
+    output_schema: {},
+    required_services: [],
+    scope_id: "company",
+    scope_type: "company",
+    steps: steps.map((instruction, index) => ({
+      instruction,
+      order: index + 1,
+      required: true,
+      tool_hint: null,
+    })),
+    tags: normalizeStringArray([SKILL_TAG, "operator_taught", "chat_imported"]),
+    trigger_when:
+      triggerWhen ||
+      `Use the ${buildSkillDraftDisplayName(name)} procedure when the operator request matches this pattern.`,
+  };
+}
+
+function normalizeSkillDraftRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    confirmed_skill_id: row.confirmed_skill_id || null,
+    created_at: row.created_at,
+    description: normalizeString(row.description),
+    display_name: normalizeString(row.display_name),
+    expires_at: row.expires_at,
+    id: row.id,
+    input_schema:
+      row.input_schema && typeof row.input_schema === "object" ? row.input_schema : {},
+    name: normalizeString(row.name),
+    output_schema:
+      row.output_schema && typeof row.output_schema === "object" ? row.output_schema : {},
+    required_services: normalizeStringArray(row.required_services),
+    scope_id: normalizeString(row.scope_id, "company") || "company",
+    scope_type: normalizeString(row.scope_type, "company") || "company",
+    source_content: normalizeString(row.source_content),
+    source_message_id: row.source_message_id || null,
+    status: SKILL_DRAFT_STATUS_OPTIONS.has(normalizeString(row.status))
+      ? normalizeString(row.status)
+      : "pending",
+    steps: Array.isArray(row.steps)
+      ? row.steps
+          .map((step, index) => ({
+            instruction: normalizeString(step?.instruction),
+            order: Number(step?.order || index + 1),
+            required: step?.required !== false,
+            tool_hint: normalizeString(step?.tool_hint) || null,
+          }))
+          .filter((step) => step.instruction)
+      : [],
+    tags: normalizeStringArray(row.tags),
+    trigger_when: normalizeString(row.trigger_when),
+    updated_at: row.updated_at,
+  };
+}
+
+function formatSkillDraftMessage(draft) {
+  const steps = draft.steps
+    .map((step) => `${step.order}. ${step.instruction}`)
+    .join("\n");
+
+  return [
+    `Drafted shared skill "${draft.display_name}".`,
+    `Trigger: ${draft.trigger_when}`,
+    steps ? `Steps:\n${steps}` : null,
+    `Confirm to save or discard it. Draft ID: ${draft.id}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function postAdminSystemMessage({ content, metadata, taskId = null }) {
+  const rows = await postgrest("/messages", {
+    body: {
+      channel: "admin_chat",
+      content,
+      direction: "outbound",
+      metadata,
+      processed: true,
+      sender: "system",
+      task_id: taskId,
+    },
+    method: "POST",
+    preferRepresentation: true,
+  }).catch(() => []);
+
+  return rows?.[0] || null;
+}
+
+async function loadSkillDraftById(draftId) {
+  const rows = await postgrest("/skill_drafts", {
+    query: {
+      id: `eq.${draftId}`,
+      limit: "1",
+      select: "*",
+    },
+  }).catch(() => []);
+
+  return normalizeSkillDraftRow(rows?.[0] || null);
+}
+
+async function createSkillDraftRecord({ content, sourceMessageId }) {
+  const draft = buildSkillDraftFromMessage(content);
+  if (!draft) {
+    return null;
+  }
+
+  const rows = await postgrest("/skill_drafts", {
+    body: {
+      description: draft.description,
+      display_name: draft.display_name,
+      input_schema: draft.input_schema,
+      name: draft.name,
+      output_schema: draft.output_schema,
+      required_services: draft.required_services,
+      scope_id: draft.scope_id,
+      scope_type: draft.scope_type,
+      source_content: normalizeString(content),
+      source_message_id: sourceMessageId || null,
+      status: "pending",
+      steps: draft.steps,
+      tags: draft.tags,
+      trigger_when: draft.trigger_when,
+    },
+    method: "POST",
+    preferRepresentation: true,
+  });
+
+  return normalizeSkillDraftRow(rows?.[0] || null);
+}
+
+async function confirmSkillDraftRecord(draftId) {
+  const draft = await loadSkillDraftById(draftId);
+  if (!draft) {
+    throw new Error("Skill draft not found");
+  }
+
+  if (draft.status === "rejected") {
+    throw new Error("Skill draft has already been rejected");
+  }
+
+  if (draft.status === "confirmed" && draft.confirmed_skill_id) {
+    const existingSkillRow = await postgrest("/memories", {
+      query: {
+        id: `eq.${draft.confirmed_skill_id}`,
+        limit: "1",
+        select:
+          "id,subject,content,tags,is_active,scope_type,scope_id,created_at,updated_at,superseded_by",
+      },
+    }).catch(() => []);
+
+    return {
+      draft,
+      skill: parseSkillMemoryRow(existingSkillRow?.[0] || null),
+    };
+  }
+
+  const existingSkill = (
+    await postgrest("/memories", {
+      query: {
+        layer: "eq.procedural",
+        limit: "1",
+        order: "created_at.desc",
+        scope_id: `eq.${draft.scope_id}`,
+        scope_type: `eq.${draft.scope_type}`,
+        select:
+          "id,subject,content,tags,is_active,scope_type,scope_id,created_at,updated_at,superseded_by",
+        subject: `eq.${buildSkillSubject(draft.name)}`,
+      },
+    }).catch(() => [])
+  )
+    .map(parseSkillMemoryRow)
+    .filter(Boolean)?.[0] || null;
+
+  const skillRow = await createSkillMemory(
+    {
+      description: draft.description,
+      display_name: draft.display_name,
+      input_schema: draft.input_schema,
+      name: draft.name,
+      output_schema: draft.output_schema,
+      required_services: draft.required_services,
+      scope_id: draft.scope_id,
+      scope_type: draft.scope_type,
+      steps: draft.steps,
+      tags: draft.tags,
+      trigger_when: draft.trigger_when,
+    },
+    existingSkill
+  );
+
+  const now = new Date().toISOString();
+  const updatedDraftRows = await postgrest("/skill_drafts", {
+    body: {
+      confirmed_at: now,
+      confirmed_by: "operator",
+      confirmed_skill_id: skillRow.id,
+      status: "confirmed",
+      updated_at: now,
+    },
+    method: "PATCH",
+    preferRepresentation: true,
+    query: { id: `eq.${draftId}` },
+  });
+
+  const updatedDraft = normalizeSkillDraftRow(updatedDraftRows?.[0] || draft);
+  const skill = parseSkillMemoryRow(skillRow);
+
+  await postAdminSystemMessage({
+    content: `Saved shared skill "${updatedDraft.display_name}" as ${updatedDraft.name}.`,
+    metadata: {
+      operator_visible: true,
+      saved_skill_id: skill?.id || null,
+      skill_draft_id: updatedDraft.id,
+      skill_draft_status: "confirmed",
+    },
+  });
+
+  return { draft: updatedDraft, skill };
+}
+
+async function rejectSkillDraftRecord(draftId) {
+  const draft = await loadSkillDraftById(draftId);
+  if (!draft) {
+    throw new Error("Skill draft not found");
+  }
+
+  if (draft.status === "confirmed") {
+    throw new Error("Skill draft has already been confirmed");
+  }
+
+  const now = new Date().toISOString();
+  const rows = await postgrest("/skill_drafts", {
+    body: {
+      rejected_at: now,
+      rejected_by: "operator",
+      status: "rejected",
+      updated_at: now,
+    },
+    method: "PATCH",
+    preferRepresentation: true,
+    query: { id: `eq.${draftId}` },
+  });
+
+  const updatedDraft = normalizeSkillDraftRow(rows?.[0] || draft);
+
+  await postAdminSystemMessage({
+    content: `Discarded skill draft "${updatedDraft.display_name}".`,
+    metadata: {
+      operator_visible: true,
+      skill_draft_id: updatedDraft.id,
+      skill_draft_status: "rejected",
+    },
+  });
+
+  return { draft: updatedDraft };
+}
+
+async function processInboundOperatorMessage({
+  channel,
+  content,
+  currentMessageId,
+  metadata = {},
+  sender,
+}) {
+  const baseMetadata = { ...metadata };
+  const draftCommand = parseSkillDraftCommand(content);
+
+  if (draftCommand) {
+    const result =
+      draftCommand.action === "confirm"
+        ? await confirmSkillDraftRecord(draftCommand.draft_id)
+        : await rejectSkillDraftRecord(draftCommand.draft_id);
+    return {
+      processed: true,
+      relayTask: null,
+      metadata: {
+        ...baseMetadata,
+        skill_draft_action: draftCommand.action,
+        skill_draft_id: draftCommand.draft_id,
+      },
+      result,
+    };
+  }
+
+  const skillDraft = await createSkillDraftRecord({
+    content,
+    sourceMessageId: currentMessageId,
+  });
+
+  if (skillDraft) {
+    await postAdminSystemMessage({
+      content: formatSkillDraftMessage(skillDraft),
+      metadata: {
+        operator_visible: true,
+        skill_draft: skillDraft,
+        skill_draft_id: skillDraft.id,
+        skill_draft_status: "pending",
+      },
+    });
+
+    return {
+      processed: true,
+      relayTask: null,
+      metadata: {
+        ...baseMetadata,
+        skill_draft_candidate: true,
+        skill_draft_id: skillDraft.id,
+        teach_mode: true,
+      },
+      result: {
+        draft: skillDraft,
+      },
+    };
+  }
+
+  const relayTask = await createRelayTaskForInboundMessage({
+    channel,
+    content,
+    currentMessageId,
+    sender,
+  });
+
+  return {
+    processed: true,
+    relayTask,
+    metadata: {
+      ...baseMetadata,
+      matched_skill_names:
+        relayTask?.routing_hints?.matched_skills?.map((skill) => skill.name) || [],
+      recommended_role: relayTask?.routing_hints?.recommended_role || null,
+      relay_task_id: relayTask?.id || null,
+      requires_execution: relayTask?.routing_hints?.requires_execution || false,
+      routing: "direct_relay_task",
+      teach_mode: relayTask?.routing_hints?.teach_mode || false,
+    },
+    result: null,
+  };
+}
+
 async function getSystemSetting(key) {
   const rows = await postgrest("/system_settings", {
     query: {
@@ -1839,22 +2625,6 @@ async function handleTelegramWebhook(req, res) {
     return;
   }
 
-  let relayTask = null;
-  let routing = "direct_relay_task";
-  let routingError = null;
-
-  try {
-    relayTask = await createRelayTaskForInboundMessage({
-      channel: "telegram",
-      chatId,
-      content,
-      sender,
-    });
-  } catch (error) {
-    routing = "fallback_poll";
-    routingError = error instanceof Error ? error.message : String(error);
-  }
-
   const telegramRows = await postgrest("/messages", {
     body: {
       channel: "telegram",
@@ -1864,22 +2634,18 @@ async function handleTelegramWebhook(req, res) {
         chat_id: chatId,
         from: message.from || null,
         message_id: message.message_id || null,
-        relay_task_id: relayTask?.id || null,
-        routing,
-        routing_error: routingError,
         telegram_update_id: update?.update_id || null,
       },
-      processed: routing !== "fallback_poll",
+      processed: false,
       sender,
-      task_id: relayTask?.id || null,
+      task_id: null,
     },
     method: "POST",
     preferRepresentation: true,
   });
 
   const sourceMessageId = telegramRows?.[0]?.id || null;
-
-  await postgrest("/messages", {
+  const mirroredRows = await postgrest("/messages", {
     body: {
       channel: "admin_chat",
       content,
@@ -1887,19 +2653,76 @@ async function handleTelegramWebhook(req, res) {
       metadata: {
         chat_id: chatId,
         mirrored_from: "telegram",
-        relay_task_id: relayTask?.id || null,
-        routing,
-        routing_error: routingError,
         source_channel: "telegram",
         source_message_id: sourceMessageId,
         telegram_message_id: message.message_id || null,
       },
-      processed: true,
+      processed: false,
       sender,
-      task_id: relayTask?.id || null,
+      task_id: null,
     },
     method: "POST",
+    preferRepresentation: true,
   });
+
+  const mirroredMessageId = mirroredRows?.[0]?.id || null;
+  let routing = "direct_relay_task";
+  let routingError = null;
+  let relayTask = null;
+  let processedMetadata = {
+    chat_id: chatId,
+    from: message.from || null,
+    message_id: message.message_id || null,
+    mirrored_from: "telegram",
+    source_channel: "telegram",
+    source_message_id: sourceMessageId,
+    telegram_message_id: message.message_id || null,
+    telegram_update_id: update?.update_id || null,
+  };
+
+  try {
+    const result = await processInboundOperatorMessage({
+      channel: "telegram",
+      content,
+      currentMessageId: mirroredMessageId,
+      metadata: processedMetadata,
+      sender,
+    });
+    relayTask = result.relayTask;
+    processedMetadata = result.metadata;
+  } catch (error) {
+    routing = "fallback_poll";
+    routingError = error instanceof Error ? error.message : String(error);
+    processedMetadata = {
+      ...processedMetadata,
+      routing,
+      routing_error: routingError,
+    };
+  }
+
+  if (mirroredMessageId) {
+    await postgrest("/messages", {
+      body: {
+        metadata: processedMetadata,
+        processed: routing !== "fallback_poll",
+        task_id: relayTask?.id || null,
+      },
+      method: "PATCH",
+      query: { id: `eq.${mirroredMessageId}` },
+    });
+  }
+
+  if (sourceMessageId) {
+    await postgrest("/messages", {
+      body: {
+        metadata: processedMetadata,
+        processed: routing !== "fallback_poll",
+        task_id: relayTask?.id || null,
+      },
+      method: "PATCH",
+      query: { id: `eq.${sourceMessageId}` },
+    });
+  }
 
   sendJson(res, 200, {
     ok: true,
@@ -1986,41 +2809,11 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const content = typeof body.content === "string" ? body.content.trim() : "";
     const teachMode = /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+    const draftCommand = parseSkillDraftCommand(content);
+    const skillDraftCandidate = isProceduralSkillDraftCandidate(content);
 
     if (!content) {
       sendJson(res, 400, { error: "Message content is required" });
-      return;
-    }
-
-    let relayTask = null;
-
-    try {
-      relayTask = await createRelayTaskForInboundMessage({
-        channel: "admin_chat",
-        content,
-        sender: "operator",
-      });
-    } catch (taskError) {
-      await postgrest("/messages", {
-        body: {
-          channel: "admin_chat",
-          content,
-          direction: "inbound",
-          metadata: {
-            routing: "fallback_poll",
-            routing_error:
-              taskError instanceof Error ? taskError.message : String(taskError),
-            teach_mode: teachMode,
-          },
-          processed: false,
-          sender: "operator",
-        },
-        method: "POST",
-      });
-      sendJson(res, 202, {
-        queuedForPolling: true,
-        relayTaskId: null,
-      });
       return;
     }
 
@@ -2030,22 +2823,125 @@ async function handleApi(req, res, url) {
         content,
         direction: "inbound",
         metadata: {
-          relay_task_id: relayTask?.id || null,
-          routing: "direct_relay_task",
           teach_mode: teachMode,
         },
-        processed: true,
+        processed: false,
         sender: "operator",
-        task_id: relayTask?.id || null,
+        task_id: null,
       },
       method: "POST",
       preferRepresentation: true,
     });
 
-    sendJson(res, 200, {
-      messageId: rows?.[0]?.id || null,
-      relayTaskId: relayTask?.id || null,
-    });
+    const messageId = rows?.[0]?.id || null;
+
+    try {
+      const result = await processInboundOperatorMessage({
+        channel: "admin_chat",
+        content,
+        currentMessageId: messageId,
+        metadata: {
+          teach_mode: teachMode,
+        },
+        sender: "operator",
+      });
+
+      if (messageId) {
+        await postgrest("/messages", {
+          body: {
+            metadata: result.metadata,
+            processed: result.processed,
+            task_id: result.relayTask?.id || null,
+          },
+          method: "PATCH",
+          query: { id: `eq.${messageId}` },
+        });
+      }
+
+      sendJson(res, 200, {
+        messageId,
+        relayTaskId: result.relayTask?.id || null,
+      });
+      return;
+    } catch (taskError) {
+      if (draftCommand || skillDraftCandidate) {
+        if (messageId) {
+          await postgrest("/messages", {
+            body: {
+              metadata: {
+                skill_draft_error:
+                  taskError instanceof Error ? taskError.message : String(taskError),
+                teach_mode: teachMode,
+              },
+              processed: true,
+              task_id: null,
+            },
+            method: "PATCH",
+            query: { id: `eq.${messageId}` },
+          });
+        }
+
+        sendJson(res, 400, {
+          error:
+            taskError instanceof Error
+              ? taskError.message
+              : "Failed to process skill draft message.",
+        });
+        return;
+      }
+
+      if (messageId) {
+        await postgrest("/messages", {
+          body: {
+            metadata: {
+              routing: "fallback_poll",
+              routing_error:
+                taskError instanceof Error ? taskError.message : String(taskError),
+              teach_mode: teachMode,
+            },
+            processed: false,
+            task_id: null,
+          },
+          method: "PATCH",
+          query: { id: `eq.${messageId}` },
+        });
+      }
+
+      sendJson(res, 202, {
+        queuedForPolling: true,
+        relayTaskId: null,
+      });
+      return;
+    }
+  }
+
+  const skillDraftConfirmMatch = pathname.match(
+    /^\/api\/skill-drafts\/([^/]+)\/confirm$/
+  );
+  if (skillDraftConfirmMatch && req.method === "POST") {
+    try {
+      const [, draftId] = skillDraftConfirmMatch;
+      const result = await confirmSkillDraftRecord(draftId);
+      sendJson(res, 200, result);
+    } catch (error) {
+      sendJson(res, 400, {
+        error: error instanceof Error ? error.message : "Failed to confirm skill draft.",
+      });
+    }
+    return;
+  }
+
+  const skillDraftRejectMatch = pathname.match(/^\/api\/skill-drafts\/([^/]+)\/reject$/);
+  if (skillDraftRejectMatch && req.method === "POST") {
+    try {
+      const [, draftId] = skillDraftRejectMatch;
+      const result = await rejectSkillDraftRecord(draftId);
+      sendJson(res, 200, result);
+    } catch (error) {
+      sendJson(res, 400, {
+        error: error instanceof Error ? error.message : "Failed to reject skill draft.",
+      });
+    }
     return;
   }
 
@@ -2094,6 +2990,8 @@ async function handleApi(req, res, url) {
           ? body.acceptance_criteria.map((entry) => String(entry))
           : [],
         assigned_role: assignedRole,
+        customer_id: normalizeString(body.customer_id) || null,
+        department_id: normalizeString(body.department_id) || null,
         objective,
         parent_task_id: normalizeString(body.parent_task_id) || null,
         priority: normalizeString(body.priority, "normal") || "normal",
@@ -2141,6 +3039,12 @@ async function handleApi(req, res, url) {
     if (typeof body.project_id === "string") {
       patch.project_id = body.project_id.trim() || null;
     }
+    if (typeof body.customer_id === "string") {
+      patch.customer_id = body.customer_id.trim() || null;
+    }
+    if (typeof body.department_id === "string") {
+      patch.department_id = body.department_id.trim() || null;
+    }
     if (typeof body.parent_task_id === "string") {
       patch.parent_task_id = body.parent_task_id.trim() || null;
     }
@@ -2183,7 +3087,8 @@ async function handleApi(req, res, url) {
               query: {
                 id: `eq.${task.parent_task_id}`,
                 limit: "1",
-                select: "id,title,state,priority,assigned_role,parent_task_id,project_id,created_at,updated_at",
+                select:
+                  "id,title,state,priority,assigned_role,parent_task_id,project_id,customer_id,department_id,created_at,updated_at",
               },
             })
           )?.[0] || null
@@ -2219,35 +3124,77 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/agents" && req.method === "GET") {
-    const data = await postgrest("/agents", {
-      query: { order: "name.asc", select: "*" },
-    });
+    const data = await loadAgentsWithRoleProfiles();
     sendJson(res, 200, data || []);
     return;
   }
 
   if (pathname === "/api/agents" && req.method === "POST") {
-    const body = await readJson(req);
-    const name = normalizeString(body.name);
-    const roleId = normalizeString(body.role_id).toLowerCase();
-    if (!name || !roleId) {
-      sendJson(res, 400, { error: "name and role_id are required" });
-      return;
-    }
+    try {
+      const body = await readJson(req);
+      const name = requireTrimmedString(body.name, "name");
+      const roleId = getOptionalTrimmedString(body.role_id)
+        ? normalizeSlug(body.role_id, "role_id")
+        : await allocateAgentRoleId(name);
 
-    const rows = await postgrest("/agents", {
-      body: {
-        config: body.config && typeof body.config === "object" ? body.config : {},
-        name,
-        role_id: roleId,
-        status: AGENT_STATUS_OPTIONS.has(normalizeString(body.status))
-          ? normalizeString(body.status)
-          : "active",
-      },
-      method: "POST",
-      preferRepresentation: true,
-    });
-    sendJson(res, 201, rows?.[0] || null);
+      const existingAgent = await loadAgentByRoleId(roleId);
+      if (existingAgent) {
+        sendJson(res, 409, {
+          error:
+            "An agent already owns this runtime profile. Edit the existing agent instead.",
+        });
+        return;
+      }
+
+      const existingRole = await loadRoleById(roleId);
+      if (existingRole) {
+        const rolePatch = buildRoleProfilePatch(body, {
+          displayNameFallback: name,
+        });
+        if (Object.keys(rolePatch).length > 0) {
+          await postgrest("/roles", {
+            body: rolePatch,
+            method: "PATCH",
+            preferRepresentation: true,
+            query: { id: `eq.${roleId}` },
+          });
+        }
+      } else {
+        await postgrest("/roles", {
+          body: {
+            ...buildRoleProfilePatch(body, {
+              displayNameFallback: name,
+              requireCreate: true,
+            }),
+            id: roleId,
+            is_system_role: false,
+          },
+          method: "POST",
+          preferRepresentation: true,
+        });
+      }
+
+      const rows = await postgrest("/agents", {
+        body: {
+          config: body.config && typeof body.config === "object" ? body.config : {},
+          name,
+          role_id: roleId,
+          status: AGENT_STATUS_OPTIONS.has(normalizeString(body.status))
+            ? normalizeString(body.status)
+            : "active",
+        },
+        method: "POST",
+        preferRepresentation: true,
+      });
+      const created = rows?.[0]?.id
+        ? await loadAgentWithRoleProfile(rows[0].id)
+        : null;
+      sendJson(res, 201, created);
+    } catch (error) {
+      sendJson(res, 400, {
+        error: error instanceof Error ? error.message : "Failed to create agent.",
+      });
+    }
     return;
   }
 
@@ -2255,9 +3202,7 @@ async function handleApi(req, res, url) {
   if (agentActivityMatch && req.method === "GET") {
     const [, agentId] = agentActivityMatch;
     const [agents, taskRuns, events] = await Promise.all([
-      postgrest("/agents", {
-        query: { id: `eq.${agentId}`, limit: "1", select: "*" },
-      }),
+      loadAgentWithRoleProfile(agentId),
       postgrest("/task_runs", {
         query: {
           agent_id: `eq.${agentId}`,
@@ -2287,7 +3232,7 @@ async function handleApi(req, res, url) {
       : [];
     const taskMap = new Map((tasks || []).map((task) => [task.id, task.title]));
     sendJson(res, 200, {
-      agent: agents?.[0] || null,
+      agent: agents || null,
       events: events || [],
       task_runs: (taskRuns || []).map((run) => ({
         ...run,
@@ -2304,38 +3249,88 @@ async function handleApi(req, res, url) {
   const agentMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
   if (agentMatch && req.method === "GET") {
     const [, agentId] = agentMatch;
-    const data = await postgrest("/agents", {
-      query: { id: `eq.${agentId}`, limit: "1", select: "*" },
-    });
-    sendJson(res, 200, data?.[0] || null);
+    const data = await loadAgentWithRoleProfile(agentId);
+    sendJson(res, 200, data || null);
     return;
   }
 
   if (agentMatch && req.method === "PATCH") {
-    const [, agentId] = agentMatch;
-    const body = await readJson(req);
-    const patch = {};
+    try {
+      const [, agentId] = agentMatch;
+      const body = await readJson(req);
+      const currentAgent = await loadAgentById(agentId);
 
-    if (typeof body.name === "string" && body.name.trim()) {
-      patch.name = body.name.trim();
-    }
-    if (typeof body.role_id === "string" && body.role_id.trim()) {
-      patch.role_id = body.role_id.trim().toLowerCase();
-    }
-    if (typeof body.status === "string" && AGENT_STATUS_OPTIONS.has(body.status.trim())) {
-      patch.status = body.status.trim();
-    }
-    if (body.config && typeof body.config === "object") {
-      patch.config = body.config;
-    }
+      if (!currentAgent) {
+        sendJson(res, 404, { error: "Agent not found" });
+        return;
+      }
 
-    const rows = await postgrest("/agents", {
-      body: patch,
-      method: "PATCH",
-      preferRepresentation: true,
-      query: { id: `eq.${agentId}` },
-    });
-    sendJson(res, 200, rows?.[0] || null);
+      const patch = {};
+
+      if (typeof body.name === "string" && body.name.trim()) {
+        patch.name = body.name.trim();
+      }
+      if (typeof body.role_id === "string" && body.role_id.trim()) {
+        patch.role_id = normalizeSlug(body.role_id, "role_id");
+      }
+      if (
+        typeof body.status === "string" &&
+        AGENT_STATUS_OPTIONS.has(body.status.trim())
+      ) {
+        patch.status = body.status.trim();
+      }
+      if (body.config && typeof body.config === "object") {
+        patch.config = body.config;
+      }
+
+      const nextRoleId = patch.role_id || currentAgent.role_id;
+      const rolePatch = buildRoleProfilePatch(body, {
+        displayNameFallback: patch.name,
+      });
+
+      if (Object.keys(rolePatch).length > 0 || nextRoleId !== currentAgent.role_id) {
+        if (nextRoleId !== currentAgent.role_id) {
+          const existingOwner = await loadAgentByRoleId(nextRoleId);
+          if (existingOwner && existingOwner.id !== agentId) {
+            sendJson(res, 409, {
+              error:
+                "Another agent already owns that runtime profile. Edit that agent instead.",
+            });
+            return;
+          }
+        }
+        const targetRole = await loadRoleById(nextRoleId);
+        if (!targetRole) {
+          sendJson(res, 400, { error: "Backing agent profile was not found." });
+          return;
+        }
+      }
+
+      if (Object.keys(rolePatch).length > 0) {
+        await postgrest("/roles", {
+          body: rolePatch,
+          method: "PATCH",
+          preferRepresentation: true,
+          query: { id: `eq.${nextRoleId}` },
+        });
+      }
+
+      if (Object.keys(patch).length > 0) {
+        await postgrest("/agents", {
+          body: patch,
+          method: "PATCH",
+          preferRepresentation: true,
+          query: { id: `eq.${agentId}` },
+        });
+      }
+
+      const updated = await loadAgentWithRoleProfile(agentId);
+      sendJson(res, 200, updated || null);
+    } catch (error) {
+      sendJson(res, 400, {
+        error: error instanceof Error ? error.message : "Failed to update agent.",
+      });
+    }
     return;
   }
 
@@ -2454,14 +3449,7 @@ async function handleApi(req, res, url) {
     });
     const filtered =
       mode === "knowledge" || mode === "knowledge_base"
-        ? (data || []).filter(
-            (memory) =>
-              memory.source_agent_id === null ||
-              (Array.isArray(memory.tags) &&
-                memory.tags.some((tag) =>
-                  ["operator_preference", "operator_taught"].includes(tag)
-                ))
-          )
+        ? (data || []).filter((memory) => isKnowledgeBaseMemory(memory))
         : data || [];
     sendJson(res, 200, filtered);
     return;

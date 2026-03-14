@@ -184,6 +184,14 @@ function resolveScopeId(
     return task.project_id;
   }
 
+  if (scopeType === "customer" && task.customer_id) {
+    return task.customer_id;
+  }
+
+  if (scopeType === "department" && task.department_id) {
+    return task.department_id;
+  }
+
   if (scopeType === "role") {
     return task.assigned_role;
   }

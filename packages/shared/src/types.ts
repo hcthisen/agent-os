@@ -63,6 +63,8 @@ export interface Task {
   id: string;
   project_id: string | null;
   parent_task_id: string | null;
+  customer_id: string | null;
+  department_id: string | null;
   title: string;
   objective: string;
   acceptance_criteria: string[];

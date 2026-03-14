@@ -60,14 +60,18 @@ One row per persistent identity. Sessions are disposable; the agent is not.
 | Column       | Type      | Notes                                             |
 |--------------|-----------|---------------------------------------------------|
 | id           | uuid PK   | Generated.                                        |
-| name         | text UQ   | Human-readable. e.g. `builder-1`, `sentinel-1`.  |
-| role_id      | text FK→roles | Which role this agent plays.                  |
+| name         | text UQ   | Operator-facing identity label plus runtime name. |
+| role_id      | text FK→roles UQ | Backing runtime profile owned by this agent. |
 | status       | enum      | `active`, `paused`, `disabled`.                   |
 | config       | jsonb     | Role overrides if any (e.g. operator changed      |
 |              |           | model via admin panel). Empty by default.         |
 | last_seen_at | timestamptz | Updated on every task_run start.               |
 | created_at   | timestamptz | Auto.                                           |
 | updated_at   | timestamptz | Auto.                                           |
+
+**Operator model:** The admin UI treats each agent as the editable unit. The backing
+`role_id` remains an internal runtime primitive for task routing, memory scope, RLS, and
+handoffs, but there is exactly one agent per backing profile.
 
 **Seed data:** One agent per foundational role: `relay-1`, `sage-1`, `builder-1`,
 `reviewer-1`, `architect-1`, `sentinel-1`.
@@ -102,6 +106,8 @@ The atomic unit of work. **Strict state machine enforced by database trigger.**
 | id                  | uuid PK      | Generated.                                  |
 | project_id          | uuid FK→projects | Optional.                               |
 | parent_task_id      | uuid FK→tasks | Self-referential. Sub-task support.        |
+| customer_id         | text         | Optional scoped customer context for the task. |
+| department_id       | text         | Optional scoped department context for the task. |
 | title               | text         | Short description.                          |
 | objective           | text         | What "done" looks like.                     |
 | acceptance_criteria | jsonb        | Array of strings.                           |
@@ -123,7 +129,14 @@ The atomic unit of work. **Strict state machine enforced by database trigger.**
 | created_at          | timestamptz  |                                             |
 | updated_at          | timestamptz  |                                             |
 
-**Indexes:** state, project_id, claimed_by, parent_task_id, (priority + state).
+**Indexes:** state, project_id, claimed_by, parent_task_id, customer_id, department_id,
+(priority + state).
+
+If `customer_id` or `department_id` is set, those scopes become part of the agent's
+allowed working context for the life of the claimed task. MCP scope enforcement,
+`build_context_pack()`, and default memory/skill retrieval must include those scopes so
+customer- or department-specific knowledge can be read without leaking across unrelated
+work.
 
 `depends_on` is not just metadata. Scheduler behavior must treat a task in `ready` as
 launchable only when every referenced dependency task is `completed`. Dependency-waiting
@@ -292,6 +305,41 @@ the previous row inactive via `superseded_by`. Search uses the corresponding
 `memory_chunks` row, which stores a flattened textual view of the skill for hybrid
 retrieval. Bootstrap skills for fresh installations are seeded as company-scoped skills
 with `scope_type = 'company'` and `scope_id = 'system'`.
+
+### skill_drafts
+
+Pending procedural drafts generated from operator chat before they are committed as
+shared skills.
+
+| Column             | Type      | Notes                                            |
+|--------------------|-----------|--------------------------------------------------|
+| id                 | uuid PK   |                                                  |
+| source_message_id  | uuid FK→messages | Operator message that generated the draft. |
+| source_content     | text      | Original procedural instruction text.            |
+| name               | text      | Proposed skill slug.                             |
+| display_name       | text      | Proposed human-facing title.                     |
+| description        | text      | Draft description / raw instruction summary.     |
+| trigger_when       | text      | Proposed trigger condition.                      |
+| steps              | jsonb     | Ordered draft steps.                             |
+| input_schema       | jsonb     | Reserved for future structured draft input.      |
+| output_schema      | jsonb     | Reserved for future structured draft output.     |
+| required_services  | text[]    | Proposed service dependencies.                   |
+| scope_type         | enum      | Defaults to `company` for operator-taught drafts.|
+| scope_id           | text      | Defaults to `company`.                           |
+| tags               | text[]    | Includes `skill` plus operator-training tags.    |
+| status             | text      | `pending`, `confirmed`, `rejected`, `expired`.   |
+| confirmed_skill_id | uuid FK→memories | The saved procedural memory, if confirmed. |
+| confirmed_at       | timestamptz |                                                |
+| confirmed_by       | text      | Typically `operator`.                            |
+| rejected_at        | timestamptz |                                                |
+| rejected_by        | text      | Typically `operator`.                            |
+| expires_at         | timestamptz | Auto-expiry window for stale drafts.           |
+| created_at         | timestamptz |                                                |
+| updated_at         | timestamptz |                                                |
+
+This table is operator-facing workflow state, not the canonical skill store. Confirming a
+draft creates or versions the corresponding `memories` procedural skill and links it via
+`confirmed_skill_id`.
 
 ### memory_chunks
 

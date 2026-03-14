@@ -12,6 +12,8 @@ export type ScopeType =
 export interface TaskContext {
   id: string;
   project_id: string | null;
+  customer_id: string | null;
+  department_id: string | null;
   assigned_role: string;
   claimed_by: string | null;
   state: string;
@@ -28,7 +30,7 @@ async function loadTask(taskId: string): Promise<TaskContext | null> {
   const db = getDb();
   const { data, error } = await db
     .from("tasks")
-    .select("id, project_id, assigned_role, claimed_by, state")
+    .select("id, project_id, customer_id, department_id, assigned_role, claimed_by, state")
     .eq("id", taskId)
     .maybeSingle<TaskContext>();
 
@@ -45,7 +47,7 @@ export async function getCurrentTaskContext(): Promise<TaskContext | null> {
 
   const { data, error } = await db
     .from("tasks")
-    .select("id, project_id, assigned_role, claimed_by, state")
+    .select("id, project_id, customer_id, department_id, assigned_role, claimed_by, state")
     .eq("claimed_by", ctx.agent_id)
     .in("state", [...ACTIVE_TASK_STATES])
     .order("updated_at", { ascending: false })
@@ -65,6 +67,28 @@ export async function requireCurrentTaskContext(): Promise<TaskContext> {
     throw new Error("This action requires an active claimed task context");
   }
   return task;
+}
+
+async function hasActiveClaimedTaskWithScope(
+  column: "customer_id" | "department_id",
+  scopeId: string
+): Promise<boolean> {
+  const db = getDb();
+  const ctx = getAgentContext();
+  const { count, error } = await db
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq(column, scopeId)
+    .eq("claimed_by", ctx.agent_id)
+    .in("state", [...ACTIVE_TASK_STATES]);
+
+  if (error) {
+    throw new Error(
+      `Failed to verify ${column.replace("_id", "")} scope '${scopeId}': ${error.message}`
+    );
+  }
+
+  return Boolean(count && count > 0);
 }
 
 export async function requireTaskClaimedByCurrentAgent(
@@ -107,16 +131,30 @@ export async function checkScope(
   }
 
   if (scopeType === "department") {
+    if (
+      currentTask?.department_id === scopeId ||
+      (await hasActiveClaimedTaskWithScope("department_id", scopeId))
+    ) {
+      return { allowed: true };
+    }
+
     return {
       allowed: false,
-      reason: "Department scope enforcement is not implemented yet",
+      reason: `Department '${scopeId}' is outside the current agent's claimed scope`,
     };
   }
 
   if (scopeType === "customer") {
+    if (
+      currentTask?.customer_id === scopeId ||
+      (await hasActiveClaimedTaskWithScope("customer_id", scopeId))
+    ) {
+      return { allowed: true };
+    }
+
     return {
       allowed: false,
-      reason: "Customer scope enforcement is not implemented yet",
+      reason: `Customer '${scopeId}' is outside the current agent's claimed scope`,
     };
   }
 

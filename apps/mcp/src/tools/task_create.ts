@@ -31,6 +31,8 @@ export const taskCreateDef = {
         items: { type: "string" },
       },
       project_id: { type: "string" },
+      customer_id: { type: "string" },
+      department_id: { type: "string" },
       is_system_modification: { type: "boolean", default: false },
       state: {
         type: "string",
@@ -51,6 +53,8 @@ export async function taskCreate(args: {
   parent_task_id?: string;
   depends_on?: string[];
   project_id?: string;
+  customer_id?: string;
+  department_id?: string;
   is_system_modification?: boolean;
   state?: string;
 }): Promise<unknown> {
@@ -60,15 +64,23 @@ export async function taskCreate(args: {
   const dependencyIds = [...new Set((args.depends_on || []).map((value) => value.trim()).filter(Boolean))];
   let projectId = args.project_id || null;
   let parentProjectId: string | null = null;
+  let customerId = String(args.customer_id || "").trim() || currentTask?.customer_id || null;
+  let departmentId =
+    String(args.department_id || "").trim() || currentTask?.department_id || null;
 
   if (parentTaskId) {
     await enforceScope("task", parentTaskId);
 
     const { data: parentTask, error: parentError } = await db
       .from("tasks")
-      .select("id, project_id")
+      .select("id, project_id, customer_id, department_id")
       .eq("id", parentTaskId)
-      .maybeSingle<{ id: string; project_id: string | null }>();
+      .maybeSingle<{
+        id: string;
+        project_id: string | null;
+        customer_id: string | null;
+        department_id: string | null;
+      }>();
 
     if (parentError) {
       return { success: false, error: parentError.message };
@@ -82,6 +94,8 @@ export async function taskCreate(args: {
     }
 
     parentProjectId = parentTask.project_id;
+    customerId = customerId || parentTask.customer_id;
+    departmentId = departmentId || parentTask.department_id;
   }
 
   if (projectId) {
@@ -100,6 +114,14 @@ export async function taskCreate(args: {
       success: false,
       error: "Child tasks cannot be created in a different project than their parent task",
     };
+  }
+
+  if (customerId) {
+    await enforceScope("customer", customerId);
+  }
+
+  if (departmentId) {
+    await enforceScope("department", departmentId);
   }
 
   if (dependencyIds.length) {
@@ -208,6 +230,8 @@ export async function taskCreate(args: {
       parent_task_id: parentTaskId,
       depends_on: dependencyIds,
       project_id: projectId,
+      customer_id: customerId,
+      department_id: departmentId,
       is_system_modification: args.is_system_modification || false,
       state: args.state || "ready",
     })

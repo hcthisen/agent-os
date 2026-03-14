@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime, parseTagInput, safeJsonParse, safeJsonStringify, slugify, toTagInput, truncate } from "../lib/format";
-import type { ProjectRecord, RoleRecord, SkillDetailRecord, SkillRecord, SkillStepRecord } from "../lib/types";
+import type { AgentRecord, ProjectRecord, SkillDetailRecord, SkillRecord, SkillStepRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const EMPTY_STEP: SkillStepRecord = { instruction: "", order: 1, required: true, tool_hint: "" };
@@ -79,15 +79,20 @@ function parseImportedSkillText(raw: string): Partial<ReturnType<typeof createEm
   };
 }
 
-function deriveSuggestedTestRole(skill: Pick<SkillRecord, "scope_id" | "scope_type"> | null, roles: RoleRecord[]): string {
-  if (skill?.scope_type === "role" && roles.some((role) => role.id === skill.scope_id)) return skill.scope_id;
-  if (roles.some((role) => role.id === "builder")) return "builder";
-  return roles[0]?.id || "";
+function getAgentLabel(agent: AgentRecord | null | undefined): string {
+  if (!agent) return "";
+  return agent.role_profile?.display_name || agent.name || agent.role_id;
+}
+
+function deriveSuggestedTestRole(skill: Pick<SkillRecord, "scope_id" | "scope_type"> | null, agents: AgentRecord[]): string {
+  if (skill?.scope_type === "role" && agents.some((agent) => agent.role_id === skill.scope_id)) return skill.scope_id;
+  if (agents.some((agent) => agent.role_id === "builder")) return "builder";
+  return agents[0]?.role_id || "";
 }
 
 export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => void }) {
   const [skills, setSkills] = useState<SkillRecord[]>([]);
-  const [roles, setRoles] = useState<RoleRecord[]>([]);
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetailRecord | null>(null);
@@ -112,11 +117,11 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
   }
 
   useEffect(() => {
-    void Promise.all([api.getRoles(), api.getProjects()])
-      .then(([rolesData, projectsData]) => {
-        setRoles(rolesData || []);
+    void Promise.all([api.getAgents(), api.getProjects()])
+      .then(([agentsData, projectsData]) => {
+        setAgents(agentsData || []);
         setProjects(projectsData || []);
-        setTestRoleId(deriveSuggestedTestRole(null, rolesData || []));
+        setTestRoleId(deriveSuggestedTestRole(null, agentsData || []));
       })
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load skill references."));
   }, []);
@@ -147,10 +152,10 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
           tags: toTagInput(detail.skill.tags),
           trigger_when: detail.skill.trigger_when || "",
         });
-        setTestRoleId((current) => current || deriveSuggestedTestRole(detail.skill, roles));
+        setTestRoleId((current) => current || deriveSuggestedTestRole(detail.skill, agents));
       }
     }).catch((nextError) => setError(nextError instanceof Error ? nextError.message : "Failed to load skill detail.")).finally(() => setLoadingDetail(false));
-  }, [editingId, roles, selectedSkillId]);
+  }, [agents, editingId, selectedSkillId]);
 
   const selectedSummary = useMemo(() => skills.find((skill) => skill.id === selectedSkillId) || null, [selectedSkillId, skills]);
   const previewSkill = useMemo(() => buildFormPreviewSkill(form), [form]);
@@ -161,7 +166,7 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
     setForm(createEmptySkillForm());
     setImportText("");
     setLastTestTaskId(null);
-    setTestRoleId(deriveSuggestedTestRole(null, roles));
+    setTestRoleId(deriveSuggestedTestRole(null, agents));
   }
 
   function beginEdit() {
@@ -204,7 +209,7 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
       if (savedSkill?.id) {
         const detail = await api.getSkill(savedSkill.id);
         setSelectedSkill(detail || null);
-        setTestRoleId(deriveSuggestedTestRole(detail?.skill || null, roles));
+        setTestRoleId(deriveSuggestedTestRole(detail?.skill || null, agents));
       }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to save skill.");
@@ -245,8 +250,8 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
     setError(null);
     try {
       const activeSkill = previewSkill;
-      const roleId = testRoleId || deriveSuggestedTestRole(activeSkill, roles);
-      if (!roleId) throw new Error("Select a role before creating a test task.");
+      const roleId = testRoleId || deriveSuggestedTestRole(activeSkill, agents);
+      if (!roleId) throw new Error("Select an agent before creating a test task.");
       const created = await api.createTask({
         acceptance_criteria: [
           "Confirm whether the shared skill appears in TASK_BRIEFING.",
@@ -295,7 +300,9 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
           <option value="all">All scopes</option>
           <option value="company">Company</option>
           <option value="project">Project</option>
-          <option value="role">Role</option>
+          <option value="customer">Customer</option>
+          <option value="department">Department</option>
+          <option value="role">Agent</option>
           <option value="task">Task</option>
         </select>
       </div>
@@ -386,7 +393,9 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
                   <select onChange={(event) => setForm((current) => ({ ...current, scope_type: event.target.value }))} style={{ ...shellStyles.input, width: "100%" }} value={form.scope_type}>
                     <option value="company">company</option>
                     <option value="project">project</option>
-                    <option value="role">role</option>
+                    <option value="customer">customer</option>
+                    <option value="department">department</option>
+                    <option value="role">agent</option>
                     <option value="task">task</option>
                   </select>
                 </div>
@@ -456,10 +465,10 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
             <pre style={{ background: "#0b1020", border: "1px solid #253247", borderRadius: 10, color: "#dbeafe", fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12, margin: 0, overflowX: "auto", padding: 14, whiteSpace: "pre-wrap" }}>{taskBriefingPreview}</pre>
             <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr", marginTop: 12 }}>
               <div>
-                <label style={shellStyles.label}>Test Role</label>
+                <label style={shellStyles.label}>Test Agent</label>
                 <select onChange={(event) => setTestRoleId(event.target.value)} style={{ ...shellStyles.input, width: "100%" }} value={testRoleId}>
-                  <option value="">Select role</option>
-                  {roles.map((role) => <option key={role.id} value={role.id}>{role.display_name}</option>)}
+                  <option value="">Select agent</option>
+                  {agents.map((agent) => <option key={agent.id} value={agent.role_id}>{getAgentLabel(agent)}</option>)}
                 </select>
               </div>
               <div>

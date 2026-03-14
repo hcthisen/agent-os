@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime } from "../lib/format";
-import type { ProjectRecord, TaskRecord } from "../lib/types";
+import type { AgentRecord, ProjectRecord, TaskRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const STATE_COLORS: Record<string, string> = {
@@ -22,6 +22,14 @@ const EMPTY_FORM = {
   slug: "",
 };
 
+function getAgentLabel(agent: AgentRecord | null | undefined): string {
+  if (!agent) {
+    return "";
+  }
+
+  return agent.role_profile?.display_name || agent.name || agent.role_id;
+}
+
 export function ProjectsPage({
   focusProjectId,
   onOpenTask,
@@ -29,6 +37,7 @@ export function ProjectsPage({
   focusProjectId?: string | null;
   onOpenTask?: (taskId: string) => void;
 }) {
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectTasks, setProjectTasks] = useState<TaskRecord[]>([]);
@@ -36,6 +45,10 @@ export function ProjectsPage({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const agentMap = useMemo(
+    () => new Map(agents.map((agent) => [agent.role_id, agent])),
+    [agents]
+  );
 
   async function loadProjects(selectId?: string | null) {
     const data = await api.getProjects();
@@ -61,6 +74,15 @@ export function ProjectsPage({
   useEffect(() => {
     void loadProjects(focusProjectId || null);
   }, [focusProjectId]);
+
+  useEffect(() => {
+    void api
+      .getAgents()
+      .then((data) => setAgents(data || []))
+      .catch((nextError) =>
+        setError(nextError instanceof Error ? nextError.message : "Failed to load agents.")
+      );
+  }, []);
 
   useEffect(() => {
     if (!selectedProjectId) {
@@ -289,7 +311,7 @@ export function ProjectsPage({
                   <div style={{ minWidth: 0 }}>
                     <div style={{ color: "#f8fafc", fontWeight: 600 }}>{task.title}</div>
                     <div style={shellStyles.muted}>
-                      {task.assigned_role}  |  {formatDateTime(task.updated_at)}
+                      {getAgentLabel(agentMap.get(task.assigned_role)) || task.assigned_role}  |  {formatDateTime(task.updated_at)}
                     </div>
                   </div>
                   <span style={statusChipStyle(STATE_COLORS[task.state] || "#6b7280")}>

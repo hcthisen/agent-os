@@ -314,6 +314,8 @@ export function MemoryStudioPage() {
           <option value="all">All scopes</option>
           <option value="company">company</option>
           <option value="project">project</option>
+          <option value="customer">customer</option>
+          <option value="department">department</option>
           <option value="role">role</option>
           <option value="task">task</option>
         </select>
@@ -470,6 +472,8 @@ export function MemoryStudioPage() {
                   >
                     <option value="company">company</option>
                     <option value="project">project</option>
+                    <option value="customer">customer</option>
+                    <option value="department">department</option>
                     <option value="role">role</option>
                     <option value="task">task</option>
                   </select>

@@ -340,6 +340,11 @@ function shouldDistillEpisodicMemory(memory: MemoryRow): boolean {
   const tags = new Set((memory.tags || []).map((tag) => tag.toLowerCase()));
   return (
     tags.has("operator_preference") ||
+    tags.has("operator-preference") ||
+    tags.has("operator_taught") ||
+    tags.has("operator-taught") ||
+    tags.has("operator_training") ||
+    tags.has("operator-training") ||
     tags.has("preference") ||
     tags.has("constraint") ||
     tags.has("decision") ||

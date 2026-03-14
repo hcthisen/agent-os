@@ -3,8 +3,8 @@ import { api } from "../lib/api";
 import { formatDateTime, formatDurationMs } from "../lib/format";
 import { subscribeAdminStream } from "../lib/stream";
 import type {
+  AgentRecord,
   ProjectRecord,
-  RoleRecord,
   TaskDetailRecord,
   TaskRecord,
 } from "../lib/types";
@@ -27,6 +27,8 @@ const STATE_COLORS: Record<string, string> = {
 const EMPTY_TASK_FORM = {
   acceptance_criteria: "",
   assigned_role: "",
+  customer_id: "",
+  department_id: "",
   objective: "",
   parent_task_id: "",
   priority: "normal",
@@ -45,6 +47,14 @@ function shortTaskId(id: string | null | undefined): string {
   return id ? id.slice(0, 8) : "unknown";
 }
 
+function getAgentLabel(agent: AgentRecord | null | undefined): string {
+  if (!agent) {
+    return "";
+  }
+
+  return agent.role_profile?.display_name || agent.name || agent.role_id;
+}
+
 export function TasksControlPage({
   focusTaskId,
   onOpenProject,
@@ -53,7 +63,7 @@ export function TasksControlPage({
   onOpenProject?: (projectId: string) => void;
 }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
-  const [roles, setRoles] = useState<RoleRecord[]>([]);
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -72,6 +82,18 @@ export function TasksControlPage({
     () => tasks.find((task) => task.id === selectedTaskId) || taskDetail?.task || null,
     [selectedTaskId, taskDetail, tasks]
   );
+  const agentMap = useMemo(
+    () => new Map(agents.map((agent) => [agent.role_id, agent])),
+    [agents]
+  );
+
+  function formatAssignedAgent(roleId: string | null | undefined): string {
+    if (!roleId) {
+      return "Unassigned";
+    }
+
+    return getAgentLabel(agentMap.get(roleId)) || roleId;
+  }
 
   function mergeTasks(nextTasks: TaskRecord[], existingTasks: TaskRecord[]): TaskRecord[] {
     const merged = new Map<string, TaskRecord>();
@@ -108,15 +130,15 @@ export function TasksControlPage({
   }
 
   async function loadMetadata() {
-    const [rolesData, projectsData] = await Promise.all([
-      api.getRoles(),
+    const [agentsData, projectsData] = await Promise.all([
+      api.getAgents(),
       api.getProjects(),
     ]);
-    setRoles(rolesData || []);
+    setAgents(agentsData || []);
     setProjects(projectsData || []);
     setTaskForm((current) => ({
       ...current,
-      assigned_role: current.assigned_role || rolesData?.[0]?.id || "",
+      assigned_role: current.assigned_role || agentsData?.[0]?.role_id || "",
     }));
   }
 
@@ -135,6 +157,8 @@ export function TasksControlPage({
         setTaskForm({
           acceptance_criteria: (detail.task.acceptance_criteria || []).join("\n"),
           assigned_role: detail.task.assigned_role || "",
+          customer_id: detail.task.customer_id || "",
+          department_id: detail.task.department_id || "",
           objective: detail.task.objective || "",
           parent_task_id: detail.task.parent_task_id || "",
           priority: detail.task.priority || "normal",
@@ -232,6 +256,8 @@ export function TasksControlPage({
       const payload = {
         acceptance_criteria: splitAcceptanceCriteria(taskForm.acceptance_criteria),
         assigned_role: taskForm.assigned_role,
+        customer_id: taskForm.customer_id || null,
+        department_id: taskForm.department_id || null,
         objective: taskForm.objective,
         parent_task_id: taskForm.parent_task_id || null,
         priority: taskForm.priority,
@@ -265,7 +291,7 @@ export function TasksControlPage({
     setTaskDetail(null);
     setTaskForm({
       ...EMPTY_TASK_FORM,
-      assigned_role: roles[0]?.id || "",
+      assigned_role: agents[0]?.role_id || "",
     });
   }
 
@@ -358,8 +384,10 @@ export function TasksControlPage({
                       {task.title}
                     </div>
                     <div style={shellStyles.muted}>
-                      {task.assigned_role}
+                      {formatAssignedAgent(task.assigned_role)}
                       {task.project?.display_name ? ` • ${task.project.display_name}` : ""}
+                      {task.customer_id ? ` • customer:${task.customer_id}` : ""}
+                      {task.department_id ? ` • department:${task.department_id}` : ""}
                     </div>
                   </div>
                   <span style={statusChipStyle(STATE_COLORS[task.state] || "#6b7280")}>
@@ -443,7 +471,7 @@ export function TasksControlPage({
               </div>
               <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 160px 1fr" }}>
                 <div>
-                  <label style={shellStyles.label}>Assigned Role</label>
+                  <label style={shellStyles.label}>Assigned Agent</label>
                   <select
                     onChange={(event) =>
                       setTaskForm((current) => ({
@@ -454,9 +482,9 @@ export function TasksControlPage({
                     style={{ ...shellStyles.input, width: "100%" }}
                     value={taskForm.assigned_role}
                   >
-                    {roles.map((role) => (
-                      <option key={role.id} value={role.id}>
-                        {role.display_name}
+                    {agents.map((agent) => (
+                      <option key={agent.id} value={agent.role_id}>
+                        {getAgentLabel(agent)}
                       </option>
                     ))}
                   </select>
@@ -498,6 +526,36 @@ export function TasksControlPage({
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+              <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 1fr" }}>
+                <div>
+                  <label style={shellStyles.label}>Customer Scope</label>
+                  <input
+                    onChange={(event) =>
+                      setTaskForm((current) => ({
+                        ...current,
+                        customer_id: event.target.value,
+                      }))
+                    }
+                    placeholder="Optional customer id"
+                    style={{ ...shellStyles.input, width: "100%" }}
+                    value={taskForm.customer_id}
+                  />
+                </div>
+                <div>
+                  <label style={shellStyles.label}>Department Scope</label>
+                  <input
+                    onChange={(event) =>
+                      setTaskForm((current) => ({
+                        ...current,
+                        department_id: event.target.value,
+                      }))
+                    }
+                    placeholder="Optional department id"
+                    style={{ ...shellStyles.input, width: "100%" }}
+                    value={taskForm.department_id}
+                  />
                 </div>
               </div>
               <div>
@@ -556,7 +614,7 @@ export function TasksControlPage({
                       {taskDetail.task.state}
                     </span>
                     <span style={shellStyles.muted}>
-                      {taskDetail.task.priority} • {taskDetail.task.assigned_role}
+                      {taskDetail.task.priority} • {formatAssignedAgent(taskDetail.task.assigned_role)}
                     </span>
                   </div>
                   <div style={{ color: "#f8fafc", fontSize: 18, fontWeight: 700 }}>
@@ -565,6 +623,12 @@ export function TasksControlPage({
                   <div style={{ ...shellStyles.muted, marginTop: 6 }}>
                     ID {taskDetail.task.id}
                     {taskDetail.project ? ` • ${taskDetail.project.display_name}` : ""}
+                    {taskDetail.task.customer_id
+                      ? ` • customer:${taskDetail.task.customer_id}`
+                      : ""}
+                    {taskDetail.task.department_id
+                      ? ` • department:${taskDetail.task.department_id}`
+                      : ""}
                   </div>
                 </div>
 
@@ -716,7 +780,7 @@ export function TasksControlPage({
                         <div style={graphLabelStyle}>Parent</div>
                         <div style={graphTitleStyle}>{taskDetail.parent_task.title}</div>
                         <div style={shellStyles.muted}>
-                          {shortTaskId(taskDetail.parent_task.id)} | {taskDetail.parent_task.assigned_role}
+                          {shortTaskId(taskDetail.parent_task.id)} | {formatAssignedAgent(taskDetail.parent_task.assigned_role)}
                         </div>
                       </button>
                     )}
@@ -731,7 +795,7 @@ export function TasksControlPage({
                       <div style={graphLabelStyle}>Current</div>
                       <div style={graphTitleStyle}>{taskDetail.task.title}</div>
                       <div style={shellStyles.muted}>
-                        {shortTaskId(taskDetail.task.id)} | {taskDetail.task.assigned_role}
+                        {shortTaskId(taskDetail.task.id)} | {formatAssignedAgent(taskDetail.task.assigned_role)}
                       </div>
                     </div>
 
@@ -762,7 +826,7 @@ export function TasksControlPage({
                             >
                               <div style={graphTitleStyle}>{child.title}</div>
                               <div style={shellStyles.muted}>
-                                {shortTaskId(child.id)} | {child.assigned_role} | {child.state}
+                                {shortTaskId(child.id)} | {formatAssignedAgent(child.assigned_role)} | {child.state}
                               </div>
                             </button>
                           ))}

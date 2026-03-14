@@ -9,6 +9,7 @@ import type {
   RoleRecord,
   ScheduleRecord,
   ServiceEntryRecord,
+  SkillDraftRecord,
   SkillDetailRecord,
   SkillRecord,
   TaskDetailRecord,
@@ -99,7 +100,20 @@ function buildQueryString(
 export const api = {
   cancelOpenAiDeviceAuth: (): Promise<any> =>
     apiPost<any>("/runtime/provider/openai/device-auth/cancel"),
-  createAgent: (payload: Partial<AgentRecord> & { name: string; role_id: string }) =>
+  createAgent: (
+    payload: Partial<AgentRecord> & {
+      description: string;
+      name: string;
+      policy_doc: string;
+      display_name?: string;
+      effort?: string;
+      handoff_when?: string;
+      max_concurrent_tasks?: number;
+      model?: string;
+      role_id?: string;
+      usage_summary?: string;
+    }
+  ) =>
     apiPost<AgentRecord>("/agents", payload),
   createMemory: (
     payload: Pick<
@@ -143,10 +157,16 @@ export const api = {
   createTask: (
     payload: Partial<TaskRecord> & {
       assigned_role: string;
+      customer_id?: string | null;
+      department_id?: string | null;
       objective: string;
       title: string;
     }
   ) => apiPost<TaskRecord>("/tasks", payload),
+  confirmSkillDraft: (draftId: string) =>
+    apiPost<{ draft: SkillDraftRecord; skill: SkillRecord }>(
+      `/skill-drafts/${draftId}/confirm`
+    ),
   deleteService: (serviceId: string) => apiDelete<void>(`/services/${serviceId}`),
   deleteSkill: (skillId: string) => apiDelete<void>(`/skills/${skillId}`),
   expireMemory: (memoryId: string) => apiPost<void>(`/memories/${memoryId}/expire`),
@@ -270,6 +290,8 @@ export const api = {
   login: (user: string, pass: string): Promise<any> =>
     apiPost<any>("/auth/login", { pass, user }),
   logout: () => apiPost<void>("/auth/logout"),
+  rejectSkillDraft: (draftId: string) =>
+    apiPost<{ draft: SkillDraftRecord }>(`/skill-drafts/${draftId}/reject`),
   retryTask: (taskId: string) => apiPost<void>(`/tasks/${taskId}/retry`),
   saveRuntimeProvider: (
     activeProvider: string,
@@ -303,7 +325,19 @@ export const api = {
       "/settings/agent-instructions",
       { content }
     ),
-  updateAgent: (agentId: string, payload: Partial<AgentRecord>) =>
+  updateAgent: (
+    agentId: string,
+    payload: Partial<AgentRecord> & {
+      description?: string;
+      display_name?: string;
+      effort?: string;
+      handoff_when?: string;
+      max_concurrent_tasks?: number;
+      model?: string;
+      policy_doc?: string;
+      usage_summary?: string;
+    }
+  ) =>
     apiPatch<AgentRecord>(`/agents/${agentId}`, payload),
   updateMemory: (
     memoryId: string,
@@ -326,7 +360,15 @@ export const api = {
     payload: Partial<
       Pick<
         TaskRecord,
-        "acceptance_criteria" | "assigned_role" | "due_at" | "objective" | "priority" | "project_id" | "title"
+        | "acceptance_criteria"
+        | "assigned_role"
+        | "customer_id"
+        | "department_id"
+        | "due_at"
+        | "objective"
+        | "priority"
+        | "project_id"
+        | "title"
       >
     >
   ) => apiPatch<TaskRecord>(`/tasks/${taskId}`, payload),

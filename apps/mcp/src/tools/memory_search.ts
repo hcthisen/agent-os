@@ -189,6 +189,12 @@ async function resolveScopes(
     if (currentTask.project_id) {
       scopes.push({ scope_type: "project", scope_id: currentTask.project_id });
     }
+    if (currentTask.customer_id) {
+      scopes.push({ scope_type: "customer", scope_id: currentTask.customer_id });
+    }
+    if (currentTask.department_id) {
+      scopes.push({ scope_type: "department", scope_id: currentTask.department_id });
+    }
   }
   scopes.push({ scope_type: "role", scope_id: roleId });
   scopes.push({ scope_type: "company", scope_id: null });

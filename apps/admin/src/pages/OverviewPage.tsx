@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime, formatDurationMs } from "../lib/format";
-import type { ProjectRecord, TaskRecord, UsageSummaryRecord } from "../lib/types";
+import type { AgentRecord, ProjectRecord, TaskRecord, UsageSummaryRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const STATE_COLORS: Record<string, string> = {
@@ -16,9 +16,11 @@ const STATE_COLORS: Record<string, string> = {
 };
 
 function WindowCard({
+  getAgentName,
   title,
   window,
 }: {
+  getAgentName: (roleId: string) => string;
   title: string;
   window: UsageSummaryRecord["task_runs"]["today"];
 }) {
@@ -31,7 +33,7 @@ function WindowCard({
         </span>
       </div>
       <div style={{ marginTop: 12 }}>
-        <div style={{ ...shellStyles.muted, marginBottom: 8 }}>Runs per role</div>
+        <div style={{ ...shellStyles.muted, marginBottom: 8 }}>Runs per agent</div>
         {window.runs_per_role.length === 0 ? (
           <div style={shellStyles.muted}>No task runs in this window.</div>
         ) : (
@@ -46,7 +48,7 @@ function WindowCard({
                 marginBottom: 6,
               }}
             >
-              <span style={{ color: "#e5e7eb", fontSize: 12 }}>{entry.role_id}</span>
+              <span style={{ color: "#e5e7eb", fontSize: 12 }}>{getAgentName(entry.role_id)}</span>
               <div
                 style={{
                   background: "#172033",
@@ -113,17 +115,24 @@ export function OverviewPage({
   const [usage, setUsage] = useState<UsageSummaryRecord | null>(null);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  function getAgentName(roleId: string): string {
+    const agent = agents.find((entry) => entry.role_id === roleId);
+    return agent?.role_profile?.display_name || agent?.name || roleId;
+  }
 
   useEffect(() => {
     let cancelled = false;
 
     const load = async () => {
       try {
-        const [usageSummary, recentTasks, projectList] = await Promise.all([
+        const [usageSummary, recentTasks, projectList, agentsData] = await Promise.all([
           api.getUsageSummary(),
           api.getTasks({ limit: 8 }),
           api.getProjects(),
+          api.getAgents(),
         ]);
 
         if (cancelled) {
@@ -133,6 +142,7 @@ export function OverviewPage({
         setUsage(usageSummary || null);
         setTasks(recentTasks || []);
         setProjects((projectList || []).slice(0, 6));
+        setAgents(agentsData || []);
         setError(null);
       } catch (nextError) {
         if (!cancelled) {
@@ -166,9 +176,9 @@ export function OverviewPage({
             marginBottom: 18,
           }}
         >
-          <WindowCard title="Today" window={usage.task_runs.today} />
-          <WindowCard title="This Week" window={usage.task_runs.week} />
-          <WindowCard title="This Month" window={usage.task_runs.month} />
+          <WindowCard getAgentName={getAgentName} title="Today" window={usage.task_runs.today} />
+          <WindowCard getAgentName={getAgentName} title="This Week" window={usage.task_runs.week} />
+          <WindowCard getAgentName={getAgentName} title="This Month" window={usage.task_runs.month} />
         </div>
       )}
 
@@ -271,7 +281,7 @@ export function OverviewPage({
                     {task.title}
                   </div>
                   <div style={shellStyles.muted}>
-                    {task.assigned_role}  |  {formatDateTime(task.updated_at)}
+                    {getAgentName(task.assigned_role)}  |  {formatDateTime(task.updated_at)}
                   </div>
                 </div>
                 <span style={statusChipStyle(STATE_COLORS[task.state] || "#6b7280")}>

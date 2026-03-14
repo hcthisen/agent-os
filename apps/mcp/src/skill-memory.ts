@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import { getCurrentTaskContext, type ScopeType } from "./scope.js";
+import { enforceScope, getCurrentTaskContext, type ScopeType } from "./scope.js";
 
 export const SKILL_TAG = "skill";
 
@@ -263,6 +263,10 @@ export async function resolveSkillScopes(
   roleId: string
 ): Promise<Array<{ scope_type: ScopeType; scope_id: string | null }>> {
   if (scopeType) {
+    if (scopeType !== "company") {
+      await enforceScope(scopeType, requireScopeId(scopeType, scopeId));
+    }
+
     return [
       {
         scope_type: scopeType as ScopeType,
@@ -278,6 +282,12 @@ export async function resolveSkillScopes(
     scopes.push({ scope_type: "task", scope_id: currentTask.id });
     if (currentTask.project_id) {
       scopes.push({ scope_type: "project", scope_id: currentTask.project_id });
+    }
+    if (currentTask.customer_id) {
+      scopes.push({ scope_type: "customer", scope_id: currentTask.customer_id });
+    }
+    if (currentTask.department_id) {
+      scopes.push({ scope_type: "department", scope_id: currentTask.department_id });
     }
     scopes.push({ scope_type: "role", scope_id: currentTask.assigned_role });
   } else {

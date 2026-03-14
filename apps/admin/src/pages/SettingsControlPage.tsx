@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime } from "../lib/format";
-import type { ScheduleRecord, ServiceEntryRecord } from "../lib/types";
+import type { AgentRecord, ScheduleRecord, ServiceEntryRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const SERVICE_STATUS_COLORS: Record<string, string> = {
@@ -21,7 +21,16 @@ const EMPTY_SERVICE_FORM = {
   status: "key_needed",
 };
 
+function getAgentLabel(agent: AgentRecord | null | undefined): string {
+  if (!agent) {
+    return "";
+  }
+
+  return agent.role_profile?.display_name || agent.name || agent.role_id;
+}
+
 export function SettingsControlPage() {
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [services, setServices] = useState<ServiceEntryRecord[]>([]);
   const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
@@ -38,14 +47,20 @@ export function SettingsControlPage() {
     () => services.find((service) => service.id === selectedServiceId) || null,
     [selectedServiceId, services]
   );
+  const agentMap = useMemo(
+    () => new Map(agents.map((agent) => [agent.role_id, agent])),
+    [agents]
+  );
 
   async function loadSettings() {
-    const [servicesData, schedulesData, instructionsData] = await Promise.all([
+    const [agentsData, servicesData, schedulesData, instructionsData] = await Promise.all([
+      api.getAgents(),
       api.getServices(),
       api.getSchedules(),
       api.getAgentInstructions(),
     ]);
 
+    setAgents(agentsData || []);
     setServices(servicesData || []);
     setSchedules(schedulesData || []);
     setInstructionsContent(instructionsData?.content || "");
@@ -409,7 +424,9 @@ export function SettingsControlPage() {
                   <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                     <div>
                       <div style={{ color: "#f8fafc", fontWeight: 600 }}>{schedule.name}</div>
-                      <div style={shellStyles.muted}>{schedule.assigned_role}</div>
+                      <div style={shellStyles.muted}>
+                        {getAgentLabel(agentMap.get(schedule.assigned_role)) || schedule.assigned_role}
+                      </div>
                     </div>
                     <button
                       onClick={() => void toggleSchedule(schedule.id, !schedule.enabled)}

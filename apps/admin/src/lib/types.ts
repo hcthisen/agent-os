@@ -31,6 +31,7 @@ export interface AgentRecord {
   status: string;
   config: Record<string, unknown>;
   last_seen_at: string | null;
+  role_profile?: RoleRecord | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -84,6 +85,8 @@ export interface TaskRecord {
   id: string;
   project_id: string | null;
   parent_task_id: string | null;
+  customer_id?: string | null;
+  department_id?: string | null;
   depends_on?: string[] | null;
   title: string;
   objective?: string;
@@ -266,4 +269,33 @@ export interface AdminStreamSnapshot {
   live_activity: LiveActivityRecord[];
   messages: MessageRecord[];
   tasks: TaskRecord[];
+}
+
+export interface SkillDraftStepRecord {
+  order: number;
+  instruction: string;
+  required: boolean;
+  tool_hint: string | null;
+}
+
+export interface SkillDraftRecord {
+  id: string;
+  source_message_id: string | null;
+  source_content: string;
+  name: string;
+  display_name: string;
+  description: string;
+  trigger_when: string;
+  steps: SkillDraftStepRecord[];
+  input_schema: Record<string, unknown>;
+  output_schema: Record<string, unknown>;
+  required_services: string[];
+  scope_type: string;
+  scope_id: string;
+  tags: string[];
+  status: string;
+  confirmed_skill_id: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
 }

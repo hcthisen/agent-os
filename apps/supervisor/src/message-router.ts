@@ -39,19 +39,15 @@ export async function routeMessages(): Promise<void> {
 
   for (const msg of (messages || []) as InboundMessage[]) {
     const history = await loadRecentConversationMessages(msg);
-    const objective = await buildRelayObjective(msg, history);
+    const relayRouting = await prepareRelayTaskRouting(msg, history);
 
     // Create a high-priority relay task
     const { data: relayTask, error: taskErr } = await db
       .from("tasks")
       .insert({
         title: `Process message: ${msg.content.slice(0, 50)}...`,
-        objective,
-        acceptance_criteria: [
-          "Message classified",
-          "Appropriate action taken or task created",
-          "Response sent",
-        ],
+        objective: relayRouting.objective,
+        acceptance_criteria: buildRelayAcceptanceCriteria(relayRouting),
         state: "ready",
         priority: "high",
         assigned_role: "relay",
@@ -73,6 +69,10 @@ export async function routeMessages(): Promise<void> {
       continue;
     }
 
+    if (relayTask?.id && relayRouting.requires_execution) {
+      await createRelayExecutionRequirement(relayTask.id, relayRouting);
+    }
+
     // Mark message as processed
     await db
       .from("messages")
@@ -81,13 +81,42 @@ export async function routeMessages(): Promise<void> {
   }
 }
 
-async function buildRelayObjective(
+interface RelevantSkill {
+  description: string;
+  display_name: string;
+  match_score?: number;
+  name: string;
+  required_services: string[];
+  scope_id: string;
+  scope_type: string;
+  steps: Array<{ instruction: string; order: number }>;
+  tags: string[];
+  trigger_when: string;
+  updated_at: string;
+  use_count: number;
+}
+
+interface RelayRoutingDecision {
+  execution_reason: string;
+  matched_skills: RelevantSkill[];
+  objective: string;
+  recommended_role: string | null;
+  requires_execution: boolean;
+  teach_mode: boolean;
+}
+
+async function prepareRelayTaskRouting(
   message: InboundMessage,
   history: ConversationMessage[]
-): Promise<string> {
+): Promise<RelayRoutingDecision> {
   const content = String(message.content || "").trim();
-  const teachMode = /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+  const teachMode = detectRelayTeachMode(content);
   const matchedSkills = await loadRelayMatchedSkills(content);
+  const executionDecision = classifyRelayExecutionRequest(
+    content,
+    matchedSkills,
+    teachMode
+  );
   const transcript = [...history, {
     content,
     created_at: message.created_at,
@@ -97,7 +126,7 @@ async function buildRelayObjective(
     .map(formatConversationMessage)
     .join("\n");
 
-  return `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
+  const objective = `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
 
 Current message:
 ${content}
@@ -112,25 +141,156 @@ Routing reminders:
 - If the request is multi-phase, prefer a staged task graph with explicit depends_on prerequisites so follow-up work waits automatically instead of starting in parallel by accident.
 - If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can reuse the existing procedure instead of recreating it.
+- When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role, reference the matched skill by name, and keep any operator reply to a brief acknowledgement instead of a false completion claim.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
 
-Teach mode detected: ${teachMode ? "yes" : "no"}.`;
+Teach mode detected: ${teachMode ? "yes" : "no"}.
+Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
+Recommended downstream role: ${executionDecision.recommendedRole || "none"}.
+Routing requirement: ${
+  executionDecision.requiresExecution
+    ? "Create at least one downstream child task before completing this relay task."
+    : "Direct answer is allowed when confidence is high."
+}`;
+
+  return {
+    execution_reason: executionDecision.reason,
+    matched_skills: matchedSkills,
+    objective,
+    recommended_role: executionDecision.recommendedRole,
+    requires_execution: executionDecision.requiresExecution,
+    teach_mode: teachMode,
+  };
 }
 
-async function loadRelayMatchedSkills(content: string): Promise<Array<{
-  description: string;
-  display_name: string;
-  name: string;
-  steps: Array<{ instruction: string; order: number }>;
-  tags: string[];
-  trigger_when: string;
-  updated_at: string;
-  use_count: number;
-  scope_id: string;
-  scope_type: string;
-}>> {
+function buildRelayAcceptanceCriteria(relayRouting: RelayRoutingDecision): string[] {
+  if (relayRouting.requires_execution) {
+    return [
+      "Message classified",
+      "Appropriate downstream child task created",
+      "Operator kept informed without falsely claiming the work is already complete",
+    ];
+  }
+
+  return [
+    "Message classified",
+    "Appropriate action taken or task created",
+    "Response sent",
+  ];
+}
+
+async function createRelayExecutionRequirement(
+  taskId: string,
+  relayRouting: RelayRoutingDecision
+): Promise<void> {
+  const db = getDb();
+  const { error } = await db.from("task_requirements").insert({
+    task_id: taskId,
+    requirement_type: "downstream_task",
+    target: "execution",
+    expected: {
+      execution_reason: relayRouting.execution_reason,
+      matched_skill_names: relayRouting.matched_skills.map((skill) => skill.name),
+      recommended_role: relayRouting.recommended_role || "builder",
+    },
+    status: "pending",
+    required_for_completion: true,
+    last_result: {},
+  });
+
+  if (error) {
+    console.error(
+      `Failed to create downstream-task requirement for relay task ${taskId}:`,
+      error
+    );
+  }
+}
+
+function detectRelayTeachMode(content: string): boolean {
+  return /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+}
+
+function classifyRelayExecutionRequest(
+  content: string,
+  matchedSkills: RelevantSkill[],
+  teachMode: boolean
+): {
+  reason: string;
+  recommendedRole: string | null;
+  requiresExecution: boolean;
+} {
+  if (teachMode) {
+    return {
+      reason: "explicit_training",
+      recommendedRole: null,
+      requiresExecution: false,
+    };
+  }
+
+  if (!matchedSkills.length) {
+    return {
+      reason: "no_matched_skill",
+      recommendedRole: null,
+      requiresExecution: false,
+    };
+  }
+
+  const imperativeLead =
+    /^(please\s+)?(do|run|handle|follow|use|apply|execute|perform|send|deploy|fix|update|create|remove|delete|verify|check|review|build|make|treat)\b/i.test(
+      content
+    );
+  const actionPhrase =
+    /\b(please|go ahead|follow the|use the|apply the|run the|execute the|handle this|do this|verify this|treat this as|ship this|deploy this|fix this|update this|create this|remove this)\b/i.test(
+      content
+    );
+  const informationalQuestion = looksLikeInformationalRelayQuestion(content);
+  const requiresExecution = imperativeLead || actionPhrase || !informationalQuestion;
+
+  return {
+    reason: requiresExecution
+      ? imperativeLead || actionPhrase
+        ? "matched_skill_action_request"
+        : "matched_skill_non_question"
+      : "matched_skill_information_request",
+    recommendedRole: requiresExecution
+      ? determineRelayRecommendedRole(matchedSkills, content)
+      : null,
+    requiresExecution,
+  };
+}
+
+function looksLikeInformationalRelayQuestion(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized.endsWith("?")) {
+    return false;
+  }
+
+  return (
+    /^(what|why|how|when|where|who|which|is|are|does|do|did|can|could|would|should|will)\b/i.test(
+      normalized
+    ) &&
+    !/\b(use|follow|apply|run|execute|handle|do|send|fix|update|create|remove|deploy|verify|build|make|treat)\b/i.test(
+      normalized
+    )
+  );
+}
+
+function determineRelayRecommendedRole(
+  matchedSkills: RelevantSkill[],
+  content: string
+): string {
+  const requiresService =
+    matchedSkills.some((skill) => skill.required_services.length > 0) ||
+    /\b(api key|credential|login|service connection|service slot|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain)\b/i.test(
+      content
+    );
+
+  return requiresService ? "sage" : "builder";
+}
+
+async function loadRelayMatchedSkills(content: string): Promise<RelevantSkill[]> {
   if (!content.trim()) {
     return [];
   }
@@ -173,14 +333,7 @@ async function loadRelayMatchedSkills(content: string): Promise<Array<{
     .slice(0, 3);
 }
 
-function formatRelayMatchedSkills(
-  skills: Array<{
-    display_name: string;
-    name: string;
-    steps: Array<{ instruction: string; order: number }>;
-    trigger_when: string;
-  }>
-): string {
+function formatRelayMatchedSkills(skills: RelevantSkill[]): string {
   if (!skills.length) {
     return "- No obvious shared skill match detected.";
   }
@@ -203,14 +356,7 @@ function formatRelayMatchedSkills(
 }
 
 function scoreRelaySkillMatch(
-  skill: {
-    description: string;
-    display_name: string;
-    name: string;
-    steps: Array<{ instruction: string }>;
-    tags: string[];
-    trigger_when: string;
-  },
+  skill: RelevantSkill,
   content: string
 ): number {
   const haystack = normalizeRelayMatchText(content);
@@ -275,6 +421,7 @@ function toRelevantSkill(memory: SkillMemoryRow): {
   description: string;
   display_name: string;
   name: string;
+  required_services: string[];
   scope_id: string;
   scope_type: string;
   steps: Array<{ instruction: string; order: number }>;
@@ -290,6 +437,7 @@ function toRelevantSkill(memory: SkillMemoryRow): {
     description: readString(payload.description),
     display_name: readString(payload.display_name) || name,
     name,
+    required_services: readStringArray(payload.required_services),
     scope_id: memory.scope_id,
     scope_type: memory.scope_type,
     steps: readSkillSteps(payload.steps),

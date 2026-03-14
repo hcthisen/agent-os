@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime } from "../lib/format";
 import { renderMarkdown } from "../lib/markdown";
@@ -17,6 +17,70 @@ function resolveLinkedTaskId(message: MessageRecord): string | null {
   return typeof relayTaskId === "string" && relayTaskId ? relayTaskId : null;
 }
 
+function readSkillDraftId(message: MessageRecord): string | null {
+  const draftId = message.metadata?.skill_draft_id;
+  return typeof draftId === "string" && draftId ? draftId : null;
+}
+
+function readSkillDraftStatus(message: MessageRecord): string | null {
+  const status = message.metadata?.skill_draft_status;
+  return typeof status === "string" && status ? status : null;
+}
+
+function readSkillDraft(message: MessageRecord): {
+  display_name: string;
+  id: string;
+  name: string;
+  steps: Array<{ instruction: string; order: number }>;
+  trigger_when: string;
+} | null {
+  const draft =
+    message.metadata?.skill_draft &&
+    typeof message.metadata.skill_draft === "object" &&
+    !Array.isArray(message.metadata.skill_draft)
+      ? (message.metadata.skill_draft as Record<string, unknown>)
+      : null;
+
+  if (!draft || typeof draft.id !== "string" || !draft.id) {
+    return null;
+  }
+
+  return {
+    display_name:
+      (typeof draft.display_name === "string" && draft.display_name) ||
+      (typeof draft.name === "string" && draft.name) ||
+      draft.id,
+    id: draft.id,
+    name: typeof draft.name === "string" ? draft.name : draft.id,
+    steps: Array.isArray(draft.steps)
+      ? draft.steps
+          .map((step, index) =>
+            step && typeof step === "object"
+              ? {
+                  instruction:
+                    typeof (step as Record<string, unknown>).instruction === "string"
+                      ? String((step as Record<string, unknown>).instruction).trim()
+                      : "",
+                  order:
+                    typeof (step as Record<string, unknown>).order === "number"
+                      ? Number((step as Record<string, unknown>).order)
+                      : index + 1,
+                }
+              : null
+          )
+          .filter(
+            (
+              step
+            ): step is {
+              instruction: string;
+              order: number;
+            } => Boolean(step?.instruction)
+          )
+      : [],
+    trigger_when: typeof draft.trigger_when === "string" ? draft.trigger_when : "",
+  };
+}
+
 export function ChatPage({
   onOpenTask,
 }: {
@@ -27,6 +91,7 @@ export function ChatPage({
   const [hasOlderMessages, setHasOlderMessages] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  const [draftActionId, setDraftActionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -153,6 +218,20 @@ export function ChatPage({
     bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages]);
 
+  const skillDraftStatusById = useMemo(() => {
+    const statusMap = new Map<string, string>();
+
+    for (const message of messages) {
+      const draftId = readSkillDraftId(message);
+      const status = readSkillDraftStatus(message);
+      if (draftId && status) {
+        statusMap.set(draftId, status);
+      }
+    }
+
+    return statusMap;
+  }, [messages]);
+
   async function sendMessage(event: React.FormEvent) {
     event.preventDefault();
     if (!input.trim() || sending) {
@@ -173,6 +252,31 @@ export function ChatPage({
       );
     } finally {
       setSending(false);
+    }
+  }
+
+  async function handleSkillDraftAction(
+    action: "confirm" | "reject",
+    draftId: string
+  ) {
+    setDraftActionId(draftId);
+    setError(null);
+
+    try {
+      if (action === "confirm") {
+        await api.confirmSkillDraft(draftId);
+      } else {
+        await api.rejectSkillDraft(draftId);
+      }
+      await loadLatestMessages();
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : "Failed to update the skill draft."
+      );
+    } finally {
+      setDraftActionId(null);
     }
   }
 
@@ -207,6 +311,11 @@ export function ChatPage({
         {messages.map((message) => {
           const linkedTaskId = resolveLinkedTaskId(message);
           const isTeachMode = message.metadata?.teach_mode === true;
+          const skillDraft = readSkillDraft(message);
+          const skillDraftId = readSkillDraftId(message);
+          const skillDraftStatus =
+            (skillDraftId && skillDraftStatusById.get(skillDraftId)) ||
+            readSkillDraftStatus(message);
           return (
             <div
               key={message.id}
@@ -258,6 +367,86 @@ export function ChatPage({
               <div style={{ color: "#e5e7eb", fontSize: 14 }}>
                 {renderMarkdown(message.content)}
               </div>
+              {skillDraft && (
+                <div
+                  style={{
+                    background: "#0b1020",
+                    border: "1px solid #253247",
+                    borderRadius: 10,
+                    marginTop: 12,
+                    padding: 10,
+                  }}
+                >
+                  <div style={{ color: "#f8fafc", fontSize: 13, fontWeight: 600 }}>
+                    {skillDraft.display_name}
+                  </div>
+                  <div style={{ ...shellStyles.muted, marginTop: 4 }}>
+                    {skillDraft.name}
+                    {skillDraft.trigger_when ? ` • ${skillDraft.trigger_when}` : ""}
+                  </div>
+                  {skillDraft.steps.length > 0 && (
+                    <ol style={{ margin: "10px 0 0", paddingLeft: 18 }}>
+                      {skillDraft.steps.map((step) => (
+                        <li key={`${skillDraft.id}-${step.order}`}>{step.instruction}</li>
+                      ))}
+                    </ol>
+                  )}
+                  <div
+                    style={{
+                      alignItems: "center",
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      marginTop: 10,
+                    }}
+                  >
+                    <span
+                      style={statusChipStyle(
+                        skillDraftStatus === "confirmed"
+                          ? "#22c55e"
+                          : skillDraftStatus === "rejected"
+                            ? "#ef4444"
+                            : "#f59e0b"
+                      )}
+                    >
+                      {skillDraftStatus || "pending"}
+                    </span>
+                    {(skillDraftStatus || "pending") === "pending" && (
+                      <>
+                        <button
+                          disabled={draftActionId === skillDraft.id}
+                          onClick={() =>
+                            void handleSkillDraftAction("confirm", skillDraft.id)
+                          }
+                          style={{
+                            ...shellStyles.button,
+                            opacity: draftActionId === skillDraft.id ? 0.7 : 1,
+                            padding: "6px 10px",
+                          }}
+                          type="button"
+                        >
+                          Save Skill
+                        </button>
+                        <button
+                          disabled={draftActionId === skillDraft.id}
+                          onClick={() =>
+                            void handleSkillDraftAction("reject", skillDraft.id)
+                          }
+                          style={{
+                            ...shellStyles.button,
+                            ...shellStyles.buttonGhost,
+                            opacity: draftActionId === skillDraft.id ? 0.7 : 1,
+                            padding: "6px 10px",
+                          }}
+                          type="button"
+                        >
+                          Discard
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
               <div style={{ ...shellStyles.muted, marginTop: 10, textAlign: "right" }}>
                 {formatDateTime(message.created_at)}
               </div>

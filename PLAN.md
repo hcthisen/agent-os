@@ -111,11 +111,11 @@ phase turns the admin panel into a real employee management dashboard.
 
 **Duration:** 1-2 weeks
 
-### 1.1 Role detail and policy editor `[Agents tab]`
+### 1.1 Agent profile editor `[Agents tab]`
 
-**Context:** `GET /api/roles` already returns full role rows including `policy_doc`,
-`description`, `usage_summary`, and `handoff_when`. The Agents tab
-just doesn't display them.
+**Context:** Runtime `roles` still exist internally for task routing, handoffs, RLS, and
+context packs, but the operator-facing control plane should not treat Roles and Agents as
+two separate things. Each agent owns one backing runtime profile/system prompt.
 
 #### Backend:
 - [x] Add `PATCH /api/roles/:id` endpoint in `server.mjs`. Accept: `policy_doc`,
@@ -129,37 +129,51 @@ just doesn't display them.
   (existing list endpoint works but a detail endpoint is cleaner for deep views).
 
 #### Frontend:
-- [x] Add a role detail/edit panel in `AgentsPage.tsx`. When a role row in the table is
-  clicked, expand or navigate to a detail view showing:
-  - `policy_doc` in a textarea/code editor with markdown preview
-  - Editable fields: `description`, `usage_summary`, `handoff_when`
-  - `model`/`effort`/`max_concurrent_tasks` selectors (reuse existing role config UI)
-  - Save button calling `PATCH /api/roles/:id`
-  - List of agents assigned to this role (filtered from existing agents data)
-- [x] Add a "Create Role" button that opens a form for new custom roles.
-- [x] Add `api.updateRole(id, fields)` and `api.createRole(fields)` to `api.ts`.
+- [x] Surface the backing profile fields through the Agent detail form instead of a
+  separate Roles panel.
+- [x] Remove the operator-facing "Create Role" path from the active Agents tab.
+- [x] Keep `api.updateRole(id, fields)` and `api.createRole(fields)` available for
+  internal/runtime use and non-Agents surfaces that still depend on them.
 
 ### 1.2 Agent management `[Agents tab]`
 
 #### Backend:
 - [x] Add `PATCH /api/agents/:id` endpoint. Accept: `status` (active/paused/disabled),
   `config` (JSON), `role_id`, `name`. Validate status enum.
-- [x] Add `POST /api/agents` endpoint. Require: `name`, `role_id`. Default status
-  `active`.
+- [x] Extend `PATCH /api/agents/:id` so agent edits also update the backing runtime
+  profile fields (`description`, `policy_doc`, `usage_summary`, `handoff_when`, `model`,
+  `effort`, `max_concurrent_tasks`).
+- [x] Extend `POST /api/agents` so `role_id` can be generated automatically from the
+  agent name, a backing runtime profile is created automatically, and the response
+  includes the embedded profile data.
 - [x] Add `GET /api/agents/:id/activity` endpoint. Return the last 20 `task_runs` for
   this agent (join with tasks for title), plus the last 20 events where
   `agent_id = :id`.
+- [x] Enforce one-agent-per-profile at the DB level with a unique constraint/index on
+  `agents.role_id`.
 
 #### Frontend:
 - [x] Make agent cards in `AgentsPage.tsx` clickable. On click, show a detail panel with:
   - Status dropdown (active/paused/disabled) with save button
+  - Embedded profile fields: `description`, `policy_doc`, `usage_summary`,
+    `handoff_when`, `model`, `effort`, `max_concurrent_tasks`
   - Config JSON editor
   - Activity timeline: recent task_runs showing task title, model, effort, status,
     duration, started_at
   - Recent events for this agent
-- [x] Add "Create Agent" button for assigning new agents to existing roles.
+- [x] Add "Create Agent" button for creating the agent and its backing profile in one
+  flow.
 - [x] Add `api.updateAgent(id, fields)`, `api.createAgent(fields)`,
   `api.getAgentActivity(id)` to `api.ts`.
+
+Verification used: local `npm run build -w apps/admin` and `node --check apps/admin/server.mjs`
+passed. A fresh local Docker Desktop stack on port `3004` verified the clean-install
+path, the Roles panel was absent in a real browser, task assignment showed agent names,
+and `POST/PATCH /api/agents` successfully created and updated a disposable `Billing
+Operations Agent`. On the live VPS, admin was rebuilt/redeployed, migration
+`036_agent_profile_unification.sql` was applied, the live `/api/agents` payload includes
+`role_profile`, and the live Agents page now shows only agent management with no separate
+Roles pane.
 
 ### 1.3 Service connections CRUD `[Settings tab]`
 
@@ -431,7 +445,7 @@ search, scope, and supersession infrastructure.
 - [x] Create a skill via MCP tool in a test task, verify it appears in admin Skills tab.
 - [x] Search for the skill from another agent's context, verify it is found.
 - [x] Verify skill appears in TASK_BRIEFING.md of a new task launch.
-- [ ] Deploy to VPS and run end-to-end:
+- [x] Deploy to VPS and run end-to-end:
   1. Operator creates skill via admin
   2. Operator sends chat message matching the skill's trigger
   3. Relay includes skill in task objective
@@ -482,12 +496,12 @@ implicit learning is unreliable. This phase adds explicit training flows.
     live system.
 
 ### 3.4 Phase 3 verification
-- [ ] Local Docker Desktop validation confirms training-related UI and relay flows work
+- [x] Local Docker Desktop validation confirms training-related UI and relay flows work
   on a fresh stack before live rollout.
-- [ ] Operator sends "Remember: Always CC finance@company.com on invoice emails" in
+- [x] Operator sends "Remember: Always CC finance@company.com on invoice emails" in
   chat. Verify a semantic memory is created with subject containing the instruction.
-- [ ] Operator creates a skill via admin form. Verify it is stored and searchable.
-- [ ] Knowledge base filter correctly shows operator-created entries only.
+- [x] Operator creates a skill via admin form. Verify it is stored and searchable.
+- [x] Knowledge base filter correctly shows operator-created entries only.
 
 ---
 
@@ -569,9 +583,9 @@ UX gaps.
 - [x] Local Docker Desktop validation confirms dashboard, task detail, artifact, and
   project views render correctly on a fresh stack.
 - [x] Usage summary shows real data from VPS task_runs.
-- [ ] Task detail shows run history with correct durations.
-- [ ] Artifacts are browsable in admin.
-- [ ] Projects are listable and filterable.
+- [x] Task detail shows run history with correct durations.
+- [x] Artifacts are browsable in admin.
+- [x] Projects are listable and filterable.
 
 ---
 
@@ -583,30 +597,30 @@ and no max-duration safety net for agent runs. This phase addresses runtime reli
 **Duration:** Ongoing after Phases 0-4 blocking work is complete
 
 ### 5.1 Workspace cleanup
-- [ ] Add a `cleanupWorkspaces()` function in `apps/supervisor/src/process-manager.ts`
+- [x] Add a `cleanupWorkspaces()` function in `apps/supervisor/src/process-manager.ts`
   (or a new `workspace-cleanup.ts`).
-- [ ] Logic: Query `task_runs` with `status IN ('completed', 'failed', 'timeout',
+- [x] Logic: Query `task_runs` with `status IN ('completed', 'failed', 'timeout',
   'interrupted')` and `finished_at < NOW() - cleanup_threshold` (default 24 hours). For
   each, delete the workspace directory at `/app/workspaces/{task_id}`. Keep the last 5
   most recent workspaces regardless.
-- [ ] Run on a 1-hour interval from `index.ts`.
-- [ ] Add `WORKSPACE_CLEANUP_HOURS` env var (default 24).
+- [x] Run on a 1-hour interval from `index.ts`.
+- [x] Add `WORKSPACE_CLEANUP_HOURS` env var (default 24).
 
 ### 5.2 Max-duration timeout for agent runs
-- [ ] Add `MAX_RUN_DURATION_MS` to `config.ts` (default 60 minutes). Allow per-role
+- [x] Add `MAX_RUN_DURATION_MS` to `config.ts` (default 60 minutes). Allow per-role
   override via `roles.config` or a new column.
-- [ ] In `process-manager.ts`, alongside the inactivity check interval, add a separate
+- [x] In `process-manager.ts`, alongside the inactivity check interval, add a separate
   max-duration check. If `Date.now() - startedAt > maxDuration`, kill the process with
   the same SIGTERM → SIGKILL flow as inactivity timeout.
-- [ ] Log event: `task.max_duration_timeout`.
+- [x] Log event: `task.max_duration_timeout`.
 
 ### 5.3 Notification cooldown per task
-- [ ] In `apps/supervisor/src/task-attention.ts`, add a cooldown period per task for
+- [x] In `apps/supervisor/src/task-attention.ts`, add a cooldown period per task for
   operator notifications. Default: 1 hour. Track via events:
   `operator.notification.sent` with scope_id = task_id.
-- [ ] Before sending a notification, check if an `operator.notification.sent` event
+- [x] Before sending a notification, check if an `operator.notification.sent` event
   exists for this task within the cooldown window. If yes, skip.
-- [ ] This replaces the current `notification_key` deduplication which changes on every
+- [x] This replaces the current `notification_key` deduplication which changes on every
   `updated_at` change.
 
 ### 5.4 Schedule locking
@@ -657,10 +671,12 @@ foundation built in Phases 0-5.
 - [x] This lets operators customize foundational rules without rebuilding the Docker image.
 
 ### 6.4 Implement customer and department scope types
-- [ ] In `apps/mcp/src/scope.ts`, implement `checkScope` for `customer` and
+- [x] In `apps/mcp/src/scope.ts`, implement `checkScope` for `customer` and
   `department` types. Define the enforcement rules (e.g., agent must have a task with
   matching customer_id or department_id).
-- [ ] May require adding `customer_id` / `department_id` columns to tasks or a separate
+- [x] Add `customer_id` / `department_id` columns to tasks, carry them through admin task
+  create/edit flows, and include matching customer/department memories and skills in
+  `build_context_pack()` plus default MCP retrieval scope resolution.
   mapping table.
 
 ### 6.5 Task graph visualization
@@ -674,8 +690,9 @@ foundation built in Phases 0-5.
   semantic memories for each.
 
 ### 6.7 Skill import from chat
-- [ ] When the relay detects a procedural instruction ("When X happens, do A then B then
-  C"), auto-generate a skill draft and confirm with the operator before saving.
+- [x] When admin chat receives a procedural instruction ("When X happens, do A then B then
+  C"), auto-generate a skill draft, surface it in chat with save/discard controls, and
+  require explicit operator confirmation before saving the shared skill.
 
 ### 6.8 Event detail expansion and filtering
 - [x] Expand event rows in `EventsPage.tsx` to show the full `detail` JSON.
@@ -706,12 +723,14 @@ foundation built in Phases 0-5.
 - 2026-03-14: Phase 6.2 SSE verification passed locally on a fresh Docker Desktop stack. Chat updated live from an inserted relay message, the sidebar live-activity card updated from a seeded running task, and clicking that card opened the Tasks view. Evidence: `C:\Github\agent-os\.tmp\phase62-chat-local.png`, `C:\Github\agent-os\.tmp\phase62-sidebar-local.png`, `C:\Github\agent-os\.tmp\phase62-tasks-local.png`.
 - 2026-03-14: Phase 6.2 SSE verification passed on the live VPS. Authenticated `/api/stream` returned `snapshot` events, the live admin Chat page rendered an inserted relay message without refresh, and the live sidebar reflected active task state. Temporary live message rows and leftover relay-verification test tasks discovered during this check were deleted afterward. Evidence: `C:\Github\agent-os\.tmp\phase62-chat-live.png`.
 - 2026-03-14: Phase 6.6 bulk import verification passed locally on a fresh Docker Desktop stack and on the live VPS. A two-paragraph document imported as two semantic company memories tagged `operator_taught`, and the temporary live verification memories were deleted afterward.
+- 2026-03-14: Phase 6.4 verification passed locally and on the live VPS. Local Docker Desktop validation created customer-scoped and department-scoped memories plus skills, then confirmed `build_context_pack()` included them for a scoped task (`.tmp/phase6-local-context-summary.json`). Live VPS validation repeated the same check with a backlog-only task via direct `build_context_pack()` SQL and the temporary live rows were deleted afterward.
+- 2026-03-14: Phase 6.7 verification passed locally and on the live VPS. Admin chat now surfaces procedural training as a pending skill draft with save/discard controls, explicit confirmation saves the skill, and the saved skill becomes searchable immediately. Local UI evidence: `C:\Github\agent-os\.tmp\phase6-chat-draft-local.png`. The temporary live draft, messages, skills, memories, and scoped task were deleted afterward.
 
 - [x] Phase 0 - Runtime Boundary Hardening
 - [x] Phase 1 - Admin Panel Control Plane
-- [ ] Phase 2 - Shared Skill System
-- [ ] Phase 3 - Training and Knowledge Management
-- [ ] Phase 4 - Observability and Polish
+- [x] Phase 2 - Shared Skill System
+- [x] Phase 3 - Training and Knowledge Management
+- [x] Phase 4 - Observability and Polish
 - [ ] Phase 5 - Operational Hardening
-- [ ] Phase 6 - Extended Capabilities (future, not blocking)
+- [x] Phase 6 - Extended Capabilities (future, not blocking)
 
