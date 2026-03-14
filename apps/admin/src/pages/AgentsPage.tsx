@@ -562,31 +562,23 @@ export function AgentsPage() {
                       </p>
                     )}
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        disabled={
-                          !providerStatus?.cliInstalled ||
-                          deviceAuthBusy !== null ||
-                          openAiAuthDetected
-                        }
-                        onClick={() => void startOpenAiDeviceAuth()}
-                        style={{
-                          ...btnStyle,
-                          background: "#2563eb",
-                          flex: 1,
-                          opacity:
-                            !providerStatus?.cliInstalled ||
-                            deviceAuthBusy !== null ||
-                            openAiAuthDetected
-                              ? 0.6
-                              : 1,
-                        }}
-                      >
-                        {deviceAuthBusy === "start"
-                          ? "Starting..."
-                          : openAiAuthDetected
-                        ? "ChatGPT Connected"
-                            : "Connect ChatGPT"}
-                      </button>
+                      {!openAiAuthDetected && (
+                        <button
+                          disabled={!providerStatus?.cliInstalled || deviceAuthBusy !== null}
+                          onClick={() => void startOpenAiDeviceAuth()}
+                          style={{
+                            ...btnStyle,
+                            background: "#2563eb",
+                            flex: 1,
+                            opacity:
+                              !providerStatus?.cliInstalled || deviceAuthBusy !== null
+                                ? 0.6
+                                : 1,
+                          }}
+                        >
+                          {deviceAuthBusy === "start" ? "Starting..." : "Connect ChatGPT"}
+                        </button>
+                      )}
                       {(openAiAuthStatus === "starting" ||
                         openAiAuthStatus === "waiting") && (
                         <button

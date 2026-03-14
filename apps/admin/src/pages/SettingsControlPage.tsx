@@ -29,6 +29,9 @@ export function SettingsControlPage() {
   const [serviceForm, setServiceForm] = useState(EMPTY_SERVICE_FORM);
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
   const [savingService, setSavingService] = useState(false);
+  const [instructionsContent, setInstructionsContent] = useState("");
+  const [instructionsUpdatedAt, setInstructionsUpdatedAt] = useState<string | null>(null);
+  const [savingInstructions, setSavingInstructions] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selectedService = useMemo(
@@ -37,13 +40,16 @@ export function SettingsControlPage() {
   );
 
   async function loadSettings() {
-    const [servicesData, schedulesData] = await Promise.all([
+    const [servicesData, schedulesData, instructionsData] = await Promise.all([
       api.getServices(),
       api.getSchedules(),
+      api.getAgentInstructions(),
     ]);
 
     setServices(servicesData || []);
     setSchedules(schedulesData || []);
+    setInstructionsContent(instructionsData?.content || "");
+    setInstructionsUpdatedAt(instructionsData?.updated_at || null);
     setScheduleInputs(
       Object.fromEntries(
         (schedulesData || []).map((schedule) => [schedule.id, schedule.cron_expr || ""])
@@ -143,6 +149,23 @@ export function SettingsControlPage() {
 
     await api.saveSchedule(id, { cron_expr });
     await loadSettings();
+  }
+
+  async function saveAgentInstructions() {
+    setSavingInstructions(true);
+    setError(null);
+    try {
+      const saved = await api.updateAgentInstructions(instructionsContent);
+      setInstructionsUpdatedAt(saved.updated_at || new Date().toISOString());
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : "Failed to save foundational instructions."
+      );
+    } finally {
+      setSavingInstructions(false);
+    }
   }
 
   function startCreateService() {
@@ -427,9 +450,47 @@ export function SettingsControlPage() {
               {schedules.length === 0 && <div style={shellStyles.muted}>No schedules configured.</div>}
             </div>
           </div>
+
+          <div style={shellStyles.card}>
+            <div
+              style={{
+                alignItems: "center",
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: 12,
+              }}
+            >
+              <div>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                  Foundational Instructions
+                </h3>
+                <div style={{ ...shellStyles.muted, marginTop: 4 }}>
+                  Override the baked-in `AGENTS_INSCTRUCTIONS.md` content for future task
+                  launches without rebuilding the image.
+                </div>
+              </div>
+              <div style={shellStyles.muted}>
+                Updated {formatDateTime(instructionsUpdatedAt)}
+              </div>
+            </div>
+            <textarea
+              onChange={(event) => setInstructionsContent(event.target.value)}
+              style={{ ...shellStyles.textarea, minHeight: 240, width: "100%" }}
+              value={instructionsContent}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+              <button
+                disabled={savingInstructions}
+                onClick={() => void saveAgentInstructions()}
+                style={{ ...shellStyles.button, opacity: savingInstructions ? 0.7 : 1 }}
+                type="button"
+              >
+                {savingInstructions ? "Saving..." : "Save Instructions"}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
-

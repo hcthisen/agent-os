@@ -18,5 +18,5 @@ INSERT INTO roles (id, display_name, description, model, effort, is_system_role)
   ('sage',      'Sage',      'Strategic advisor. Thinks deeply, plans carefully, never executes.',        'opus',   'high',   true),
   ('builder',   'Builder',   'General-purpose executor. Writes code, content, and integrations.',         'opus',   'high',   true),
   ('reviewer',  'Reviewer',  'Quality gate. Reviews completed work against acceptance criteria.',         'opus',   'high',   true),
-  ('architect', 'Architect', 'System self-improvement. Approves system modifications.',                   'opus',   'high',   true),
+  ('architect', 'Architect', 'System self-improvement. Owns system modifications.',                       'opus',   'high',   true),
   ('sentinel',  'Sentinel',  'Watchdog. Monitors queue health, cost, auth, and services.',                'sonnet', 'high',   true);

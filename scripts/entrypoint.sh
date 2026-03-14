@@ -49,10 +49,19 @@ if [ -n "${PUBLIC_LIVE_DIR:-}" ]; then
   chmod -R 0777 "$PUBLIC_LIVE_DIR" || true
 fi
 
-# Expose the JWT secret to Postgres as a custom runtime setting so DB-side
-# credential encryption triggers can access it without hardcoding secrets.
-if [ "$#" -ge 2 ] && [ "$1" = "docker-entrypoint.sh" ] && [ "$2" = "postgres" ] && [ -n "${JWT_SECRET:-}" ]; then
-  set -- "$@" -c "app.settings.jwt_secret=${JWT_SECRET}"
+# Expose the JWT secret and service-registry encryption key to Postgres as
+# custom runtime settings so DB-side credential encryption can work on both
+# fresh deployments and upgraded stacks.
+if [ "$#" -ge 2 ] && [ "$1" = "docker-entrypoint.sh" ] && [ "$2" = "postgres" ]; then
+  if [ -n "${JWT_SECRET:-}" ]; then
+    set -- "$@" -c "app.settings.jwt_secret=${JWT_SECRET}"
+  fi
+
+  if [ -n "${SERVICE_REGISTRY_ENCRYPTION_KEY:-}" ]; then
+    set -- "$@" -c "app.settings.service_registry_encryption_key=${SERVICE_REGISTRY_ENCRYPTION_KEY}"
+  elif [ -n "${JWT_SECRET:-}" ]; then
+    set -- "$@" -c "app.settings.service_registry_encryption_key=${JWT_SECRET}"
+  fi
 fi
 
 # Run the actual command

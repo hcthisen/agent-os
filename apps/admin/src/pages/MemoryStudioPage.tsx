@@ -22,6 +22,26 @@ const EMPTY_FORM = {
   tags: "",
 };
 
+function estimateImportChunks(content: string, splitMode: "paragraph" | "sentence"): number {
+  const normalized = content.trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  const chunks =
+    splitMode === "sentence"
+      ? normalized
+          .split(/(?<=[.!?])\s+/)
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length >= 12)
+      : normalized
+          .split(/\n\s*\n+/)
+          .map((entry) => entry.replace(/\s+/g, " ").trim())
+          .filter((entry) => entry.length >= 20);
+
+  return chunks.length;
+}
+
 export function MemoryStudioPage() {
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
@@ -33,6 +53,12 @@ export function MemoryStudioPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [saving, setSaving] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importMode, setImportMode] = useState<"paragraph" | "sentence">("paragraph");
+  const [importSubjectPrefix, setImportSubjectPrefix] = useState("");
+  const [lastImportCount, setLastImportCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
 
@@ -139,6 +165,34 @@ export function MemoryStudioPage() {
     setForm(EMPTY_FORM);
   }
 
+  async function runBulkImport() {
+    setImporting(true);
+    try {
+      const result = await api.bulkImportMemories({
+        confidence: Number(form.confidence) || 1,
+        content: importText,
+        scope_id: form.scope_id || "system",
+        scope_type: form.scope_type || "company",
+        split_mode: importMode,
+        subject_prefix: importSubjectPrefix,
+        tags: parseTagInput(form.tags),
+      });
+      setLastImportCount(result.count || 0);
+      setImportText("");
+      setImportSubjectPrefix("");
+      setImportOpen(false);
+      setMode("knowledge");
+      await loadMemories();
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to import memories.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  const importPreviewCount = estimateImportChunks(importText, importMode);
+
   return (
     <div>
       <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
@@ -148,12 +202,92 @@ export function MemoryStudioPage() {
             Search, filter, create, edit, and switch into knowledge-base mode.
           </p>
         </div>
-        <button onClick={beginCreate} style={shellStyles.button} type="button">
-          Create Memory
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => setImportOpen((current) => !current)}
+            style={{ ...shellStyles.button, ...shellStyles.buttonSecondary }}
+            type="button"
+          >
+            Bulk Import
+          </button>
+          <button onClick={beginCreate} style={shellStyles.button} type="button">
+            Create Memory
+          </button>
+        </div>
       </div>
 
       {error && <div style={{ color: "#fca5a5", marginBottom: 12 }}>{error}</div>}
+      {lastImportCount !== null && (
+        <div style={{ ...shellStyles.card, marginBottom: 12, padding: 12 }}>
+          Imported {lastImportCount} semantic {lastImportCount === 1 ? "memory" : "memories"} into the knowledge base.
+        </div>
+      )}
+
+      {importOpen && (
+        <div style={{ ...shellStyles.card, marginBottom: 16 }}>
+          <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+            <div>
+              <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Bulk Knowledge Import</h3>
+              <p style={{ ...shellStyles.muted, margin: "6px 0 0" }}>
+                Paste a document and split it into semantic memories by paragraph or sentence.
+              </p>
+            </div>
+            <span style={shellStyles.muted}>
+              Estimated entries: {importPreviewCount}
+            </span>
+          </div>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "grid", gap: 12, gridTemplateColumns: "180px 1fr" }}>
+              <div>
+                <label style={shellStyles.label}>Split Mode</label>
+                <select
+                  onChange={(event) => setImportMode(event.target.value as "paragraph" | "sentence")}
+                  style={{ ...shellStyles.input, width: "100%" }}
+                  value={importMode}
+                >
+                  <option value="paragraph">paragraph</option>
+                  <option value="sentence">sentence</option>
+                </select>
+              </div>
+              <div>
+                <label style={shellStyles.label}>Subject Prefix</label>
+                <input
+                  onChange={(event) => setImportSubjectPrefix(event.target.value)}
+                  placeholder="Optional label, e.g. Invoice policy"
+                  style={{ ...shellStyles.input, width: "100%" }}
+                  value={importSubjectPrefix}
+                />
+              </div>
+            </div>
+            <textarea
+              onChange={(event) => setImportText(event.target.value)}
+              placeholder={"Paste a knowledge document here.\n\nSeparate facts with blank lines for paragraph mode, or switch to sentence mode for finer splitting."}
+              style={{ ...shellStyles.textarea, minHeight: 220, width: "100%" }}
+              value={importText}
+            />
+            <div style={{ ...shellStyles.muted }}>
+              Import scope: {form.scope_type}:{form.scope_id || "system"} • tags: {form.tags || "none"}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                disabled={importing || importPreviewCount === 0}
+                onClick={() => void runBulkImport()}
+                style={{ ...shellStyles.button, opacity: importing || importPreviewCount === 0 ? 0.7 : 1 }}
+                type="button"
+              >
+                {importing ? "Importing..." : "Import Memories"}
+              </button>
+              <button
+                onClick={() => setImportOpen(false)}
+                style={{ ...shellStyles.button, ...shellStyles.buttonGhost }}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 180px 180px auto", marginBottom: 16 }}>
         <input
@@ -426,4 +560,3 @@ export function MemoryStudioPage() {
     </div>
   );
 }
-

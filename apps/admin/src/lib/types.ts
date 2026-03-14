@@ -68,10 +68,23 @@ export interface EventRecord {
   created_at: string;
 }
 
+export interface ProviderUsageSummaryRecord {
+  estimated_cost_usd: number | null;
+  event_count: number;
+  total_tokens: number;
+  providers: Array<{
+    estimated_cost_usd: number | null;
+    event_count: number;
+    provider: string;
+    total_tokens: number;
+  }>;
+}
+
 export interface TaskRecord {
   id: string;
   project_id: string | null;
   parent_task_id: string | null;
+  depends_on?: string[] | null;
   title: string;
   objective?: string;
   acceptance_criteria?: string[];
@@ -226,6 +239,7 @@ export interface UsageWindowSummary {
 }
 
 export interface UsageSummaryRecord {
+  provider_usage: ProviderUsageSummaryRecord;
   task_runs: {
     today: UsageWindowSummary;
     week: UsageWindowSummary;
@@ -233,4 +247,23 @@ export interface UsageSummaryRecord {
   };
   recent_artifacts: ArtifactRecord[];
   recent_projects: ProjectRecord[];
+}
+
+export interface LiveActivityRecord {
+  agent_id: string | null;
+  agent_name: string | null;
+  last_activity_at: string | null;
+  last_activity_summary: string | null;
+  role_id: string;
+  started_at: string | null;
+  task_id: string;
+  task_state: string;
+  task_title: string;
+}
+
+export interface AdminStreamSnapshot {
+  generated_at: string;
+  live_activity: LiveActivityRecord[];
+  messages: MessageRecord[];
+  tasks: TaskRecord[];
 }

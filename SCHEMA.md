@@ -253,6 +253,46 @@ search index — that is `memory_chunks`.
 - subject using GIN trigram (fuzzy match)
 - tags using GIN
 
+#### Skills
+
+Skills are a first-class product concept, but the MVP storage model uses `memories`
+rather than a separate `skills` table.
+
+A skill is an active `memories` row where:
+- `layer = 'procedural'`
+- `subject` starts with `skill:`
+- `tags` contains `skill`
+
+`content` stores the canonical skill definition as JSON text. The current contract is:
+
+```json
+{
+  "display_name": "Agent Browser UI Verification",
+  "description": "Use the preinstalled agent-browser workflow for browser-driven QA.",
+  "trigger_when": "When a task requires screenshots, browser interaction, login flows, or visual QA.",
+  "steps": [
+    {
+      "order": 1,
+      "instruction": "Open the target page with agent-browser.",
+      "tool_hint": "agent-browser",
+      "required": true
+    }
+  ],
+  "input_schema": {},
+  "output_schema": {},
+  "required_services": [],
+  "version": 1,
+  "last_used_at": null,
+  "use_count": 0
+}
+```
+
+Versioning is append-only. Editing a skill creates a new procedural memory row and marks
+the previous row inactive via `superseded_by`. Search uses the corresponding
+`memory_chunks` row, which stores a flattened textual view of the skill for hybrid
+retrieval. Bootstrap skills for fresh installations are seeded as company-scoped skills
+with `scope_type = 'company'` and `scope_id = 'system'`.
+
 ### memory_chunks
 
 Derived search index. Generated from memories and artifacts. Used for retrieval, never

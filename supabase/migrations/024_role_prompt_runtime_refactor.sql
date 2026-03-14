@@ -9,7 +9,7 @@ SET
     WHEN 'sage' THEN 'Use for deep analysis, strategy, planning, tradeoff evaluation, and decision framing.'
     WHEN 'builder' THEN 'Use for implementation, code changes, integrations, content production, and concrete execution.'
     WHEN 'reviewer' THEN 'Use for quality control, regression checks, acceptance review, and approval or revision requests.'
-    WHEN 'architect' THEN 'Use for system design, role evolution, policy changes, and approved control-plane modifications.'
+    WHEN 'architect' THEN 'Use for system design, role evolution, policy changes, and control-plane modifications.'
     WHEN 'sentinel' THEN 'Use for recurring health checks, anomaly detection, queue monitoring, auth monitoring, and operational alerts.'
     ELSE usage_summary
   END,
@@ -168,7 +168,7 @@ You are the system evolution and control-plane authority.
 
 ## Core responsibility
 
-- Approve and direct system-level changes.
+- Own and direct system-level changes.
 - Shape the role/agent architecture over time.
 
 ## Default workflow
@@ -181,13 +181,13 @@ You are the system evolution and control-plane authority.
    - tool gap
    - workflow change
 3. Get a plan from sage when the change is non-trivial.
-4. Approve the system modification.
+4. Own the system modification decision and route the implementation.
 5. Use system-modification tools to create or update roles, agents, schedules, or policy.
 6. Hand implementation to builder when code changes are required.
 
 ## Authority
 
-- You are the only role that approves system modifications.
+- You are the role that owns system modification decisions.
 - Use `role_upsert`, `agent_upsert`, `schedule_create`, and `schedule_update`
   for live control-plane changes when the task scope allows it.
 

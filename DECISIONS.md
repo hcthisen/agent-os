@@ -152,6 +152,13 @@ env scrubbing so agent subprocesses do not inherit the full control-plane secret
 This does not create a hard sandbox boundary, but it materially reduces blast radius
 when the provider CLIs must run in bypass mode.
 
+**Narrower mode evaluation:** As of March 14, 2026, neither supported CLI exposes a
+non-interactive background mode that preserves autonomous execution while narrowing
+permissions enough to replace these flags. The current mitigation is to keep the
+headless flags, scrub the child-process env, and continue tightening runtime boundaries
+around the supervisor and MCP path instead of pretending the provider CLIs offer a real
+sandbox here.
+
 ---
 
 ## D-010: The Public Root Domain Is Optional
@@ -278,9 +285,16 @@ must continue to route service control and public-site route actions through sup
 **What still requires redeploy:** New MCP tools, supervisor logic changes, admin UI
 changes, new Docker services, and fundamental schema changes.
 
+**Read-only/proxy evaluation:** A read-only socket mount would break the supervisor's
+existing container lifecycle operations, and a socket proxy would add another moving
+piece without reducing the currently required API surface enough to justify the extra
+operational complexity. The current decision is to keep direct Docker access scoped to
+the supervisor only and revisit a proxy once the control-plane calls are narrower and
+better isolated.
+
 ---
 
-## D-020: Sentinel Runs on a Schedule and Event Triggers
+## D-021: Sentinel Runs on a Schedule and Event Triggers
 
 **Decision:** The sentinel is not a permanently running agent. It is invoked on schedule
 and by selected events.
@@ -290,7 +304,7 @@ alive all day would waste capacity.
 
 ---
 
-## D-021: Append First, Distill Later
+## D-022: Append First, Distill Later
 
 **Decision:** Memory writes during a run are append-first. Distillation into higher-level
 semantic memory happens asynchronously.
@@ -300,7 +314,7 @@ done later without blocking the task that produced the information.
 
 ---
 
-## D-022: Service Registry Uses the "Key Needed" Pattern
+## D-023: Service Registry Uses the "Key Needed" Pattern
 
 **Decision:** Missing third-party credentials are represented explicitly in
 `service_registry` with `status = key_needed`.
@@ -313,7 +327,7 @@ credential through the admin UI.
 
 ---
 
-## D-023: Single Monorepo, Single VPS Deployment
+## D-024: Single Monorepo, Single VPS Deployment
 
 **Decision:** The whole stack deploys as one monorepo onto a VPS through Docker Compose
 and Caddy.

@@ -22,8 +22,12 @@ export interface ServiceRegistryRuntimeRow extends CredentialRow {
   updated_at: string;
 }
 
+function normalizeEncryptedCredential(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
 function looksEncryptedCredential(value: string): boolean {
-  const normalized = value.trim();
+  const normalized = normalizeEncryptedCredential(value);
   return (
     normalized.length >= 40 &&
     normalized.length % 4 === 0 &&
@@ -48,7 +52,7 @@ export async function withDecryptedCredential<T extends CredentialRow>(
   try {
     const db = getDb();
     const { data, error } = await db.rpc("decrypt_credential", {
-      encrypted_text: row.credential,
+      encrypted_text: normalizeEncryptedCredential(row.credential),
       encryption_key: SERVICE_REGISTRY_ENCRYPTION_KEY,
     });
 

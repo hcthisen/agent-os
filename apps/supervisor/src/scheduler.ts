@@ -204,7 +204,10 @@ async function updateScheduleRunWindow(
     ? query.eq("last_run_at", expectedLastRunAt)
     : query.is("last_run_at", null);
 
-  const { data, error } = await query.select("id").limit(1);
+  const { data, error } = await query
+    .select("id")
+    .order("id", { ascending: true })
+    .limit(1);
   if (error) {
     console.error(`Failed to update schedule run window for ${scheduleId}:`, error);
     return false;

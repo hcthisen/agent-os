@@ -63,6 +63,7 @@ const DEFAULT_OPENAI_ROLE_CONFIG = {
 const RELAY_HISTORY_LIMIT = 15;
 const LOGIN_RATE_LIMIT = { max: 10, windowMs: 60 * 1000 };
 const API_RATE_LIMIT = { max: 100, windowMs: 60 * 1000 };
+const STREAM_REFRESH_MS = 2000;
 const MODEL_OPTIONS = new Set(["haiku", "sonnet", "opus"]);
 const EFFORT_OPTIONS = new Set(["low", "medium", "high", "xhigh"]);
 const AGENT_STATUS_OPTIONS = new Set(["active", "paused", "disabled"]);
@@ -78,6 +79,19 @@ const SCOPE_TYPE_OPTIONS = new Set([
 ]);
 const SKILL_TAG = "skill";
 const rateLimitBuckets = new Map();
+const streamClients = new Set();
+let streamHeartbeatCounter = 0;
+let streamIntervalHandle = null;
+let streamLastSignature = "";
+let streamRefreshInFlight = null;
+
+function startOfDayIso(value) {
+  return value ? `${value}T00:00:00.000Z` : null;
+}
+
+function endOfDayIso(value) {
+  return value ? `${value}T23:59:59.999Z` : null;
+}
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -249,6 +263,48 @@ function normalizeStringArray(value) {
       .map((entry) => normalizeString(entry))
       .filter(Boolean)
   )];
+}
+
+function splitKnowledgeImportContent(content, splitMode) {
+  const normalized = normalizeString(content);
+  if (!normalized) {
+    return [];
+  }
+
+  const chunks =
+    splitMode === "sentence"
+      ? normalized
+          .split(/(?<=[.!?])\s+/)
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length >= 12)
+      : normalized
+          .split(/\n\s*\n+/)
+          .map((entry) => entry.replace(/\s+/g, " ").trim())
+          .filter((entry) => entry.length >= 20);
+
+  return [...new Set(chunks)].slice(0, 100);
+}
+
+function deriveImportedMemorySubject(content, subjectPrefix, index) {
+  const prefix = normalizeString(subjectPrefix);
+  if (prefix) {
+    return `${prefix} ${index + 1}`;
+  }
+
+  const firstLine = content
+    .split(/\r?\n/, 1)[0]
+    .replace(/^[\-\*\d\.\)\s]+/, "")
+    .trim();
+  const compact = firstLine.replace(/\s+/g, " ");
+  if (!compact) {
+    return `Imported memory ${index + 1}`;
+  }
+
+  if (compact.length <= 72) {
+    return compact;
+  }
+
+  return `${compact.slice(0, 69).trimEnd()}...`;
 }
 
 function safeJsonParse(value, fallback = {}) {
@@ -434,6 +490,230 @@ async function loadTaskRuns(taskId) {
   }));
 }
 
+async function loadMessagesFeed(options = {}) {
+  const channel = normalizeString(options.channel, "admin_chat") || "admin_chat";
+  const before = normalizeString(options.before);
+  const rawLimit = Number.parseInt(String(options.limit || "50"), 10);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(1, Math.min(rawLimit, 200))
+    : 50;
+  const data = await postgrest("/messages", {
+    query: {
+      ...(before ? { created_at: `lt.${before}` } : {}),
+      channel: `eq.${channel}`,
+      limit: String(limit),
+      order: "created_at.desc",
+      select: "id,direction,sender,content,created_at,task_id,metadata",
+    },
+  });
+  const visibleData =
+    channel === "admin_chat" && Array.isArray(data)
+      ? data.filter((message) => !shouldHideAdminMessage(message))
+      : data || [];
+
+  return Array.isArray(visibleData) ? [...visibleData].reverse() : visibleData;
+}
+
+async function loadTasksFeed(options = {}) {
+  const state = normalizeString(options.state);
+  const before = normalizeString(options.before);
+  const projectId = normalizeString(options.projectId);
+  const queryText = normalizeString(options.queryText);
+  const rawLimit = Number.parseInt(String(options.limit || "50"), 10);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(1, Math.min(rawLimit, 200))
+    : 50;
+  const data = await postgrest("/tasks", {
+    query: {
+      ...(before ? { created_at: `lt.${before}` } : {}),
+      ...(projectId ? { project_id: `eq.${projectId}` } : {}),
+      ...(queryText
+        ? { or: `(title.ilike.*${queryText}*,objective.ilike.*${queryText}*)` }
+        : {}),
+      ...(state && state !== "all" ? { state: `eq.${state}` } : {}),
+      limit: String(limit),
+      order: "created_at.desc",
+      select:
+        "id,title,objective,acceptance_criteria,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id,project_id,due_at",
+    },
+  });
+  const activityMap = await loadLatestTaskActivityMap(
+    Array.isArray(data) ? data.map((task) => task.id) : []
+  );
+
+  return Array.isArray(data)
+    ? data.map((task) => ({
+        ...task,
+        ...(activityMap.get(task.id) || {
+          last_activity_at: null,
+          last_activity_summary: null,
+        }),
+      }))
+    : [];
+}
+
+async function loadLiveActivity() {
+  const tasks = await postgrest("/tasks", {
+    query: {
+      limit: "12",
+      order: "updated_at.desc",
+      select:
+        "id,title,state,assigned_role,claimed_by,created_at,updated_at",
+      state: "in.(claimed,running,blocked_on_agent,in_review)",
+    },
+  }).catch(() => []);
+
+  const taskList = Array.isArray(tasks) ? tasks : [];
+  const taskIds = taskList.map((task) => task.id);
+  const agentIds = [...new Set(taskList.map((task) => task.claimed_by).filter(Boolean))];
+  const [activityMap, agents, taskRuns] = await Promise.all([
+    loadLatestTaskActivityMap(taskIds),
+    agentIds.length
+      ? postgrest("/agents", {
+          query: {
+            id: `in.(${agentIds.join(",")})`,
+            select: "id,name",
+          },
+        }).catch(() => [])
+      : [],
+    taskIds.length
+      ? postgrest("/task_runs", {
+          query: {
+            limit: "50",
+            order: "started_at.desc",
+            select: "task_id,started_at,status",
+            task_id: `in.(${taskIds.join(",")})`,
+          },
+        }).catch(() => [])
+      : [],
+  ]);
+  const agentMap = new Map((agents || []).map((agent) => [agent.id, agent.name]));
+  const runMap = new Map();
+  for (const run of taskRuns || []) {
+    if (!run?.task_id || runMap.has(run.task_id)) {
+      continue;
+    }
+    runMap.set(run.task_id, run);
+  }
+
+  return taskList.map((task) => {
+    const activity = activityMap.get(task.id) || null;
+    const latestRun = runMap.get(task.id) || null;
+    return {
+      agent_id: task.claimed_by || null,
+      agent_name: task.claimed_by ? agentMap.get(task.claimed_by) || null : null,
+      last_activity_at: activity?.created_at || null,
+      last_activity_summary: activity?.summary || null,
+      role_id: task.assigned_role,
+      started_at: latestRun?.started_at || null,
+      task_id: task.id,
+      task_state: task.state,
+      task_title: task.title,
+    };
+  });
+}
+
+async function buildAdminStreamSnapshot() {
+  const [messages, tasks, liveActivity] = await Promise.all([
+    loadMessagesFeed({ channel: "admin_chat", limit: 50 }),
+    loadTasksFeed({ limit: 50 }),
+    loadLiveActivity(),
+  ]);
+
+  return {
+    generated_at: new Date().toISOString(),
+    live_activity: liveActivity,
+    messages,
+    tasks,
+  };
+}
+
+function sendSseMessage(res, eventName, payload) {
+  const json = JSON.stringify(payload);
+  res.write(`event: ${eventName}\n`);
+  for (const line of json.split("\n")) {
+    res.write(`data: ${line}\n`);
+  }
+  res.write("\n");
+}
+
+async function refreshAdminStream(force = false) {
+  if (!streamClients.size) {
+    return;
+  }
+
+  if (streamRefreshInFlight) {
+    await streamRefreshInFlight;
+    return;
+  }
+
+  streamRefreshInFlight = (async () => {
+    try {
+      const snapshot = await buildAdminStreamSnapshot();
+      const signature = JSON.stringify({
+        live_activity: snapshot.live_activity,
+        messages: snapshot.messages,
+        tasks: snapshot.tasks,
+      });
+
+      if (!force && signature === streamLastSignature) {
+        streamHeartbeatCounter += 1;
+        if (streamHeartbeatCounter >= 5) {
+          for (const client of [...streamClients]) {
+            client.write(": keep-alive\n\n");
+          }
+          streamHeartbeatCounter = 0;
+        }
+        return;
+      }
+
+      streamLastSignature = signature;
+      streamHeartbeatCounter = 0;
+      for (const client of [...streamClients]) {
+        sendSseMessage(client, "snapshot", snapshot);
+      }
+    } catch (error) {
+      console.error("[admin] Failed to refresh SSE stream:", error);
+    } finally {
+      streamRefreshInFlight = null;
+    }
+  })();
+
+  await streamRefreshInFlight;
+}
+
+function ensureAdminStreamLoop() {
+  if (streamIntervalHandle || !streamClients.size) {
+    return;
+  }
+
+  streamIntervalHandle = setInterval(() => {
+    void refreshAdminStream(false);
+  }, STREAM_REFRESH_MS);
+}
+
+function maybeStopAdminStreamLoop() {
+  if (streamClients.size || !streamIntervalHandle) {
+    return;
+  }
+
+  clearInterval(streamIntervalHandle);
+  streamIntervalHandle = null;
+  streamLastSignature = "";
+  streamHeartbeatCounter = 0;
+}
+
+async function addAdminStreamClient(res) {
+  streamClients.add(res);
+  ensureAdminStreamLoop();
+  await refreshAdminStream(true);
+}
+
+function removeAdminStreamClient(res) {
+  streamClients.delete(res);
+  maybeStopAdminStreamLoop();
+}
+
 async function loadProjectsWithStats() {
   const [projects, tasks, artifacts] = await Promise.all([
     postgrest("/projects", { query: { order: "display_name.asc", select: "*" } }),
@@ -532,6 +812,57 @@ async function buildUsageSummary() {
     };
   }
 
+  const providerUsageEvents = await postgrest("/events", {
+    query: {
+      event_type: "eq.provider.usage",
+      limit: "500",
+      order: "created_at.desc",
+      select: "detail",
+    },
+  }).catch(() => []);
+  const providerUsageMap = new Map();
+
+  for (const event of providerUsageEvents || []) {
+    const detail = event?.detail && typeof event.detail === "object" ? event.detail : {};
+    const provider = normalizeString(detail.provider || detail.vendor || "unknown");
+    const totalTokens = Number(detail.total_tokens || detail.prompt_tokens || 0) || 0;
+    const estimatedCostRaw = detail.estimated_cost_usd;
+    const estimatedCost =
+      typeof estimatedCostRaw === "number"
+        ? estimatedCostRaw
+        : typeof estimatedCostRaw === "string" && estimatedCostRaw.trim()
+          ? Number(estimatedCostRaw)
+          : null;
+    const current = providerUsageMap.get(provider) || {
+      estimated_cost_known: true,
+      estimated_cost_usd: 0,
+      event_count: 0,
+      provider,
+      total_tokens: 0,
+    };
+
+    current.event_count += 1;
+    current.total_tokens += totalTokens;
+
+    if (estimatedCost === null || Number.isNaN(estimatedCost)) {
+      current.estimated_cost_known = false;
+    } else if (current.estimated_cost_known) {
+      current.estimated_cost_usd += estimatedCost;
+    }
+
+    providerUsageMap.set(provider, current);
+  }
+
+  const providerUsage = [...providerUsageMap.values()]
+    .map((entry) => ({
+      estimated_cost_usd: entry.estimated_cost_known ? entry.estimated_cost_usd : null,
+      event_count: entry.event_count,
+      provider: entry.provider,
+      total_tokens: entry.total_tokens,
+    }))
+    .sort((left, right) => right.total_tokens - left.total_tokens);
+  const knownCosts = providerUsage.filter((entry) => entry.estimated_cost_usd !== null);
+
   const recentArtifacts = await postgrest("/artifacts", {
     query: {
       limit: "8",
@@ -542,6 +873,15 @@ async function buildUsageSummary() {
   const recentProjects = (await loadProjectsWithStats()).slice(0, 6);
 
   return {
+    provider_usage: {
+      estimated_cost_usd:
+        knownCosts.length === providerUsage.length
+          ? knownCosts.reduce((total, entry) => total + (entry.estimated_cost_usd || 0), 0)
+          : null,
+      event_count: providerUsage.reduce((total, entry) => total + entry.event_count, 0),
+      providers: providerUsage,
+      total_tokens: providerUsage.reduce((total, entry) => total + entry.total_tokens, 0),
+    },
     recent_artifacts: recentArtifacts || [],
     recent_projects: recentProjects,
     task_runs: {
@@ -795,6 +1135,7 @@ async function buildRelayObjective(message) {
   const teachMode =
     /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
   const history = await loadRecentConversationMessages(message);
+  const matchedSkills = await loadRelayMatchedSkills(content);
   const transcript = [...history, {
     content,
     created_at: new Date().toISOString(),
@@ -817,8 +1158,127 @@ Routing reminders:
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
 - If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
+- If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can follow the existing procedure instead of recreating it.
+
+Matched shared skills for this message:
+${formatRelayMatchedSkills(matchedSkills)}
 
 Teach mode detected: ${teachMode ? "yes" : "no"}.`;
+}
+
+async function loadRelayMatchedSkills(content) {
+  if (!content) {
+    return [];
+  }
+
+  const rows = await postgrest("/memories", {
+    query: {
+      is_active: "eq.true",
+      layer: "eq.procedural",
+      limit: "50",
+      order: "updated_at.desc",
+      select:
+        "id,subject,content,tags,scope_type,scope_id,is_active,created_at,updated_at,superseded_by,source_agent_id",
+    },
+  }).catch((error) => {
+    console.error("[admin] Failed to load relay skill matches:", error);
+    return [];
+  });
+
+  return (rows || [])
+    .filter((row) => Array.isArray(row.tags) && row.tags.includes(SKILL_TAG))
+    .map(parseSkillMemoryRow)
+    .filter((skill) =>
+      skill &&
+      (skill.scope_type === "company" ||
+        (skill.scope_type === "role" && skill.scope_id === "relay"))
+    )
+    .map((skill) => ({
+      ...skill,
+      match_score: scoreRelaySkillMatch(skill, content),
+    }))
+    .filter((skill) => skill.match_score > 0)
+    .sort((left, right) => {
+      if (right.match_score !== left.match_score) {
+        return right.match_score - left.match_score;
+      }
+      if (right.use_count !== left.use_count) {
+        return right.use_count - left.use_count;
+      }
+      return right.updated_at.localeCompare(left.updated_at);
+    })
+    .slice(0, 3);
+}
+
+function formatRelayMatchedSkills(skills) {
+  if (!skills.length) {
+    return "- No obvious shared skill match detected.";
+  }
+
+  return skills
+    .map((skill) => {
+      const steps = skill.steps
+        .slice(0, 3)
+        .map((step) => `${step.order}. ${step.instruction}`)
+        .join(" ");
+      return [
+        `- ${skill.display_name} (${skill.name})`,
+        skill.trigger_when ? `  Trigger: ${skill.trigger_when}` : null,
+        steps ? `  Steps: ${steps}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+}
+
+function scoreRelaySkillMatch(skill, content) {
+  const haystack = normalizeRelayMatchText(content);
+  if (!haystack) {
+    return 0;
+  }
+
+  const fields = [
+    skill.name,
+    skill.display_name,
+    skill.description,
+    skill.trigger_when,
+    ...(skill.tags || []),
+    ...(skill.steps || []).map((step) => step.instruction),
+  ]
+    .map((value) => normalizeRelayMatchText(value))
+    .filter(Boolean);
+
+  let score = 0;
+  for (const field of fields) {
+    if (!field) {
+      continue;
+    }
+
+    if (haystack.includes(field) || field.includes(haystack)) {
+      score += 6;
+      continue;
+    }
+
+    const fieldTokens = new Set(tokenizeRelayMatchText(field));
+    const sharedTokens = tokenizeRelayMatchText(haystack).filter((token) =>
+      fieldTokens.has(token)
+    );
+    score += sharedTokens.length;
+  }
+
+  return score;
+}
+
+function normalizeRelayMatchText(value) {
+  return normalizeString(value).toLowerCase().replace(/[^a-z0-9\s:-]+/g, " ");
+}
+
+function tokenizeRelayMatchText(value) {
+  return normalizeRelayMatchText(value)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
 }
 
 function formatConversationMessage(message) {
@@ -1496,30 +1956,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (pathname === "/api/messages" && req.method === "GET") {
-    const channel = searchParams.get("channel") || "admin_chat";
-    const before = searchParams.get("before");
-    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
-    const limit = Number.isFinite(rawLimit)
-      ? Math.max(1, Math.min(rawLimit, 200))
-      : 50;
-    const data = await postgrest("/messages", {
-      query: {
-        ...(before ? { created_at: `lt.${before}` } : {}),
-        channel: `eq.${channel}`,
-        limit: String(limit),
-        order: "created_at.desc",
-        select: "id,direction,sender,content,created_at,task_id,metadata",
-      },
+  if (pathname === "/api/stream" && req.method === "GET") {
+    res.writeHead(200, {
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no",
     });
-    const visibleData =
-      channel === "admin_chat" && Array.isArray(data)
-        ? data.filter((message) => !shouldHideAdminMessage(message))
-        : data || [];
+    res.write(": connected\n\n");
+    await addAdminStreamClient(res);
+    req.on("close", () => removeAdminStreamClient(res));
+    return;
+  }
+
+  if (pathname === "/api/messages" && req.method === "GET") {
     sendJson(
       res,
       200,
-      Array.isArray(visibleData) ? [...visibleData].reverse() : visibleData
+      await loadMessagesFeed({
+        before: searchParams.get("before"),
+        channel: searchParams.get("channel") || "admin_chat",
+        limit: searchParams.get("limit") || "50",
+      })
     );
     return;
   }
@@ -1592,41 +2050,22 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/tasks" && req.method === "GET") {
-    const state = searchParams.get("state");
-    const before = searchParams.get("before");
-    const projectId = searchParams.get("project_id");
-    const queryText = searchParams.get("q");
-    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
-    const limit = Number.isFinite(rawLimit)
-      ? Math.max(1, Math.min(rawLimit, 200))
-      : 50;
-    const data = await postgrest("/tasks", {
-      query: {
-        ...(before ? { created_at: `lt.${before}` } : {}),
-        ...(projectId ? { project_id: `eq.${projectId}` } : {}),
-        ...(queryText
-          ? { or: `(title.ilike.*${queryText}*,objective.ilike.*${queryText}*)` }
-          : {}),
-        ...(state && state !== "all" ? { state: `eq.${state}` } : {}),
-        limit: String(limit),
-        order: "created_at.desc",
-        select:
-          "id,title,objective,acceptance_criteria,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id,project_id,due_at",
-      },
-    });
-    const activityMap = await loadLatestTaskActivityMap(
-      Array.isArray(data) ? data.map((task) => task.id) : []
+    sendJson(
+      res,
+      200,
+      await loadTasksFeed({
+        before: searchParams.get("before"),
+        limit: searchParams.get("limit") || "50",
+        projectId: searchParams.get("project_id"),
+        queryText: searchParams.get("q"),
+        state: searchParams.get("state"),
+      })
     );
-    const tasksWithActivity = Array.isArray(data)
-      ? data.map((task) => ({
-          ...task,
-          ...(activityMap.get(task.id) || {
-            last_activity_at: null,
-            last_activity_summary: null,
-          }),
-        }))
-      : [];
-    sendJson(res, 200, tasksWithActivity);
+    return;
+  }
+
+  if (pathname === "/api/live-activity" && req.method === "GET") {
+    sendJson(res, 200, await loadLiveActivity());
     return;
   }
 
@@ -2028,6 +2467,61 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/memories/bulk-import" && req.method === "POST") {
+    const body = await readJson(req);
+    const splitMode = normalizeString(body.split_mode, "paragraph").toLowerCase();
+    const chunks = splitKnowledgeImportContent(body.content, splitMode);
+
+    if (!chunks.length) {
+      sendJson(res, 400, { error: "content must contain at least one importable fact" });
+      return;
+    }
+
+    const scopeType = normalizeString(body.scope_type, "company").toLowerCase();
+    const scopeId = normalizeString(body.scope_id, scopeType === "company" ? "system" : "");
+    const tags = normalizeStringArray(body.tags);
+    const confidence = Number(body.confidence ?? 1);
+    const created = [];
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const content = chunks[index];
+      const rows = await postgrest("/memories", {
+        body: {
+          confidence,
+          content,
+          is_active: true,
+          layer: "semantic",
+          scope_id: scopeId,
+          scope_type: scopeType,
+          source_agent_id: null,
+          subject: deriveImportedMemorySubject(content, body.subject_prefix, index),
+          tags,
+        },
+        method: "POST",
+        preferRepresentation: true,
+      });
+      const memory = rows?.[0] || null;
+      if (!memory?.id) {
+        continue;
+      }
+
+      await upsertMemoryChunk(
+        memory.id,
+        memory.scope_type,
+        memory.scope_id,
+        `${memory.subject}: ${memory.content}`
+      );
+      created.push(memory);
+    }
+
+    sendJson(res, 201, {
+      count: created.length,
+      memories: created,
+      split_mode: splitMode === "sentence" ? "sentence" : "paragraph",
+    });
+    return;
+  }
+
   if (pathname === "/api/memories" && req.method === "POST") {
     const body = await readJson(req);
     const layer = normalizeString(body.layer).toLowerCase();
@@ -2107,15 +2601,25 @@ async function handleApi(req, res, url) {
 
   if (pathname === "/api/events" && req.method === "GET") {
     const before = searchParams.get("before");
+    const eventType = normalizeString(searchParams.get("event_type"));
+    const severity = normalizeString(searchParams.get("severity"));
+    const agentId = normalizeString(searchParams.get("agent_id"));
+    const dateFrom = startOfDayIso(normalizeString(searchParams.get("date_from")));
+    const dateTo = endOfDayIso(normalizeString(searchParams.get("date_to")));
     const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
     const limit = Number.isFinite(rawLimit)
       ? Math.max(1, Math.min(rawLimit, 200))
       : 50;
     const data = await postgrest("/events", {
       query: {
+        ...(agentId ? { agent_id: `eq.${agentId}` } : {}),
         ...(before ? { created_at: `lt.${before}` } : {}),
+        ...(dateFrom ? { created_at: `gte.${dateFrom}` } : {}),
+        ...(dateTo ? { created_at: `lte.${dateTo}` } : {}),
+        ...(eventType ? { event_type: `ilike.*${eventType}*` } : {}),
         limit: String(limit),
         order: "created_at.desc",
+        ...(severity ? { severity: `eq.${severity}` } : {}),
         select: "*",
       },
     });
@@ -2400,10 +2904,11 @@ async function handleApi(req, res, url) {
     const limit = Number.isFinite(rawLimit)
       ? Math.max(1, Math.min(rawLimit, 200))
       : 100;
+    const skillQuery = normalizeString(searchParams.get("q"));
     const rows = await postgrest("/memories", {
       query: {
-        ...(searchParams.get("q")
-          ? { subject: `ilike.*${searchParams.get("q")}*` }
+        ...(skillQuery
+          ? { or: `(subject.ilike.*${skillQuery}*,content.ilike.*${skillQuery}*)` }
           : {}),
         ...(searchParams.get("scope_type")
           ? { scope_type: `eq.${searchParams.get("scope_type")}` }

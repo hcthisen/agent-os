@@ -172,6 +172,14 @@ export function AgentsControlPage() {
     return () => window.clearInterval(interval);
   }, [openAiDeviceAuth]);
 
+  const openAiAuthStatus =
+    openAiDeviceAuth?.status ||
+    (runtimeProvider?.providerStatus?.openai?.authDetected ? "complete" : "idle");
+  const openAiAuthDetected =
+    openAiDeviceAuth?.authDetected ||
+    runtimeProvider?.providerStatus?.openai?.authDetected ||
+    false;
+
   async function saveRole() {
     setSavingRole(true);
     setError(null);
@@ -372,22 +380,29 @@ export function AgentsControlPage() {
                 </div>
                 {provider === "openai" && (
                   <div style={{ marginTop: 10 }}>
-                    {openAiDeviceAuth?.userCode && !openAiDeviceAuth.authDetected && (
+                    {openAiDeviceAuth?.userCode && !openAiAuthDetected && (
                       <div style={{ ...shellStyles.muted, marginBottom: 6 }}>
                         Code: <span style={shellStyles.inlineCode}>{openAiDeviceAuth.userCode}</span>
                       </div>
                     )}
+                    {openAiAuthDetected && (
+                      <div style={{ color: "#22c55e", fontSize: 12, marginBottom: 8 }}>
+                        ChatGPT subscription login is connected on the supervisor.
+                      </div>
+                    )}
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        disabled={deviceAuthBusy !== null || openAiDeviceAuth?.authDetected}
-                        onClick={() => void startOpenAiDeviceAuth()}
-                        style={{ ...shellStyles.button, opacity: deviceAuthBusy ? 0.7 : 1 }}
-                        type="button"
-                      >
-                        Connect ChatGPT
-                      </button>
-                      {(openAiDeviceAuth?.status === "starting" ||
-                        openAiDeviceAuth?.status === "waiting") && (
+                      {!openAiAuthDetected && (
+                        <button
+                          disabled={deviceAuthBusy !== null}
+                          onClick={() => void startOpenAiDeviceAuth()}
+                          style={{ ...shellStyles.button, opacity: deviceAuthBusy ? 0.7 : 1 }}
+                          type="button"
+                        >
+                          {deviceAuthBusy === "start" ? "Starting..." : "Connect ChatGPT"}
+                        </button>
+                      )}
+                      {(openAiAuthStatus === "starting" ||
+                        openAiAuthStatus === "waiting") && (
                         <button
                           disabled={deviceAuthBusy !== null}
                           onClick={() => void cancelOpenAiDeviceAuth()}

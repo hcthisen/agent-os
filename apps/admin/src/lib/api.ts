@@ -107,6 +107,19 @@ export const api = {
       "confidence" | "content" | "layer" | "scope_id" | "scope_type" | "subject" | "tags"
     >
   ) => apiPost<MemoryRecord>("/memories", payload),
+  bulkImportMemories: (payload: {
+    confidence?: number;
+    content: string;
+    scope_id: string;
+    scope_type: string;
+    split_mode?: "paragraph" | "sentence";
+    subject_prefix?: string;
+    tags?: string[];
+  }) =>
+    apiPost<{ count: number; memories: MemoryRecord[]; split_mode: string }>(
+      "/memories/bulk-import",
+      payload
+    ),
   createProject: (
     payload: Pick<ProjectRecord, "description" | "display_name" | "repo_url" | "slug">
   ) => apiPost<ProjectRecord>("/projects", payload),
@@ -157,11 +170,24 @@ export const api = {
         task_id: options?.task_id,
       })}`
     ),
-  getEvents: (options?: { before?: string; limit?: number }): Promise<EventRecord[]> =>
+  getEvents: (options?: {
+    agent_id?: string;
+    before?: string;
+    date_from?: string;
+    date_to?: string;
+    event_type?: string;
+    limit?: number;
+    severity?: string;
+  }): Promise<EventRecord[]> =>
     apiGet<EventRecord[]>(
       `/events${buildQueryString({
+        agent_id: options?.agent_id,
         before: options?.before,
+        date_from: options?.date_from,
+        date_to: options?.date_to,
+        event_type: options?.event_type,
         limit: options?.limit || 50,
+        severity: options?.severity,
       })}`
     ),
   getMemoriesPage: (options?: {
@@ -202,6 +228,8 @@ export const api = {
   getServices: (): Promise<ServiceEntryRecord[]> =>
     apiGet<ServiceEntryRecord[]>("/services"),
   getSession: (): Promise<any> => apiGet<any>("/auth/session"),
+  getAgentInstructions: (): Promise<{ content: string; updated_at: string | null }> =>
+    apiGet<{ content: string; updated_at: string | null }>("/settings/agent-instructions"),
   getSkill: (skillId: string) => apiGet<SkillDetailRecord>(`/skills/${skillId}`),
   getSkills: (options?: {
     limit?: number;
@@ -270,6 +298,11 @@ export const api = {
     apiPost<void>(`/schedules/${scheduleId}/toggle`, { enabled }),
   startOpenAiDeviceAuth: (): Promise<any> =>
     apiPost<any>("/runtime/provider/openai/device-auth/start"),
+  updateAgentInstructions: (content: string) =>
+    apiPatch<{ content: string; updated_at: string | null }>(
+      "/settings/agent-instructions",
+      { content }
+    ),
   updateAgent: (agentId: string, payload: Partial<AgentRecord>) =>
     apiPatch<AgentRecord>(`/agents/${agentId}`, payload),
   updateMemory: (

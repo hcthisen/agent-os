@@ -90,6 +90,19 @@ function WindowCard({
   );
 }
 
+function formatUsd(value: number | null): string {
+  if (value === null || Number.isNaN(value)) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    currency: "USD",
+    maximumFractionDigits: value < 10 ? 3 : 2,
+    minimumFractionDigits: value < 10 ? 3 : 2,
+    style: "currency",
+  }).format(value);
+}
+
 export function OverviewPage({
   onOpenProject,
   onOpenTask,
@@ -156,6 +169,68 @@ export function OverviewPage({
           <WindowCard title="Today" window={usage.task_runs.today} />
           <WindowCard title="This Week" window={usage.task_runs.week} />
           <WindowCard title="This Month" window={usage.task_runs.month} />
+        </div>
+      )}
+
+      {usage && (
+        <div style={{ ...shellStyles.card, marginBottom: 18 }}>
+          <div
+            style={{
+              alignItems: "center",
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: 12,
+            }}
+          >
+            <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Provider Usage</h3>
+            <span style={shellStyles.muted}>
+              {usage.provider_usage.event_count} usage events
+            </span>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gap: 12,
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              marginBottom: 12,
+            }}
+          >
+            <div>
+              <div style={shellStyles.muted}>Total Tokens</div>
+              <div style={{ color: "#f8fafc", fontSize: 22, fontWeight: 700 }}>
+                {usage.provider_usage.total_tokens.toLocaleString()}
+              </div>
+            </div>
+            <div>
+              <div style={shellStyles.muted}>Estimated Cost</div>
+              <div style={{ color: "#f8fafc", fontSize: 22, fontWeight: 700 }}>
+                {formatUsd(usage.provider_usage.estimated_cost_usd)}
+              </div>
+            </div>
+          </div>
+          {usage.provider_usage.providers.length === 0 ? (
+            <div style={shellStyles.muted}>No provider usage events recorded yet.</div>
+          ) : (
+            usage.provider_usage.providers.map((provider) => (
+              <div
+                key={provider.provider}
+                style={{
+                  borderTop: "1px solid #1f2937",
+                  display: "grid",
+                  gap: 8,
+                  gridTemplateColumns: "minmax(120px, 0.8fr) 1fr auto auto",
+                  padding: "10px 0",
+                }}
+              >
+                <div style={{ color: "#dbeafe", fontWeight: 600 }}>{provider.provider}</div>
+                <div style={shellStyles.muted}>{provider.event_count} events</div>
+                <div style={shellStyles.muted}>
+                  {provider.total_tokens.toLocaleString()} tokens
+                </div>
+                <div style={{ color: "#bfdbfe" }}>{formatUsd(provider.estimated_cost_usd)}</div>
+              </div>
+            ))
+          )}
         </div>
       )}
 

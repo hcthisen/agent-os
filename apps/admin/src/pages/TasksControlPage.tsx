@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime, formatDurationMs } from "../lib/format";
+import { subscribeAdminStream } from "../lib/stream";
 import type {
   ProjectRecord,
   RoleRecord,
@@ -38,6 +39,10 @@ function splitAcceptanceCriteria(value: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function shortTaskId(id: string | null | undefined): string {
+  return id ? id.slice(0, 8) : "unknown";
 }
 
 export function TasksControlPage({
@@ -163,15 +168,42 @@ export function TasksControlPage({
     };
 
     void refresh();
-    const interval = window.setInterval(() => {
-      void refresh();
-    }, 5000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
     };
   }, [filter, projectFilter, query]);
+
+  useEffect(() => {
+    return subscribeAdminStream((snapshot) => {
+      if (filter === "all" && projectFilter === "all" && !query.trim()) {
+        setTasks((current) => mergeTasks(snapshot.tasks || [], current));
+      } else {
+        void loadTasks().catch((nextError) => {
+          setError(nextError instanceof Error ? nextError.message : "Failed to refresh tasks.");
+        });
+      }
+
+      if (!selectedTaskId) {
+        return;
+      }
+
+      const streamedTask = (snapshot.tasks || []).find(
+        (task) => task.id === selectedTaskId
+      );
+      const hasLiveActivity = (snapshot.live_activity || []).some(
+        (entry) => entry.task_id === selectedTaskId
+      );
+
+      if (
+        (streamedTask &&
+          streamedTask.updated_at !== taskDetail?.task?.updated_at) ||
+        hasLiveActivity
+      ) {
+        void selectTask(selectedTaskId);
+      }
+    });
+  }, [filter, projectFilter, query, selectedTaskId, taskDetail?.task?.updated_at]);
 
   useEffect(() => {
     if (focusTaskId) {
@@ -671,6 +703,74 @@ export function TasksControlPage({
                     )}
                   </div>
                 </div>
+
+                <div style={shellStyles.card}>
+                  <strong>Task Graph</strong>
+                  <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+                    {taskDetail.parent_task && (
+                      <button
+                        onClick={() => void selectTask(taskDetail.parent_task!.id)}
+                        style={graphNodeStyle}
+                        type="button"
+                      >
+                        <div style={graphLabelStyle}>Parent</div>
+                        <div style={graphTitleStyle}>{taskDetail.parent_task.title}</div>
+                        <div style={shellStyles.muted}>
+                          {shortTaskId(taskDetail.parent_task.id)} | {taskDetail.parent_task.assigned_role}
+                        </div>
+                      </button>
+                    )}
+
+                    <div
+                      style={{
+                        ...graphNodeStyle,
+                        borderColor: "#3b82f6",
+                        cursor: "default",
+                      }}
+                    >
+                      <div style={graphLabelStyle}>Current</div>
+                      <div style={graphTitleStyle}>{taskDetail.task.title}</div>
+                      <div style={shellStyles.muted}>
+                        {shortTaskId(taskDetail.task.id)} | {taskDetail.task.assigned_role}
+                      </div>
+                    </div>
+
+                    {taskDetail.task.depends_on && taskDetail.task.depends_on.length > 0 && (
+                      <div style={graphNodeStyle}>
+                        <div style={graphLabelStyle}>Depends On</div>
+                        <div style={{ ...shellStyles.muted, lineHeight: 1.7 }}>
+                          {taskDetail.task.depends_on.map((dependencyId) => (
+                            <div key={dependencyId}>{shortTaskId(dependencyId)}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {taskDetail.child_tasks.length > 0 && (
+                      <div style={graphNodeStyle}>
+                        <div style={graphLabelStyle}>Children</div>
+                        <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                          {taskDetail.child_tasks.map((child) => (
+                            <button
+                              key={child.id}
+                              onClick={() => void selectTask(child.id)}
+                              style={{
+                                ...graphNodeStyle,
+                                background: "#090b11",
+                              }}
+                              type="button"
+                            >
+                              <div style={graphTitleStyle}>{child.title}</div>
+                              <div style={shellStyles.muted}>
+                                {shortTaskId(child.id)} | {child.assigned_role} | {child.state}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -679,3 +779,29 @@ export function TasksControlPage({
     </div>
   );
 }
+
+const graphNodeStyle: React.CSSProperties = {
+  background: "transparent",
+  border: "1px solid #253247",
+  borderRadius: 10,
+  color: "inherit",
+  cursor: "pointer",
+  padding: 12,
+  textAlign: "left",
+};
+
+const graphLabelStyle: React.CSSProperties = {
+  color: "#60a5fa",
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: "0.04em",
+  marginBottom: 6,
+  textTransform: "uppercase",
+};
+
+const graphTitleStyle: React.CSSProperties = {
+  color: "#f8fafc",
+  fontSize: 14,
+  fontWeight: 600,
+  marginBottom: 4,
+};

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { formatDateTime } from "../lib/format";
 import { renderMarkdown } from "../lib/markdown";
+import { subscribeAdminStream } from "../lib/stream";
 import type { MessageRecord } from "../lib/types";
 import { shellStyles, statusChipStyle } from "../lib/ui";
 
@@ -120,32 +121,16 @@ export function ChatPage({
   }
 
   useEffect(() => {
-    let cancelled = false;
+    void loadLatestMessages().catch((nextError) => {
+      setError(
+        nextError instanceof Error ? nextError.message : "Failed to load chat history."
+      );
+    });
 
-    const refresh = async () => {
-      if (cancelled) {
-        return;
-      }
-
-      try {
-        await loadLatestMessages();
-        setError(null);
-      } catch (nextError) {
-        setError(
-          nextError instanceof Error ? nextError.message : "Failed to load chat history."
-        );
-      }
-    };
-
-    void refresh();
-    const interval = window.setInterval(() => {
-      void refresh();
-    }, 2000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
+    return subscribeAdminStream((snapshot) => {
+      setMessages((current) => mergeMessages(current, snapshot.messages || []));
+      setError(null);
+    });
   }, []);
 
   useEffect(() => {

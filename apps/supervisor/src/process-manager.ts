@@ -990,6 +990,11 @@ function buildProviderAuthEnv(
   };
 }
 
+export const processManagerTestHooks = {
+  buildChildProcessEnv,
+  buildPerTaskMcpEnv,
+};
+
 async function ensureProviderAuth(provider: RuntimeProvider): Promise<void> {
   if (provider === "anthropic") {
     const credentialPaths = [
@@ -1419,6 +1424,7 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 - When done, update the task state and write a handoff note.
 - Log all side effects via event_log.
 - Write durable facts to memory via memory_write.
+- If you use a shared skill from TASK_BRIEFING.md, call skill_log_use before completion so the system can track reuse and improve ranking over time.
 - Use task_create with depends_on when the work benefits from a staged task graph. You can start implementation now and queue follow-up review or remediation tasks that wait on prerequisite tasks automatically.
 - For visual QA, screenshots, layout review, login flows, or browser interaction, use the preinstalled agent-browser workflow. Do not try to install Chromium, Playwright, or other browser runtimes inside the task workspace.
 - Use service_require before credentialed third-party integrations and block if the service is not active yet.

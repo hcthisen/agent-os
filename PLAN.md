@@ -11,8 +11,16 @@ memory, shared skills, and full operator control.
 3. Check the box `[x]` when a task is complete.
 4. Do not skip to the next phase while the current phase has unfinished blocking tasks.
 5. Every single implementation must be tested before it is marked complete. Use the live VPS for end-to-end validation whenever the change affects runtime behavior, deployment, credentials, agent execution, or the admin control plane.
-6. Record the verification method used for each completed implementation task before considering it done.
-7. Update this file after completing each task.
+6. Fresh-deployment testing can also be performed locally with Docker Desktop on this workstation. Use it for clean-install, first-boot, migration-order, and compose bring-up verification before or alongside VPS validation when that is faster or safer.
+7. Record the verification method used for each completed implementation task before considering it done.
+8. Update this file after completing each task.
+
+**Execution Reset:**
+- Some work has already landed out of order in the repository and on the live VPS.
+- From this point forward, implementation must resume from the earliest unfinished
+  blocking phase and proceed in order.
+- For planning and close-out purposes, later-phase work may exist, but no later phase
+  should be considered complete while an earlier blocking phase remains open.
 
 ---
 
@@ -26,48 +34,72 @@ addressed before adding more capabilities.
 **Duration:** 2-3 days
 
 ### 0.1 Scrub child process environment
-- [ ] In `apps/supervisor/src/process-manager.ts`, build an explicit allowlist of env
+- [x] In `apps/supervisor/src/process-manager.ts`, build an explicit allowlist of env
   vars passed to provider CLI subprocesses. Remove `SUPABASE_SERVICE_KEY`,
   `POSTGRES_PASSWORD`, `JWT_SECRET`, and any other secrets not needed by the agent.
   The agent only needs: `AGENT_ID`, `ROLE_ID`, `RUN_ID`, `TRACE_ID`, `WORKSPACE_DIR`,
   `MCP_CONFIG_PATH`, `PUBLIC_LIVE_DIR`, `PUBLIC_SITE_URL`, `ROOT_DOMAIN`, and provider-
   specific auth paths.
-- [ ] Verify the MCP server still receives its required secrets through its own
+- [x] Verify the MCP server still receives its required secrets through its own
   `mcp-config.json` env block (it does - this is already scoped per-task in
   `process-manager.ts`). Confirm no regression.
+Verification used: local `processManagerTestHooks` checks in built supervisor output and
+live VPS container checks confirmed `buildChildProcessEnv()` excludes
+`SUPABASE_SERVICE_KEY`, `JWT_SECRET`, and `POSTGRES_PASSWORD`, while
+`buildPerTaskMcpEnv()` still provides the scoped MCP credentials.
 
 ### 0.2 Review provider CLI bypass flags
-- [ ] Document the current bypass flags used for each provider:
+- [x] Document the current bypass flags used for each provider:
   - Claude: `--dangerously-skip-permissions`
   - Codex: `--dangerously-bypass-approvals-and-sandbox`
-- [ ] Evaluate whether any narrower permission mode exists for each CLI. If not, document
+- [x] Evaluate whether any narrower permission mode exists for each CLI. If not, document
   the rationale in `DECISIONS.md` as a formal decision (D-009 already covers this, but
   add a note about the env-scrub mitigation).
+Verification used: `apps/supervisor/src/process-manager.ts` launch flags were rechecked
+against `DECISIONS.md`, and D-009 now records the current flag set plus the March 14,
+2026 decision that no narrower autonomous mode is available today.
 
 ### 0.3 Narrow Docker socket exposure
-- [ ] In `docker-compose.vps.yaml`, the Docker socket is mounted into both supervisor and
+- [x] In `docker-compose.vps.yaml`, the Docker socket is mounted into both supervisor and
   MCP. Evaluate whether MCP actually needs it (MCP calls the supervisor's control-plane
   HTTP endpoint, not Docker directly). If MCP does not need the socket, remove its mount.
-- [ ] For the supervisor, evaluate restricting to read-only or using a Docker socket proxy
+- [x] For the supervisor, evaluate restricting to read-only or using a Docker socket proxy
   like `tecnativa/docker-socket-proxy` that only exposes the `containers` API.
-- [ ] Document findings and decision in `DECISIONS.md`.
+- [x] Document findings and decision in `DECISIONS.md`.
+Verification used: repo compose review confirmed the VPS overlay mounts the Docker socket
+only into `supervisor`, not `mcp`, and D-020 now records the decision to keep direct
+Docker access limited to the supervisor for the current control-plane surface.
 
 ### 0.4 Fix credential encryption in service_registry
-- [ ] The admin server (`apps/admin/server.mjs`) patches `credential` as plaintext via
+- [x] The admin server (`apps/admin/server.mjs`) patches `credential` as plaintext via
   PostgREST. The `encrypt_credential()` PGP function exists in migration 017 but is not
   called. Options:
   1. Add a DB trigger on `service_registry` that auto-encrypts `credential` on
      INSERT/UPDATE using `encrypt_credential()`.
   2. Or call the RPC from `server.mjs` before writing.
-- [ ] Choose option 1 (DB trigger) for defense-in-depth. Implement migration.
-- [ ] Update MCP `services.ts` to call `decrypt_credential()` when reading, or ensure
+- [x] Choose option 1 (DB trigger) for defense-in-depth. Implement migration.
+- [x] Update MCP `services.ts` to call `decrypt_credential()` when reading, or ensure
   the DB trigger approach handles decryption transparently.
-- [ ] Verify on VPS that existing plaintext credentials are re-encrypted.
+- [x] Verify on VPS that existing plaintext credentials are re-encrypted.
+Verification used: local Docker fresh-stack DB roundtrip stored a plaintext test
+credential as normalized ciphertext and returned the decrypted runtime value through
+`get_service_registry_runtime()`. On the live VPS, the DB was restarted with the runtime
+key setting, migration `035_service_registry_encryption_runtime_fix.sql` was applied as
+`supabase_admin`, `service_registry_encryption_key()` returned length `64`, and
+`service_registry` moved from `2|2` credentials/plaintext rows to `2|0`.
 
 ### 0.5 Phase 0 verification
-- [ ] `npm run build` succeeds for all affected workspaces.
-- [ ] Deploy to VPS and confirm agents still launch, claim tasks, and use MCP tools.
-- [ ] Confirm agent subprocess env no longer contains DB passwords or JWT secrets.
+- [x] `npm run build` succeeds for all affected workspaces.
+- [x] Fresh deployment / rebuild validation passes locally in Docker Desktop for the
+  affected services or compose stack, including env wiring and startup health.
+- [x] Deploy to VPS and confirm agents still launch, claim tasks, and use MCP tools.
+- [x] Confirm agent subprocess env no longer contains DB passwords or JWT secrets.
+Verification used: local Docker Desktop fresh bring-up (`init`, `db`, `rest`,
+`supervisor`, `admin`) went healthy and passed the encryption roundtrip. On the live VPS,
+`db`, `rest`, `supervisor`, and `admin` were rebuilt/recreated successfully; health checks
+ returned `200`; supervisor logs showed async workers and workspace cleanup resuming; a
+ disposable builder verification task completed and emitted `task.runtime_verification`
+ via MCP, then its task, events, and task_runs were deleted from the live DB.
 
 ---
 
@@ -202,15 +234,32 @@ status. The backend credential endpoint exists but only handles `key_needed` →
   clickable badge that switches to the Tasks tab and highlights that task.
 
 ### 1.7 Phase 1 verification
-- [ ] `npm run build` succeeds for admin, supervisor, shared.
-- [ ] All new API endpoints return correct responses (test manually or via
+- [x] `npm run build` succeeds for admin, supervisor, shared.
+- [x] All new API endpoints return correct responses (test manually or via
   `scripts/test-mcp-tools.sh` pattern).
-- [ ] Deploy to VPS and verify:
+- [x] Local Docker Desktop validation passes for a fresh admin/control-plane bring-up,
+  including login and the touched CRUD flows.
+- [x] Deploy to VPS and verify:
   - Can edit a role policy and see it reflected in the next agent launch
   - Can create a new service, paste a key, and see it go active
   - Can create a task from admin and see it claimed by an agent
   - Can create a memory and find it via memory search
   - Chat messages render markdown correctly
+Verification used: repo builds passed for `packages/shared`, `apps/supervisor`,
+`apps/admin`, and the full workspace. A fresh local Docker Desktop stack
+(`init`, `db`, `rest`, `supervisor`, `admin`) went healthy, local admin login
+worked, and the admin API successfully created and updated a custom role, agent,
+service, task, and memory. Local browser verification with `agent-browser`
+confirmed chat markdown rendering and the task shortcut in the Chat tab; evidence:
+`C:\Github\agent-os\.tmp\phase1-local-chat-markdown.png`. On the live VPS, a
+temporary role/agent pair, service, memory, and admin-created task were created
+through the admin API; the task completed under the temporary role, its
+`task_runs.context_pack.role_policy` contained the unique policy marker, and the
+task emitted `phase1.live.verification` after using `memory_search`. A temporary
+processed markdown chat message was rendered and captured via `agent-browser`;
+evidence: `C:\Github\agent-os\.tmp\phase1-live-chat-markdown.png`. All temporary
+live roles, agents, tasks, task_runs, events, services, memories, message rows,
+and workspace state created for verification were deleted afterward.
 
 ---
 
@@ -224,7 +273,7 @@ This phase builds the skill abstraction on top of existing infrastructure.
 
 ### 2.1 Skill type definition `[packages/shared]`
 
-- [ ] Add `Skill` interface to `packages/shared/src/types.ts`:
+- [x] Add `Skill` interface to `packages/shared/src/types.ts`:
   ```typescript
   export interface Skill {
     id: string;                    // memory ID or future skill ID
@@ -254,8 +303,8 @@ This phase builds the skill abstraction on top of existing infrastructure.
     required: boolean;
   }
   ```
-- [ ] Export from `packages/shared/src/index.ts`.
-- [ ] `npm run build -w packages/shared` succeeds.
+- [x] Export from `packages/shared/src/index.ts`.
+- [x] `npm run build -w packages/shared` succeeds.
 
 ### 2.2 Skill convention for procedural memories
 
@@ -263,23 +312,23 @@ This phase builds the skill abstraction on top of existing infrastructure.
 a consistent content structure. This avoids a new table while leveraging existing
 search, scope, and supersession infrastructure.
 
-- [ ] Define the convention:
+- [x] Define the convention:
   - `subject` = skill name/slug (e.g., `skill:send-invoice-reminder`)
   - `content` = JSON string of the canonical skill representation (matching `Skill` type
     minus the metadata fields that come from the memory row itself)
   - `tags` = `['skill', ...domain_tags]`
   - `scope_type`/`scope_id` = normal scope rules
   - `superseded_by` = used for version history
-- [ ] Document this convention in `SCHEMA.md` under a new "Skills" subsection.
+- [x] Document this convention in `SCHEMA.md` under a new "Skills" subsection.
 
 ### 2.3 MCP skill tools `[apps/mcp]`
 
 #### `skill_create` tool:
-- [ ] Create `apps/mcp/src/tools/skill_create.ts`.
-- [ ] Parameters: `name` (required), `display_name`, `description`, `trigger_when`,
+- [x] Create `apps/mcp/src/tools/skill_create.ts`.
+- [x] Parameters: `name` (required), `display_name`, `description`, `trigger_when`,
   `steps` (array of SkillStep), `input_schema`, `output_schema`, `required_services`,
   `scope_type` (default `company`), `scope_id`, `tags`.
-- [ ] Logic:
+- [x] Logic:
   1. Require active task context.
   2. Enforce scope.
   3. Search for existing procedural memory with `subject = 'skill:{name}'` in same
@@ -287,50 +336,50 @@ search, scope, and supersession infrastructure.
   4. Build canonical JSON content from the structured fields.
   5. Write via `memory_write` logic (insert memory + create memory_chunk).
   6. Return `{ success, skill, superseded_id? }`.
-- [ ] Policy: `system.modify` (new skills should be reviewed).
+- [x] Policy: `system.modify` (new skills should be reviewed).
 
 #### `skill_search` tool:
-- [ ] Create `apps/mcp/src/tools/skill_search.ts`.
-- [ ] Parameters: `query` (text), `scope_type`, `scope_id`, `tags` (array), `limit`
+- [x] Create `apps/mcp/src/tools/skill_search.ts`.
+- [x] Parameters: `query` (text), `scope_type`, `scope_id`, `tags` (array), `limit`
   (default 10).
-- [ ] Logic:
+- [x] Logic:
   1. Search procedural memories with tag `skill`.
   2. Use hybrid search (FTS + vector) scoped to the agent's scope chain.
   3. Also search by `subject ilike 'skill:%query%'`.
   4. Parse content JSON and return structured `Skill` objects.
   5. Sort by relevance, then by use_count (stored in content JSON).
-- [ ] Return `{ success, skills: Skill[] }`.
+- [x] Return `{ success, skills: Skill[] }`.
 
 #### `skill_get` tool:
-- [ ] Create `apps/mcp/src/tools/skill_get.ts`.
-- [ ] Parameters: `name` (skill slug) or `id` (memory UUID).
-- [ ] Logic:
+- [x] Create `apps/mcp/src/tools/skill_get.ts`.
+- [x] Parameters: `name` (skill slug) or `id` (memory UUID).
+- [x] Logic:
   1. Query procedural memories with `subject = 'skill:{name}'` or `id = {id}`.
   2. Parse content JSON into structured Skill.
   3. Load supersession chain for version history.
-- [ ] Return `{ success, skill, versions: [{id, updated_at}] }`.
+- [x] Return `{ success, skill, versions: [{id, updated_at}] }`.
 
 #### `skill_log_use` tool:
-- [ ] Create `apps/mcp/src/tools/skill_log_use.ts`.
-- [ ] Parameters: `name` or `id`, `task_id` (optional, defaults to current),
+- [x] Create `apps/mcp/src/tools/skill_log_use.ts`.
+- [x] Parameters: `name` or `id`, `task_id` (optional, defaults to current),
   `outcome` (success/partial/failed), `notes` (optional).
-- [ ] Logic:
+- [x] Logic:
   1. Find the skill memory.
   2. Update the content JSON: increment `use_count`, set `last_used_at`.
   3. Log event: `skill.used` with skill name, outcome, task_id.
-- [ ] Return `{ success }`.
+- [x] Return `{ success }`.
 
 #### Register all tools:
-- [ ] Add all four tools to `apps/mcp/src/index.ts` tool registry and handler map.
-- [ ] Add `skill_create` to the `extractPolicyAction` function as `system.modify`.
-- [ ] `npm run build -w apps/mcp` succeeds.
+- [x] Add all four tools to `apps/mcp/src/index.ts` tool registry and handler map.
+- [x] Add `skill_create` to the `extractPolicyAction` function as `system.modify`.
+- [x] `npm run build -w apps/mcp` succeeds.
 
 ### 2.4 Context pack integration `[apps/supervisor]`
 
-- [ ] In `apps/supervisor/src/process-manager.ts`, after building the context pack, query
+- [x] In `apps/supervisor/src/process-manager.ts`, after building the context pack, query
   procedural memories with tag `skill` scoped to the task's project, role, and company.
   Limit to 10 most relevant (by scope proximity, then use_count).
-- [ ] Add `relevant_skills` section to `TASK_BRIEFING.md` output. Format each skill as:
+- [x] Add `relevant_skills` section to `TASK_BRIEFING.md` output. Format each skill as:
   ```
   ### Skill: {display_name}
   Trigger: {trigger_when}
@@ -338,7 +387,7 @@ search, scope, and supersession infrastructure.
   1. {step.instruction}
   2. ...
   ```
-- [ ] Also add skills to the context pack JSON so MCP `context_refresh` returns them.
+- [x] Also add skills to the context pack JSON so MCP `context_refresh` returns them.
 
 ### 2.5 Skill admin UI `[apps/admin]`
 
@@ -376,10 +425,12 @@ search, scope, and supersession infrastructure.
   `api.updateSkill(id, fields)`, `api.deleteSkill(id)` to `api.ts`.
 
 ### 2.6 Phase 2 verification
-- [ ] `npm run build` succeeds for all workspaces.
-- [ ] Create a skill via MCP tool in a test task, verify it appears in admin Skills tab.
-- [ ] Search for the skill from another agent's context, verify it is found.
-- [ ] Verify skill appears in TASK_BRIEFING.md of a new task launch.
+- [x] `npm run build` succeeds for all workspaces.
+- [x] Local Docker Desktop fresh-deployment validation confirms seeded skills,
+  migrations, and the Skills UI load correctly on a clean stack.
+- [x] Create a skill via MCP tool in a test task, verify it appears in admin Skills tab.
+- [x] Search for the skill from another agent's context, verify it is found.
+- [x] Verify skill appears in TASK_BRIEFING.md of a new task launch.
 - [ ] Deploy to VPS and run end-to-end:
   1. Operator creates skill via admin
   2. Operator sends chat message matching the skill's trigger
@@ -407,7 +458,7 @@ implicit learning is unreliable. This phase adds explicit training flows.
     or a skill (for procedures) with high confidence at company scope, and confirm
     back to the operator what was stored.
   ```
-- [ ] Update the relay role policy in the `roles` table (via migration or admin UI) to
+- [x] Update the relay role policy in the `roles` table (via migration or admin UI) to
   include this guidance in the "Routing and classification" section.
 
 ### 3.2 Knowledge base view in Memory tab
@@ -421,15 +472,18 @@ implicit learning is unreliable. This phase adds explicit training flows.
 
 ### 3.3 Skill builder form in admin
 
-- [ ] Enhance the "Create Skill" form in `SkillsPage.tsx` with:
+- [x] Enhance the "Create Skill" form in `SkillsPage.tsx` with:
   - "Import from text" button: paste a natural-language procedure description, system
     structures it into steps (client-side parsing: split by numbered lines or bullet
     points).
   - Preview panel showing the skill as it would appear in TASK_BRIEFING.md.
-  - "Test" button that creates a test task using this skill's trigger_when as the
-    objective, assigned to the skill's target role.
+  - "Test" button that creates a dry-run task using this skill's trigger_when as the
+    objective context, assigned to a selected role so the test can be run safely on the
+    live system.
 
 ### 3.4 Phase 3 verification
+- [ ] Local Docker Desktop validation confirms training-related UI and relay flows work
+  on a fresh stack before live rollout.
 - [ ] Operator sends "Remember: Always CC finance@company.com on invoice emails" in
   chat. Verify a semantic memory is created with subject containing the instruction.
 - [ ] Operator creates a skill via admin form. Verify it is stored and searchable.
@@ -453,7 +507,7 @@ UX gaps.
   - Runs per role (group by role from joined tasks)
   - Average duration per role
   - Model distribution (count per model_used)
-- [ ] Optionally aggregate `provider.usage` events for token/cost estimates if the event
+- [x] Optionally aggregate `provider.usage` events for token/cost estimates if the event
   detail JSON contains token counts.
 
 #### Frontend:
@@ -512,7 +566,9 @@ UX gaps.
 - [x] Optionally add a "Projects" tab showing all projects with task counts.
 
 ### 4.5 Phase 4 verification
-- [ ] Usage summary shows real data from VPS task_runs.
+- [x] Local Docker Desktop validation confirms dashboard, task detail, artifact, and
+  project views render correctly on a fresh stack.
+- [x] Usage summary shows real data from VPS task_runs.
 - [ ] Task detail shows run history with correct durations.
 - [ ] Artifacts are browsable in admin.
 - [ ] Projects are listable and filterable.
@@ -524,7 +580,7 @@ UX gaps.
 **Why:** The live VPS has 221 orphaned workspace directories, potential notification spam,
 and no max-duration safety net for agent runs. This phase addresses runtime reliability.
 
-**Duration:** Ongoing (start after Phase 1, run parallel to later phases)
+**Duration:** Ongoing after Phases 0-4 blocking work is complete
 
 ### 5.1 Workspace cleanup
 - [ ] Add a `cleanupWorkspaces()` function in `apps/supervisor/src/process-manager.ts`
@@ -554,19 +610,21 @@ and no max-duration safety net for agent runs. This phase addresses runtime reli
   `updated_at` change.
 
 ### 5.4 Schedule locking
-- [ ] In `apps/supervisor/src/scheduler.ts`, add a simple lock mechanism: before creating
+- [x] In `apps/supervisor/src/scheduler.ts`, add a simple lock mechanism: before creating
   a scheduled task, check if a task with the same title and `created_at > last_run_at`
   already exists. If yes, skip (another instance already fired it).
-- [ ] Update `last_run_at` atomically with the schedule check using a conditional
+- [x] Update `last_run_at` atomically with the schedule check using a conditional
   PostgREST PATCH (WHERE `last_run_at` matches expected value).
 
 ### 5.5 Admin API rate limiting
-- [ ] Add basic rate limiting to `server.mjs`. Options:
+- [x] Add basic rate limiting to `server.mjs`. Options:
   - Simple in-memory counter per IP (10 failed login attempts per minute).
   - Per-session rate limit for API calls (100 requests per minute).
-- [ ] Return 429 Too Many Requests when exceeded.
+- [x] Return 429 Too Many Requests when exceeded.
 
 ### 5.6 Phase 5 verification
+- [ ] Local Docker Desktop validation confirms the affected supervisor/admin runtime
+  changes behave correctly on a fresh stack before VPS rollout.
 - [ ] Workspace directory count stabilizes on VPS after cleanup runs.
 - [ ] A long-running agent is killed after max-duration timeout.
 - [ ] Notification spam for a stuck task is reduced to 1 per hour.
@@ -582,21 +640,21 @@ foundation built in Phases 0-5.
 **Duration:** As needed
 
 ### 6.1 MCP project management tools
-- [ ] Add `project_create` and `project_update` MCP tools so agents can organize work
+- [x] Add `project_create` and `project_update` MCP tools so agents can organize work
   into projects.
-- [ ] Add policy enforcement (`system.modify` for project creation).
+- [x] Add policy enforcement (`system.modify` for project creation).
 
 ### 6.2 Real-time updates via Supabase Realtime or SSE
-- [ ] Replace polling in Chat tab with Supabase Realtime subscription on `messages`.
-- [ ] Replace polling in Tasks tab with Realtime subscription on `tasks`.
-- [ ] Add "live activity" indicator in sidebar: which agents are running, what task,
+- [x] Replace polling in Chat tab with Supabase Realtime subscription on `messages`.
+- [x] Replace polling in Tasks tab with Realtime subscription on `tasks`.
+- [x] Add "live activity" indicator in sidebar: which agents are running, what task,
   last heartbeat.
 
 ### 6.3 AGENTS_INSCTRUCTIONS.md override from admin
-- [ ] Store an override in `system_settings` key `agent_instructions_override`.
-- [ ] Supervisor checks this setting before falling back to the baked-in file.
-- [ ] Admin Settings tab shows the current foundational instructions with an edit form.
-- [ ] This lets operators customize foundational rules without rebuilding the Docker image.
+- [x] Store an override in `system_settings` key `agent_instructions_override`.
+- [x] Supervisor checks this setting before falling back to the baked-in file.
+- [x] Admin Settings tab shows the current foundational instructions with an edit form.
+- [x] This lets operators customize foundational rules without rebuilding the Docker image.
 
 ### 6.4 Implement customer and department scope types
 - [ ] In `apps/mcp/src/scope.ts`, implement `checkScope` for `customer` and
@@ -606,12 +664,12 @@ foundation built in Phases 0-5.
   mapping table.
 
 ### 6.5 Task graph visualization
-- [ ] Add a visual task graph to the Tasks detail view. Show parent/child/dependency
+- [x] Add a visual task graph to the Tasks detail view. Show parent/child/dependency
   relationships as a DAG. Use a lightweight library like `dagre` or simple CSS-based
   tree rendering.
 
 ### 6.6 Bulk knowledge import
-- [ ] Add a "Bulk Import" feature to the Memory/Knowledge tab. Operator pastes a
+- [x] Add a "Bulk Import" feature to the Memory/Knowledge tab. Operator pastes a
   document, system splits it into individual facts (by paragraph or sentence), creates
   semantic memories for each.
 
@@ -620,8 +678,8 @@ foundation built in Phases 0-5.
   C"), auto-generate a skill draft and confirm with the operator before saving.
 
 ### 6.8 Event detail expansion and filtering
-- [ ] Expand event rows in `EventsPage.tsx` to show the full `detail` JSON.
-- [ ] Add server-side filtering by `event_type`, `severity`, `agent_id`, date range.
+- [x] Expand event rows in `EventsPage.tsx` to show the full `detail` JSON.
+- [x] Add server-side filtering by `event_type`, `severity`, `agent_id`, date range.
 
 ---
 
@@ -645,9 +703,12 @@ foundation built in Phases 0-5.
 
 - 2026-03-14: Admin server syntax verified with `node --check apps/admin/server.mjs`.
 - 2026-03-14: Admin workspace build verified with `npm run build -w apps/admin`.
+- 2026-03-14: Phase 6.2 SSE verification passed locally on a fresh Docker Desktop stack. Chat updated live from an inserted relay message, the sidebar live-activity card updated from a seeded running task, and clicking that card opened the Tasks view. Evidence: `C:\Github\agent-os\.tmp\phase62-chat-local.png`, `C:\Github\agent-os\.tmp\phase62-sidebar-local.png`, `C:\Github\agent-os\.tmp\phase62-tasks-local.png`.
+- 2026-03-14: Phase 6.2 SSE verification passed on the live VPS. Authenticated `/api/stream` returned `snapshot` events, the live admin Chat page rendered an inserted relay message without refresh, and the live sidebar reflected active task state. Temporary live message rows and leftover relay-verification test tasks discovered during this check were deleted afterward. Evidence: `C:\Github\agent-os\.tmp\phase62-chat-live.png`.
+- 2026-03-14: Phase 6.6 bulk import verification passed locally on a fresh Docker Desktop stack and on the live VPS. A two-paragraph document imported as two semantic company memories tagged `operator_taught`, and the temporary live verification memories were deleted afterward.
 
-- [ ] Phase 0 - Runtime Boundary Hardening
-- [ ] Phase 1 - Admin Panel Control Plane
+- [x] Phase 0 - Runtime Boundary Hardening
+- [x] Phase 1 - Admin Panel Control Plane
 - [ ] Phase 2 - Shared Skill System
 - [ ] Phase 3 - Training and Knowledge Management
 - [ ] Phase 4 - Observability and Polish

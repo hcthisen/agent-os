@@ -7,8 +7,12 @@ export interface ServiceRegistryCredentialRow {
   credential: string | null;
 }
 
+function normalizeEncryptedCredential(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
 function looksEncryptedCredential(value: string): boolean {
-  const normalized = value.trim();
+  const normalized = normalizeEncryptedCredential(value);
   return (
     normalized.length >= 40 &&
     normalized.length % 4 === 0 &&
@@ -30,7 +34,7 @@ export async function decryptServiceCredential(
   try {
     const db = getDb();
     const { data, error } = await db.rpc("decrypt_credential", {
-      encrypted_text: credential,
+      encrypted_text: normalizeEncryptedCredential(credential),
       encryption_key: SERVICE_REGISTRY_ENCRYPTION_KEY,
     });
 
