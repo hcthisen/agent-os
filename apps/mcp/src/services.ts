@@ -5,6 +5,7 @@
  */
 import { getDb } from "./db.js";
 import { getAgentContext } from "./context.js";
+import { withDecryptedCredential } from "./service-registry.js";
 
 export interface ServiceCredential {
   service_name: string;
@@ -25,11 +26,12 @@ export async function getServiceCredential(
   const db = getDb();
 
   // Look up the service
-  const { data: service } = await db
+  const { data } = await db
     .from("service_registry")
     .select("service_name, base_url, auth_type, credential, status")
     .eq("service_name", serviceName)
     .maybeSingle();
+  const service = await withDecryptedCredential(data);
 
   if (service && service.status === "active" && service.credential) {
     return {

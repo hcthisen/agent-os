@@ -1,29 +1,61 @@
 import React, { useState } from "react";
+import { AgentsControlPage } from "./AgentsControlPage";
 import { ChatPage } from "./ChatPage";
-import { TasksPage } from "./TasksPage";
-import { AgentsPage } from "./AgentsPage";
-import { MemoryPage } from "./MemoryPage";
 import { EventsPage } from "./EventsPage";
-import { SettingsPage } from "./SettingsPage";
+import { MemoryStudioPage } from "./MemoryStudioPage";
+import { OverviewPage } from "./OverviewPage";
+import { ProjectsPage } from "./ProjectsPage";
+import { SettingsControlPage } from "./SettingsControlPage";
+import { SkillsPage } from "./SkillsPage";
+import { TasksControlPage } from "./TasksControlPage";
 
-type Page = "chat" | "tasks" | "agents" | "memory" | "events" | "settings";
+type Page =
+  | "overview"
+  | "chat"
+  | "tasks"
+  | "projects"
+  | "agents"
+  | "memory"
+  | "skills"
+  | "events"
+  | "settings";
 
-const NAV_ITEMS: { id: Page; label: string }[] = [
+const NAV_ITEMS: Array<{ id: Page; label: string }> = [
+  { id: "overview", label: "Overview" },
   { id: "chat", label: "Chat" },
   { id: "tasks", label: "Tasks" },
+  { id: "projects", label: "Projects" },
   { id: "agents", label: "Agents" },
   { id: "memory", label: "Memory" },
+  { id: "skills", label: "Skills" },
   { id: "events", label: "Events" },
   { id: "settings", label: "Settings" },
 ];
 
 export function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
-  const [page, setPage] = useState<Page>("chat");
+  const [page, setPage] = useState<Page>("overview");
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [focusedProjectId, setFocusedProjectId] = useState<string | null>(null);
+
+  function openTask(taskId: string) {
+    setFocusedTaskId(taskId);
+    setPage("tasks");
+  }
+
+  function openProject(projectId: string) {
+    setFocusedProjectId(projectId);
+    setPage("projects");
+  }
 
   return (
     <div style={styles.layout}>
       <aside style={styles.sidebar}>
-        <div style={styles.logo}>Agent-OS</div>
+        <div style={styles.logo}>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>Agent-OS</div>
+          <div style={{ color: "#7c89a6", fontSize: 11, marginTop: 6 }}>
+            Admin control plane
+          </div>
+        </div>
         <nav style={styles.nav}>
           {NAV_ITEMS.map((item) => (
             <button
@@ -48,12 +80,24 @@ export function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         </button>
       </aside>
       <main style={styles.main}>
-        {page === "chat" && <ChatPage />}
-        {page === "tasks" && <TasksPage />}
-        {page === "agents" && <AgentsPage />}
-        {page === "memory" && <MemoryPage />}
+        {page === "overview" && (
+          <OverviewPage onOpenProject={openProject} onOpenTask={openTask} />
+        )}
+        {page === "chat" && <ChatPage onOpenTask={openTask} />}
+        {page === "tasks" && (
+          <TasksControlPage
+            focusTaskId={focusedTaskId}
+            onOpenProject={openProject}
+          />
+        )}
+        {page === "projects" && (
+          <ProjectsPage focusProjectId={focusedProjectId} onOpenTask={openTask} />
+        )}
+        {page === "agents" && <AgentsControlPage />}
+        {page === "memory" && <MemoryStudioPage />}
+        {page === "skills" && <SkillsPage />}
         {page === "events" && <EventsPage />}
-        {page === "settings" && <SettingsPage />}
+        {page === "settings" && <SettingsControlPage />}
       </main>
     </div>
   );
@@ -70,24 +114,22 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "20px 0",
   },
   logo: {
-    fontSize: 18,
-    fontWeight: 700,
+    borderBottom: "1px solid #2a2a3a",
     color: "#fff",
     padding: "0 20px 20px",
-    borderBottom: "1px solid #2a2a3a",
   },
   nav: { flex: 1, display: "flex", flexDirection: "column", padding: "12px 8px", gap: 2 },
   navBtn: {
-    padding: "8px 12px",
     background: "transparent",
     border: "none",
-    borderRadius: 6,
-    color: "#999",
-    fontSize: 14,
-    textAlign: "left" as const,
+    borderRadius: 8,
+    color: "#97a3bd",
     cursor: "pointer",
+    fontSize: 14,
+    padding: "9px 12px",
+    textAlign: "left" as const,
   },
-  navActive: { background: "#1e1e2e", color: "#fff" },
+  navActive: { background: "#162032", color: "#fff" },
   logout: {
     margin: "0 12px",
     padding: "8px 12px",
@@ -98,5 +140,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     cursor: "pointer",
   },
-  main: { flex: 1, overflow: "auto", padding: 24 },
+  main: { background: "#090b11", flex: 1, overflow: "auto", padding: 24 },
 };

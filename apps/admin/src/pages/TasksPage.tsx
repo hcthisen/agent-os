@@ -1,67 +1,52 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { formatDateTime, formatDurationMs } from "../lib/format";
+import type { ApprovalRecord, ProjectRecord, RoleRecord, TaskDetailRecord, TaskRecord } from "../lib/types";
+import { shellStyles, statusChipStyle } from "../lib/ui";
 
 const TASK_PAGE_SIZE = 50;
-
-interface Task {
-  id: string;
-  title: string;
-  state: string;
-  priority: string;
-  assigned_role: string;
-  claimed_by: string | null;
-  attempt_count: number;
-  blocked_reason: string | null;
-  last_handoff_note: string | null;
-  last_activity_at?: string | null;
-  last_activity_summary?: string | null;
-  created_at: string;
-  updated_at: string;
-  parent_task_id: string | null;
-}
-
-interface Approval {
-  id: string;
-  task_id: string;
-  action_type: string;
-  description: string;
-  status: string;
-  created_at: string;
-}
-
 const STATE_COLORS: Record<string, string> = {
-  backlog: "#666",
-  ready: "#3b82f6",
-  claimed: "#a855f7",
-  running: "#22c55e",
-  blocked_on_human: "#f59e0b",
   blocked_on_agent: "#f59e0b",
-  in_review: "#06b6d4",
+  blocked_on_human: "#f59e0b",
+  claimed: "#a855f7",
   completed: "#10b981",
-  failed: "#ef4444",
   dead_letter: "#dc2626",
+  failed: "#ef4444",
+  in_review: "#06b6d4",
+  ready: "#3b82f6",
+  running: "#22c55e",
 };
 
-export function TasksPage() {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
+const EMPTY_FORM = {
+  acceptance_criteria: "",
+  assigned_role: "",
+  objective: "",
+  priority: "normal",
+  project_id: "",
+  title: "",
+};
+
+export function TasksPage({
+  focusTaskId,
+  onOpenProject,
+}: {
+  focusTaskId?: string | null;
+  onOpenProject?: (projectId: string) => void;
+}) {
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
+  const [roles, setRoles] = useState<RoleRecord[]>([]);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [detail, setDetail] = useState<TaskDetailRecord | null>(null);
   const [filter, setFilter] = useState("all");
-  const [selected, setSelected] = useState<Task | null>(null);
+  const [search, setSearch] = useState("");
+  const [projectFilter, setProjectFilter] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(focusTaskId || null);
+  const [form, setForm] = useState(EMPTY_FORM);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-
-  function mergeTasks(nextTasks: Task[], existingTasks: Task[]): Task[] {
-    const merged = new Map<string, Task>();
-    for (const task of nextTasks) {
-      merged.set(task.id, task);
-    }
-    for (const task of existingTasks) {
-      if (!merged.has(task.id)) {
-        merged.set(task.id, task);
-      }
-    }
-    return [...merged.values()];
-  }
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function loadTasks(options?: { append?: boolean }) {
     const before =
@@ -69,42 +54,71 @@ export function TasksPage() {
     const data = await api.getTasks({
       before,
       limit: TASK_PAGE_SIZE,
+      project_id: projectFilter || undefined,
+      q: search.trim() || undefined,
       state: filter === "all" ? undefined : filter,
     });
     const nextTasks = data || [];
-
-    if (options?.append) {
-      setTasks((current) => [...current, ...nextTasks]);
-    } else {
-      setTasks((current) => mergeTasks(nextTasks, current));
-    }
-
-    setHasMore(nextTasks.length === TASK_PAGE_SIZE || (!options?.append && tasks.length > 0));
+    setTasks((current) => (options?.append ? [...current, ...nextTasks] : nextTasks));
+    setHasMore(nextTasks.length === TASK_PAGE_SIZE);
   }
 
-  async function loadApprovals() {
-    const data = await api.getApprovals();
-    setApprovals(data || []);
+  async function refresh() {
+    const [tasksData, approvalsData, rolesData, projectsData] = await Promise.all([
+      api.getTasks({
+        limit: TASK_PAGE_SIZE,
+        project_id: projectFilter || undefined,
+        q: search.trim() || undefined,
+        state: filter === "all" ? undefined : filter,
+      }),
+      api.getApprovals(),
+      api.getRoles(),
+      api.getProjects(),
+    ]);
+    setTasks(tasksData || []);
+    setApprovals(approvalsData || []);
+    setRoles(rolesData || []);
+    setProjects(projectsData || []);
+    setHasMore((tasksData || []).length === TASK_PAGE_SIZE);
   }
 
   useEffect(() => {
     let cancelled = false;
-
-    const refresh = async () => {
-      if (cancelled) return;
-      await Promise.all([loadTasks(), loadApprovals()]);
+    const tick = async () => {
+      try {
+        await refresh();
+      } catch (nextError) {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : "Failed to load tasks.");
+        }
+      }
     };
-
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, 5000);
-
+    void tick();
+    const timer = window.setInterval(() => void tick(), 5000);
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      window.clearInterval(timer);
     };
-  }, [filter]);
+  }, [filter, projectFilter, search]);
+
+  useEffect(() => {
+    if (focusTaskId) {
+      setSelectedTaskId(focusTaskId);
+    }
+  }, [focusTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId) {
+      setDetail(null);
+      return;
+    }
+    void api
+      .getTaskDetail(selectedTaskId)
+      .then((nextDetail) => setDetail(nextDetail || null))
+      .catch((nextError) =>
+        setError(nextError instanceof Error ? nextError.message : "Failed to load task detail.")
+      );
+  }, [selectedTaskId]);
 
   async function handleApproval(id: string, decision: "approved" | "rejected") {
     if (decision === "approved") {
@@ -112,13 +126,38 @@ export function TasksPage() {
     } else {
       await api.rejectApproval(id);
     }
-
-    await Promise.all([loadApprovals(), loadTasks()]);
+    await refresh();
   }
 
-  async function retryDeadLetter(taskId: string) {
+  async function retryTask(taskId: string) {
     await api.retryTask(taskId);
-    await loadTasks();
+    await refresh();
+    setSelectedTaskId(taskId);
+  }
+
+  async function createTask() {
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await api.createTask({
+        acceptance_criteria: form.acceptance_criteria
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean),
+        assigned_role: form.assigned_role,
+        objective: form.objective,
+        priority: form.priority,
+        project_id: form.project_id || null,
+        title: form.title,
+      });
+      setForm(EMPTY_FORM);
+      await refresh();
+      setSelectedTaskId(created?.id || null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to create task.");
+    } finally {
+      setCreating(false);
+    }
   }
 
   async function loadMoreTasks() {
@@ -130,138 +169,354 @@ export function TasksPage() {
     }
   }
 
-  const filtered = filter === "all" ? tasks : tasks.filter((t) => t.state === filter);
-
   return (
     <div>
-      <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Tasks</h2>
+      <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
+        <div>
+          <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Tasks</h2>
+          <p style={{ ...shellStyles.muted, margin: 0 }}>
+            Task queue, approvals, run history, artifacts, and task creation.
+          </p>
+        </div>
+      </div>
+
+      {error && <div style={{ color: "#fca5a5", marginBottom: 12 }}>{error}</div>}
 
       {approvals.length > 0 && (
-        <div style={{ marginBottom: 20, padding: 16, background: "#1a1a2e", borderRadius: 8, border: "1px solid #f59e0b33" }}>
-          <h3 style={{ fontSize: 14, color: "#f59e0b", marginBottom: 12 }}>Pending Approvals ({approvals.length})</h3>
-          {approvals.map((a) => (
-            <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+        <div style={{ ...shellStyles.card, border: "1px solid #f59e0b55", marginBottom: 16 }}>
+          <h3 style={{ color: "#fbbf24", fontSize: 15, fontWeight: 600, marginBottom: 10 }}>
+            Pending Approvals ({approvals.length})
+          </h3>
+          {approvals.map((approval) => (
+            <div
+              key={approval.id}
+              style={{ alignItems: "center", display: "flex", gap: 12, marginBottom: 8 }}
+            >
               <div style={{ flex: 1 }}>
-                <span style={{ fontSize: 12, color: "#888" }}>{a.action_type}</span>
-                <p style={{ fontSize: 13 }}>{a.description}</p>
+                <div style={{ color: "#cbd5e1", fontSize: 12 }}>{approval.action_type}</div>
+                <div style={{ color: "#e5e7eb", fontSize: 13 }}>{approval.description}</div>
               </div>
-              <button onClick={() => handleApproval(a.id, "approved")} style={{ ...btnStyle, background: "#22c55e" }}>Approve</button>
-              <button onClick={() => handleApproval(a.id, "rejected")} style={{ ...btnStyle, background: "#ef4444" }}>Reject</button>
+              <button
+                onClick={() => void handleApproval(approval.id, "approved")}
+                style={{ ...shellStyles.button, background: "#15803d" }}
+                type="button"
+              >
+                Approve
+              </button>
+              <button
+                onClick={() => void handleApproval(approval.id, "rejected")}
+                style={{ ...shellStyles.button, background: "#b91c1c" }}
+                type="button"
+              >
+                Reject
+              </button>
             </div>
           ))}
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-        {[
-          "all",
-          "ready",
-          "claimed",
-          "running",
-          "blocked_on_human",
-          "blocked_on_agent",
-          "in_review",
-          "completed",
-          "failed",
-          "dead_letter",
-        ].map((s) => (
-          <button
-            key={s}
-            onClick={() => {
-              setFilter(s);
-              setTasks([]);
-              setHasMore(false);
-              setSelected(null);
-            }}
-            style={{
-              padding: "4px 10px",
-              borderRadius: 4,
-              border: "1px solid #333",
-              background: filter === s ? "#2a2a3a" : "transparent",
-              color: STATE_COLORS[s] || "#e0e0e8",
-              fontSize: 12,
-              cursor: "pointer",
-            }}
-          >
-            {s}
-          </button>
-        ))}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {filtered.map((t) => (
-          <div
-            key={t.id}
-            onClick={() => setSelected(selected?.id === t.id ? null : t)}
-            style={{
-              padding: "10px 14px",
-              background: selected?.id === t.id ? "#1a1a2e" : "#111118",
-              border: "1px solid #2a2a3a",
-              borderRadius: 6,
-              cursor: "pointer",
-              fontSize: 13,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>{t.title}</span>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#888" }}>{t.assigned_role}</span>
-                <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 3, background: (STATE_COLORS[t.state] || "#666") + "22", color: STATE_COLORS[t.state] }}>
-                  {t.state}
-                </span>
+      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "minmax(340px, 0.9fr) minmax(0, 1.1fr)" }}>
+        <div style={{ display: "grid", gap: 16 }}>
+          <div style={shellStyles.card}>
+            <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Create Task</h3>
+            <div style={{ display: "grid", gap: 10 }}>
+              <input
+                onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
+                placeholder="Title"
+                style={{ ...shellStyles.input, width: "100%" }}
+                value={form.title}
+              />
+              <textarea
+                onChange={(event) =>
+                  setForm((current) => ({ ...current, objective: event.target.value }))
+                }
+                placeholder="Objective"
+                style={{ ...shellStyles.textarea, width: "100%" }}
+                value={form.objective}
+              />
+              <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr 1fr" }}>
+                <select
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, assigned_role: event.target.value }))
+                  }
+                  style={{ ...shellStyles.input, width: "100%" }}
+                  value={form.assigned_role}
+                >
+                  <option value="">Assigned role</option>
+                  {roles.map((role) => (
+                    <option key={role.id} value={role.id}>
+                      {role.display_name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, priority: event.target.value }))
+                  }
+                  style={{ ...shellStyles.input, width: "100%" }}
+                  value={form.priority}
+                >
+                  {["low", "normal", "high", "critical"].map((priority) => (
+                    <option key={priority} value={priority}>
+                      {priority}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, project_id: event.target.value }))
+                  }
+                  style={{ ...shellStyles.input, width: "100%" }}
+                  value={form.project_id}
+                >
+                  <option value="">No project</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.display_name}
+                    </option>
+                  ))}
+                </select>
               </div>
+              <textarea
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    acceptance_criteria: event.target.value,
+                  }))
+                }
+                placeholder="Acceptance criteria, one line per item"
+                style={{ ...shellStyles.textarea, minHeight: 90, width: "100%" }}
+                value={form.acceptance_criteria}
+              />
+              <button
+                disabled={creating}
+                onClick={() => void createTask()}
+                style={{ ...shellStyles.button, opacity: creating ? 0.7 : 1 }}
+                type="button"
+              >
+                {creating ? "Creating..." : "Create Task"}
+              </button>
             </div>
-            {selected?.id === t.id && (
-              <div style={{ marginTop: 10, fontSize: 12, color: "#aaa" }}>
-                <p><strong>ID:</strong> {t.id}</p>
-                {t.parent_task_id && <p><strong>Parent:</strong> {t.parent_task_id}</p>}
-                <p><strong>Priority:</strong> {t.priority}</p>
-                <p><strong>Attempts:</strong> {t.attempt_count}</p>
-                <p><strong>Updated:</strong> {new Date(t.updated_at).toLocaleString()}</p>
-                {t.last_activity_at && (
-                  <p><strong>Last Activity:</strong> {new Date(t.last_activity_at).toLocaleString()}</p>
-                )}
-                {t.last_activity_summary && (
-                  <p style={{ marginTop: 6 }}><strong>Activity:</strong> {t.last_activity_summary}</p>
-                )}
-                {t.blocked_reason && <p style={{ marginTop: 6 }}><strong>Blocked:</strong> {t.blocked_reason}</p>}
-                {t.last_handoff_note && <p style={{ marginTop: 6 }}><strong>Handoff:</strong> {t.last_handoff_note}</p>}
-                {t.state === "dead_letter" && (
-                  <button onClick={(e) => { e.stopPropagation(); retryDeadLetter(t.id); }} style={{ ...btnStyle, background: "#3b82f6", marginTop: 8 }}>
-                    Retry
-                  </button>
-                )}
+          </div>
+
+          <div style={shellStyles.card}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <input
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search tasks..."
+                style={{ ...shellStyles.input, flex: 1 }}
+                value={search}
+              />
+              <select
+                onChange={(event) => setProjectFilter(event.target.value)}
+                style={{ ...shellStyles.input, minWidth: 180 }}
+                value={projectFilter}
+              >
+                <option value="">All projects</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.display_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+              {[
+                "all",
+                "ready",
+                "claimed",
+                "running",
+                "blocked_on_human",
+                "blocked_on_agent",
+                "in_review",
+                "completed",
+                "failed",
+                "dead_letter",
+              ].map((state) => (
+                <button
+                  key={state}
+                  onClick={() => setFilter(state)}
+                  style={{
+                    ...shellStyles.button,
+                    ...shellStyles.buttonGhost,
+                    background: filter === state ? "#162032" : "transparent",
+                    color: STATE_COLORS[state] || "#e2e8f0",
+                    padding: "4px 10px",
+                  }}
+                  type="button"
+                >
+                  {state}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {tasks.map((task) => (
+                <button
+                  key={task.id}
+                  onClick={() => setSelectedTaskId(task.id)}
+                  style={{
+                    background: selectedTaskId === task.id ? "#162032" : "#111118",
+                    border: "1px solid #2a2a3a",
+                    borderRadius: 10,
+                    color: "inherit",
+                    cursor: "pointer",
+                    padding: 12,
+                    textAlign: "left",
+                  }}
+                  type="button"
+                >
+                  <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between" }}>
+                    <div>
+                      <div style={{ color: "#f8fafc", fontWeight: 600 }}>{task.title}</div>
+                      <div style={shellStyles.muted}>
+                        {task.assigned_role} | {formatDateTime(task.updated_at)}
+                      </div>
+                    </div>
+                    <span style={statusChipStyle(STATE_COLORS[task.state] || "#6b7280")}>
+                      {task.state}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {hasMore && (
+              <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
+                <button
+                  disabled={loadingMore}
+                  onClick={() => void loadMoreTasks()}
+                  style={{ ...shellStyles.button, opacity: loadingMore ? 0.7 : 1 }}
+                  type="button"
+                >
+                  {loadingMore ? "Loading..." : "Load More"}
+                </button>
               </div>
             )}
           </div>
-        ))}
-      </div>
-
-      {hasMore && (
-        <div style={{ marginTop: 16, display: "flex", justifyContent: "center" }}>
-          <button
-            onClick={() => void loadMoreTasks()}
-            disabled={loadingMore}
-            style={{
-              ...btnStyle,
-              background: loadingMore ? "#334155" : "#3b82f6",
-              opacity: loadingMore ? 0.8 : 1,
-            }}
-          >
-            {loadingMore ? "Loading..." : "Load More"}
-          </button>
         </div>
-      )}
+
+        <div style={shellStyles.card}>
+          {!detail?.task ? (
+            <div style={shellStyles.muted}>Select a task to inspect its detail view.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 16 }}>
+              <div>
+                <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <h3 style={{ fontSize: 17, fontWeight: 700, margin: 0 }}>{detail.task.title}</h3>
+                  <span style={statusChipStyle(STATE_COLORS[detail.task.state] || "#6b7280")}>
+                    {detail.task.state}
+                  </span>
+                </div>
+                <div style={{ color: "#cbd5e1", whiteSpace: "pre-wrap" }}>
+                  {detail.task.objective || "No objective recorded."}
+                </div>
+                <div style={{ ...shellStyles.muted, marginTop: 8 }}>
+                  Role {detail.task.assigned_role} | Priority {detail.task.priority} | Updated {formatDateTime(detail.task.updated_at)}
+                </div>
+                {detail.project?.id && (
+                  <button
+                    onClick={() => onOpenProject?.(detail.project!.id)}
+                    style={{ ...shellStyles.button, ...shellStyles.buttonGhost, marginTop: 8 }}
+                    type="button"
+                  >
+                    Open Project {detail.project.display_name}
+                  </button>
+                )}
+              </div>
+
+              {detail.task.acceptance_criteria && detail.task.acceptance_criteria.length > 0 && (
+                <div>
+                  <div style={{ ...shellStyles.muted, marginBottom: 6 }}>Acceptance Criteria</div>
+                  <ol style={{ margin: 0, paddingLeft: 18 }}>
+                    {detail.task.acceptance_criteria.map((criterion, index) => (
+                      <li key={`${detail.task.id}-${index}`} style={{ marginBottom: 4 }}>
+                        {criterion}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              {detail.task_runs.length > 0 && (
+                <div>
+                  <div style={{ ...shellStyles.muted, marginBottom: 8 }}>Run History</div>
+                  {detail.task_runs.map((run) => (
+                    <div key={run.id} style={{ borderTop: "1px solid #1f2937", padding: "8px 0" }}>
+                      <div style={{ color: "#e5e7eb", fontSize: 13, fontWeight: 600 }}>
+                        {run.agent_name || run.agent_id} | {run.model_used} / {run.effort_used}
+                      </div>
+                      <div style={shellStyles.muted}>
+                        {run.status} | {formatDurationMs(run.duration_ms)} | {formatDateTime(run.started_at)}
+                      </div>
+                      {run.error_message && (
+                        <div style={{ color: "#fca5a5", fontSize: 12, marginTop: 4 }}>
+                          {run.error_message}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {(detail.related_events?.length || 0) > 0 && (
+                <div>
+                  <div style={{ ...shellStyles.muted, marginBottom: 8 }}>Related Events</div>
+                  {detail.related_events.map((event) => (
+                    <div key={event.id} style={{ borderTop: "1px solid #1f2937", padding: "8px 0" }}>
+                      <div style={{ color: "#e5e7eb", fontSize: 13 }}>{event.summary}</div>
+                      <div style={shellStyles.muted}>
+                        {event.event_type} | {formatDateTime(event.created_at)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {(detail.artifacts?.length || 0) > 0 && (
+                <div>
+                  <div style={{ ...shellStyles.muted, marginBottom: 8 }}>Artifacts</div>
+                  {detail.artifacts.map((artifact) => (
+                    <div key={artifact.id} style={{ borderTop: "1px solid #1f2937", padding: "8px 0" }}>
+                      <div style={{ color: "#e5e7eb", fontSize: 13 }}>{artifact.name}</div>
+                      <div style={shellStyles.muted}>
+                        {artifact.artifact_type} | {artifact.external_url || artifact.storage_path || "stored locally"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {(detail.child_tasks?.length || 0) > 0 && (
+                <div>
+                  <div style={{ ...shellStyles.muted, marginBottom: 8 }}>Child Tasks</div>
+                  {detail.child_tasks.map((child) => (
+                    <button
+                      key={child.id}
+                      onClick={() => setSelectedTaskId(child.id)}
+                      style={{ ...shellStyles.button, ...shellStyles.buttonGhost, display: "block", marginBottom: 8, textAlign: "left", width: "100%" }}
+                      type="button"
+                    >
+                      {child.title} | {child.state}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {detail.task.state === "dead_letter" && (
+                <button
+                  onClick={() => void retryTask(detail.task.id)}
+                  style={shellStyles.button}
+                  type="button"
+                >
+                  Retry Dead-Letter Task
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
-
-const btnStyle: React.CSSProperties = {
-  padding: "4px 12px",
-  border: "none",
-  borderRadius: 4,
-  color: "#fff",
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: "pointer",
-};

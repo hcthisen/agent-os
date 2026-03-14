@@ -3,10 +3,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
-  mcp:
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped

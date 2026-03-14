@@ -38,6 +38,40 @@ export async function approvalRequest(args: {
   const ctx = getAgentContext();
   const task = await requireTaskClaimedByCurrentAgent(args.task_id);
 
+  const { data: existingApproval, error: existingError } = await db
+    .from("approvals")
+    .select("*")
+    .eq("task_id", task.id)
+    .eq("action_type", args.action_type)
+    .eq("description", args.description)
+    .eq("status", "pending")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingError) {
+    return { success: false, error: existingError.message };
+  }
+
+  if (existingApproval) {
+    const { error: blockErr } = await db
+      .from("tasks")
+      .update({
+        state: "blocked_on_human",
+        blocked_reason: `Awaiting approval: ${args.action_type} - ${args.description}`,
+        last_handoff_note: `Requested approval for ${args.action_type}: ${args.description}`,
+      })
+      .eq("id", task.id)
+      .eq("claimed_by", ctx.agent_id);
+
+    return {
+      success: true,
+      approval: existingApproval,
+      deduplicated: true,
+      warning: blockErr ? `Existing approval reused but task state update failed: ${blockErr.message}` : undefined,
+    };
+  }
+
   const { data: approval, error } = await db
     .from("approvals")
     .insert({

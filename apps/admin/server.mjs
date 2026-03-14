@@ -61,6 +61,23 @@ const DEFAULT_OPENAI_ROLE_CONFIG = {
   sentinel: { effort: "medium", model: "gpt-5.3-codex" },
 };
 const RELAY_HISTORY_LIMIT = 15;
+const LOGIN_RATE_LIMIT = { max: 10, windowMs: 60 * 1000 };
+const API_RATE_LIMIT = { max: 100, windowMs: 60 * 1000 };
+const MODEL_OPTIONS = new Set(["haiku", "sonnet", "opus"]);
+const EFFORT_OPTIONS = new Set(["low", "medium", "high", "xhigh"]);
+const AGENT_STATUS_OPTIONS = new Set(["active", "paused", "disabled"]);
+const MEMORY_LAYER_OPTIONS = new Set(["episodic", "semantic", "procedural"]);
+const TASK_PRIORITY_OPTIONS = new Set(["low", "normal", "high", "critical"]);
+const SCOPE_TYPE_OPTIONS = new Set([
+  "task",
+  "project",
+  "customer",
+  "role",
+  "department",
+  "company",
+]);
+const SKILL_TAG = "skill";
+const rateLimitBuckets = new Map();
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -80,7 +97,6 @@ const TRANSIENT_FETCH_ERROR_CODES = new Set([
   "ENOTFOUND",
   "ETIMEDOUT",
 ]);
-
 if (!SERVICE_KEY) {
   console.warn(
     "[admin] SUPABASE_SERVICE_KEY is missing; API routes will fail until init secrets are loaded."
@@ -203,6 +219,337 @@ async function readJson(req) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRateLimitKey(req, scope) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const remoteAddress = req.socket?.remoteAddress || "unknown";
+  return `${scope}:${forwarded || remoteAddress}`;
+}
+
+function isRateLimited(key, options) {
+  const now = Date.now();
+  const existing = rateLimitBuckets.get(key);
+  const bucket =
+    existing && now - existing.startedAt < options.windowMs
+      ? existing
+      : { count: 0, startedAt: now };
+  bucket.count += 1;
+  rateLimitBuckets.set(key, bucket);
+  return bucket.count > options.max;
+}
+
+function normalizeString(value, fallback = "") {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function normalizeStringArray(value) {
+  return [...new Set(
+    (Array.isArray(value) ? value : [])
+      .map((entry) => normalizeString(entry))
+      .filter(Boolean)
+  )];
+}
+
+function safeJsonParse(value, fallback = {}) {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseSkillMemory(memory) {
+  const payload = safeJsonParse(memory.content, {});
+  return {
+    id: memory.id,
+    name: String(memory.subject || "").replace(/^skill:/, ""),
+    display_name: normalizeString(payload.display_name) || normalizeString(memory.subject),
+    description: normalizeString(payload.description),
+    trigger_when: normalizeString(payload.trigger_when),
+    steps: Array.isArray(payload.steps)
+      ? payload.steps.map((step, index) => ({
+          instruction: normalizeString(step?.instruction),
+          order: Number(step?.order || index + 1),
+          required: step?.required !== false,
+          tool_hint: normalizeString(step?.tool_hint) || null,
+        }))
+      : [],
+    input_schema:
+      payload.input_schema && typeof payload.input_schema === "object"
+        ? payload.input_schema
+        : {},
+    output_schema:
+      payload.output_schema && typeof payload.output_schema === "object"
+        ? payload.output_schema
+        : {},
+    required_services: normalizeStringArray(payload.required_services),
+    scope_type: memory.scope_type,
+    scope_id: memory.scope_id,
+    tags: normalizeStringArray(memory.tags),
+    version: Math.max(1, Number(payload.version || 1)),
+    last_used_at:
+      typeof payload.last_used_at === "string" && payload.last_used_at.trim()
+        ? payload.last_used_at
+        : null,
+    use_count: Math.max(0, Number(payload.use_count || 0)),
+    is_active: memory.is_active,
+    created_at: memory.created_at,
+    updated_at: memory.updated_at,
+    superseded_by: memory.superseded_by || null,
+    memory_subject: memory.subject,
+    source_agent_id: memory.source_agent_id || null,
+  };
+}
+
+function buildSkillContent(payload, version) {
+  return JSON.stringify(
+    {
+      description: normalizeString(payload.description),
+      display_name:
+        normalizeString(payload.display_name) ||
+        normalizeString(payload.name).replace(/-/g, " "),
+      input_schema:
+        payload.input_schema && typeof payload.input_schema === "object"
+          ? payload.input_schema
+          : {},
+      last_used_at: payload.last_used_at || null,
+      output_schema:
+        payload.output_schema && typeof payload.output_schema === "object"
+          ? payload.output_schema
+          : {},
+      required_services: normalizeStringArray(payload.required_services),
+      steps: (Array.isArray(payload.steps) ? payload.steps : [])
+        .map((step, index) => ({
+          instruction: normalizeString(step?.instruction),
+          order: Number(step?.order || index + 1),
+          required: step?.required !== false,
+          tool_hint: normalizeString(step?.tool_hint) || null,
+        }))
+        .filter((step) => step.instruction),
+      trigger_when: normalizeString(payload.trigger_when),
+      use_count: Math.max(0, Number(payload.use_count || 0)),
+      version,
+    },
+    null,
+    2
+  );
+}
+
+function buildSkillChunkContent(payload) {
+  const steps = (Array.isArray(payload.steps) ? payload.steps : [])
+    .map((step, index) => ({
+      instruction: normalizeString(step?.instruction),
+      order: Number(step?.order || index + 1),
+      tool_hint: normalizeString(step?.tool_hint) || null,
+    }))
+    .filter((step) => step.instruction);
+
+  return [
+    `Skill: ${normalizeString(payload.display_name) || normalizeString(payload.name)}`,
+    normalizeString(payload.description)
+      ? `Description: ${normalizeString(payload.description)}`
+      : null,
+    normalizeString(payload.trigger_when)
+      ? `Trigger: ${normalizeString(payload.trigger_when)}`
+      : null,
+    steps.length
+      ? `Steps: ${steps
+          .map(
+            (step) =>
+              `${step.order}. ${step.instruction}${step.tool_hint ? ` (tool hint: ${step.tool_hint})` : ""}`
+          )
+          .join(" ")}`
+      : null,
+    normalizeStringArray(payload.required_services).length
+      ? `Required services: ${normalizeStringArray(payload.required_services).join(", ")}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function upsertMemoryChunk(memoryId, scopeType, scopeId, content) {
+  const existing = await postgrest("/memory_chunks", {
+    query: {
+      limit: "1",
+      select: "id",
+      source_id: `eq.${memoryId}`,
+      source_type: "eq.memory",
+    },
+  });
+
+  if (existing?.[0]?.id) {
+    await postgrest("/memory_chunks", {
+      body: { content, scope_id: scopeId, scope_type: scopeType },
+      method: "PATCH",
+      query: { id: `eq.${existing[0].id}` },
+    });
+    return;
+  }
+
+  await postgrest("/memory_chunks", {
+    body: {
+      content,
+      scope_id: scopeId,
+      scope_type: scopeType,
+      source_id: memoryId,
+      source_type: "memory",
+    },
+    method: "POST",
+  });
+}
+
+async function loadTaskRuns(taskId) {
+  const runs = await postgrest("/task_runs", {
+    query: {
+      order: "started_at.desc",
+      select:
+        "id,task_id,agent_id,trace_id,status,context_pack,outcome,handoff_note,model_used,effort_used,error_message,started_at,finished_at,created_at",
+      task_id: `eq.${taskId}`,
+    },
+  });
+  const agentIds = [...new Set((runs || []).map((run) => run.agent_id).filter(Boolean))];
+  const agents = agentIds.length
+    ? await postgrest("/agents", {
+        query: {
+          id: `in.(${agentIds.join(",")})`,
+          select: "id,name",
+        },
+      })
+    : [];
+  const agentMap = new Map((agents || []).map((agent) => [agent.id, agent.name]));
+  return (runs || []).map((run) => ({
+    ...run,
+    agent_name: agentMap.get(run.agent_id) || null,
+    duration_ms:
+      run.finished_at && run.started_at
+        ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
+        : null,
+  }));
+}
+
+async function loadProjectsWithStats() {
+  const [projects, tasks, artifacts] = await Promise.all([
+    postgrest("/projects", { query: { order: "display_name.asc", select: "*" } }),
+    postgrest("/tasks", {
+      query: { limit: "500", order: "created_at.desc", select: "id,project_id,state" },
+    }),
+    postgrest("/artifacts", {
+      query: { limit: "500", order: "created_at.desc", select: "id,project_id" },
+    }),
+  ]);
+
+  const taskCounts = new Map();
+  const activeTaskCounts = new Map();
+  for (const task of tasks || []) {
+    if (!task.project_id) continue;
+    taskCounts.set(task.project_id, (taskCounts.get(task.project_id) || 0) + 1);
+    if (!["completed", "failed", "dead_letter"].includes(task.state)) {
+      activeTaskCounts.set(
+        task.project_id,
+        (activeTaskCounts.get(task.project_id) || 0) + 1
+      );
+    }
+  }
+
+  const artifactCounts = new Map();
+  for (const artifact of artifacts || []) {
+    if (!artifact.project_id) continue;
+    artifactCounts.set(
+      artifact.project_id,
+      (artifactCounts.get(artifact.project_id) || 0) + 1
+    );
+  }
+
+  return (projects || []).map((project) => ({
+    ...project,
+    active_task_count: activeTaskCounts.get(project.id) || 0,
+    artifact_count: artifactCounts.get(project.id) || 0,
+    task_count: taskCounts.get(project.id) || 0,
+  }));
+}
+
+async function buildUsageSummary() {
+  const now = Date.now();
+  const taskRuns = await postgrest("/task_runs", {
+    query: {
+      limit: "500",
+      order: "started_at.desc",
+      select: "id,task_id,model_used,started_at,finished_at",
+    },
+  });
+  const taskIds = [...new Set((taskRuns || []).map((run) => run.task_id).filter(Boolean))];
+  const tasks = taskIds.length
+    ? await postgrest("/tasks", {
+        query: {
+          id: `in.(${taskIds.join(",")})`,
+          select: "id,assigned_role",
+        },
+      })
+    : [];
+  const taskMap = new Map((tasks || []).map((task) => [task.id, task.assigned_role]));
+
+  function summarizeWindow(startMs) {
+    const runs = (taskRuns || []).filter(
+      (run) => new Date(run.started_at).getTime() >= startMs
+    );
+    const runsPerRole = new Map();
+    const modelDistribution = new Map();
+    for (const run of runs) {
+      const roleId = taskMap.get(run.task_id) || "unknown";
+      const durationMs =
+        run.finished_at && run.started_at
+          ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
+          : null;
+      const current = runsPerRole.get(roleId) || { durationSum: 0, durationCount: 0, run_count: 0 };
+      current.run_count += 1;
+      if (durationMs !== null) {
+        current.durationSum += durationMs;
+        current.durationCount += 1;
+      }
+      runsPerRole.set(roleId, current);
+      modelDistribution.set(run.model_used, (modelDistribution.get(run.model_used) || 0) + 1);
+    }
+
+    return {
+      model_distribution: [...modelDistribution.entries()].map(([model, count]) => ({
+        count,
+        model,
+      })),
+      run_count: runs.length,
+      runs_per_role: [...runsPerRole.entries()].map(([role_id, value]) => ({
+        average_duration_ms:
+          value.durationCount > 0 ? Math.round(value.durationSum / value.durationCount) : null,
+        role_id,
+        run_count: value.run_count,
+      })),
+    };
+  }
+
+  const recentArtifacts = await postgrest("/artifacts", {
+    query: {
+      limit: "8",
+      order: "created_at.desc",
+      select: "id,name,artifact_type,task_id,project_id,created_at,external_url,storage_path,metadata",
+    },
+  });
+  const recentProjects = (await loadProjectsWithStats()).slice(0, 6);
+
+  return {
+    recent_artifacts: recentArtifacts || [],
+    recent_projects: recentProjects,
+    task_runs: {
+      month: summarizeWindow(now - 30 * 24 * 60 * 60 * 1000),
+      today: summarizeWindow(now - 24 * 60 * 60 * 1000),
+      week: summarizeWindow(now - 7 * 24 * 60 * 60 * 1000),
+    },
+  };
 }
 
 function isTransientFetchError(error) {
@@ -444,9 +791,12 @@ async function createRelayTaskForInboundMessage(message) {
 }
 
 async function buildRelayObjective(message) {
+  const content = normalizeString(message.content);
+  const teachMode =
+    /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
   const history = await loadRecentConversationMessages(message);
   const transcript = [...history, {
-    content: message.content,
+    content,
     created_at: new Date().toISOString(),
     direction: "inbound",
     sender: message.sender,
@@ -457,7 +807,7 @@ async function buildRelayObjective(message) {
   return `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
 
 Current message:
-${message.content}
+${content}
 
 Recent conversation transcript:
 ${transcript}
@@ -465,7 +815,10 @@ ${transcript}
 Routing reminders:
 - If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless an approved plan already exists.
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
-- If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.`;
+- If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
+- If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
+
+Teach mode detected: ${teachMode ? "yes" : "no"}.`;
 }
 
 function formatConversationMessage(message) {
@@ -572,6 +925,369 @@ async function loadLatestTaskActivityMap(taskIds) {
   }
 
   return activityMap;
+}
+
+function getOptionalTrimmedString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function requireTrimmedString(value, fieldName) {
+  const normalized = getOptionalTrimmedString(value);
+  if (!normalized) {
+    throw new Error(`${fieldName} is required`);
+  }
+  return normalized;
+}
+
+function normalizeSlug(value, fieldName = "id") {
+  const normalized = requireTrimmedString(value, fieldName).toLowerCase();
+  if (!/^[a-z0-9._:-]+$/.test(normalized)) {
+    throw new Error(`${fieldName} must be a lowercase slug`);
+  }
+  return normalized;
+}
+
+function normalizeEnum(value, allowedValues, fieldName) {
+  const normalized = requireTrimmedString(value, fieldName).toLowerCase();
+  if (!allowedValues.has(normalized)) {
+    throw new Error(`${fieldName} must be one of: ${[...allowedValues].join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeJsonObject(value, fieldName) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  return value;
+}
+
+function normalizeOptionalNumber(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${fieldName} must be a number`);
+  }
+
+  return parsed;
+}
+
+function ensureUuidLike(value, fieldName) {
+  const normalized = requireTrimmedString(value, fieldName);
+  if (!/^[0-9a-f-]{8,}$/i.test(normalized)) {
+    throw new Error(`${fieldName} must be a UUID`);
+  }
+  return normalized;
+}
+
+function buildSkillSubject(name) {
+  return `skill:${normalizeSlug(name, "name")}`;
+}
+
+function normalizeSkillPayload(body, options = {}) {
+  const steps = Array.isArray(body?.steps)
+    ? body.steps.map((step, index) => ({
+        instruction: requireTrimmedString(step?.instruction, `steps[${index}].instruction`),
+        order:
+          typeof step?.order === "number" && Number.isFinite(step.order)
+            ? step.order
+            : index + 1,
+        required: step?.required !== false,
+        tool_hint: getOptionalTrimmedString(step?.tool_hint),
+      }))
+    : [];
+
+  return {
+    description: requireTrimmedString(body?.description, "description"),
+    display_name: requireTrimmedString(body?.display_name || body?.name, "display_name"),
+    input_schema: normalizeJsonObject(body?.input_schema || {}, "input_schema") || {},
+    name: normalizeSlug(body?.name, "name"),
+    output_schema: normalizeJsonObject(body?.output_schema || {}, "output_schema") || {},
+    required_services: normalizeStringArray(body?.required_services),
+    scope_id:
+      body?.scope_type === "company"
+        ? "company"
+        : requireTrimmedString(body?.scope_id, "scope_id"),
+    scope_type: normalizeEnum(body?.scope_type || "company", SCOPE_TYPE_OPTIONS, "scope_type"),
+    steps,
+    tags: normalizeStringArray(["skill", ...(body?.tags || [])]),
+    trigger_when: requireTrimmedString(body?.trigger_when, "trigger_when"),
+  };
+}
+
+function parseSkillMemoryRow(row) {
+  const content = safeJsonParse(row?.content, {});
+  if (!content || typeof content !== "object") {
+    return null;
+  }
+
+  const name =
+    getOptionalTrimmedString(content.name) ||
+    getOptionalTrimmedString(String(row?.subject || "").replace(/^skill:/, ""));
+
+  if (!name) {
+    return null;
+  }
+
+  const steps = Array.isArray(content.steps)
+    ? content.steps.map((step, index) => ({
+        instruction: String(step?.instruction || "").trim(),
+        order:
+          typeof step?.order === "number" && Number.isFinite(step.order)
+            ? step.order
+            : index + 1,
+        required: step?.required !== false,
+        tool_hint: getOptionalTrimmedString(step?.tool_hint),
+      }))
+    : [];
+
+  return {
+    id: row.id,
+    name,
+    display_name:
+      getOptionalTrimmedString(content.display_name) ||
+      getOptionalTrimmedString(content.name) ||
+      name,
+    description: getOptionalTrimmedString(content.description) || "",
+    trigger_when: getOptionalTrimmedString(content.trigger_when) || "",
+    steps,
+    input_schema:
+      content.input_schema && typeof content.input_schema === "object"
+        ? content.input_schema
+        : {},
+    output_schema:
+      content.output_schema && typeof content.output_schema === "object"
+        ? content.output_schema
+        : {},
+    required_services: normalizeStringArray(content.required_services),
+    scope_type: row.scope_type,
+    scope_id: row.scope_id,
+    tags: normalizeStringArray(row.tags),
+    version:
+      typeof content.version === "number" && Number.isFinite(content.version)
+        ? content.version
+        : 1,
+    last_used_at: getOptionalTrimmedString(content.last_used_at),
+    use_count:
+      typeof content.use_count === "number" && Number.isFinite(content.use_count)
+        ? content.use_count
+        : 0,
+    is_active: row.is_active !== false,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    memory_id: row.id,
+    subject: row.subject,
+    superseded_by: row.superseded_by || null,
+  };
+}
+
+function serializeSkillContent(skill, previousSkill = null) {
+  return JSON.stringify(
+    {
+      name: skill.name,
+      display_name: skill.display_name,
+      description: skill.description,
+      trigger_when: skill.trigger_when,
+      steps: skill.steps,
+      input_schema: skill.input_schema,
+      output_schema: skill.output_schema,
+      required_services: skill.required_services,
+      tags: skill.tags,
+      version: (previousSkill?.version || 0) + 1,
+      last_used_at: previousSkill?.last_used_at || null,
+      use_count: previousSkill?.use_count || 0,
+    },
+    null,
+    2
+  );
+}
+
+async function loadTaskFullPayload(taskId) {
+  const [taskRows, taskRuns, contextPack, events] = await Promise.all([
+    postgrest("/tasks", {
+      query: {
+        id: `eq.${taskId}`,
+        limit: "1",
+        select: "*",
+      },
+    }).catch(() => []),
+    loadTaskRuns(taskId),
+    postgrest("/rpc/build_context_pack", {
+      body: { p_task_id: taskId },
+      method: "POST",
+    }).catch(() => null),
+    postgrest("/events", {
+      query: {
+        limit: "50",
+        order: "created_at.desc",
+        scope_id: `eq.${taskId}`,
+        scope_type: "eq.task",
+        select: "*",
+      },
+    }).catch(() => []),
+  ]);
+
+  return {
+    task: taskRows?.[0] || null,
+    task_runs: taskRuns,
+    context_pack: contextPack,
+    related_artifacts: contextPack?.related_artifacts || [],
+    related_events: events || [],
+    related_memories: contextPack?.related_memories || [],
+  };
+}
+
+async function loadAgentActivity(agentId) {
+  const [taskRuns, events] = await Promise.all([
+    postgrest("/task_runs", {
+      query: {
+        agent_id: `eq.${agentId}`,
+        limit: "20",
+        order: "started_at.desc",
+        select:
+          "id,task_id,status,model_used,effort_used,error_message,started_at,finished_at,task:tasks(title)",
+      },
+    }).catch(() => []),
+    postgrest("/events", {
+      query: {
+        agent_id: `eq.${agentId}`,
+        limit: "20",
+        order: "created_at.desc",
+        select: "*",
+      },
+    }).catch(() => []),
+  ]);
+
+  return {
+    events: events || [],
+    task_runs: (taskRuns || []).map((run) => ({
+      ...run,
+      task_title: run?.task?.title || null,
+    })),
+  };
+}
+
+async function loadSkillVersions(skillRow) {
+  if (!skillRow?.subject) {
+    return [];
+  }
+
+  const rows =
+    (await postgrest("/memories", {
+      query: {
+        layer: "eq.procedural",
+        order: "created_at.desc",
+        scope_id: `eq.${skillRow.scope_id}`,
+        scope_type: `eq.${skillRow.scope_type}`,
+        select: "id,subject,content,tags,is_active,scope_type,scope_id,created_at,updated_at,superseded_by",
+        subject: `eq.${skillRow.subject}`,
+      },
+    }).catch(() => [])) || [];
+
+  return rows
+    .map(parseSkillMemoryRow)
+    .filter(Boolean)
+    .map((skill) => ({
+      id: skill.id,
+      updated_at: skill.updated_at,
+      version: skill.version,
+    }));
+}
+
+async function createSkillMemory(skillPayload, existingSkill = null) {
+  const now = new Date().toISOString();
+  const content = serializeSkillContent(skillPayload, existingSkill);
+
+  const rows = await postgrest("/memories", {
+    body: {
+      confidence: 1,
+      content,
+      created_at: now,
+      is_active: true,
+      layer: "procedural",
+      scope_id: skillPayload.scope_type === "company" ? "company" : skillPayload.scope_id,
+      scope_type: skillPayload.scope_type,
+      source_agent_id: null,
+      subject: buildSkillSubject(skillPayload.name),
+      superseded_by: null,
+      tags: skillPayload.tags,
+      updated_at: now,
+    },
+    method: "POST",
+    preferRepresentation: true,
+  });
+
+  const row = rows?.[0];
+
+  if (!row) {
+    throw new Error("Failed to create skill memory");
+  }
+
+  await upsertMemoryChunk(
+    row.id,
+    row.scope_type,
+    row.scope_id,
+    buildSkillChunkContent(skillPayload)
+  );
+
+  if (existingSkill?.id) {
+    await postgrest("/memories", {
+      body: {
+        is_active: false,
+        superseded_by: row.id,
+        updated_at: now,
+      },
+      method: "PATCH",
+      query: { id: `eq.${existingSkill.id}` },
+    });
+  }
+
+  return row;
+}
+
+async function getSystemSetting(key) {
+  const rows = await postgrest("/system_settings", {
+    query: {
+      key: `eq.${key}`,
+      limit: "1",
+      select: "key,value,updated_at",
+    },
+  }).catch(() => []);
+
+  return rows?.[0] || null;
+}
+
+async function saveSystemSetting(key, value) {
+  const existing = await getSystemSetting(key);
+
+  if (existing?.key) {
+    await postgrest("/system_settings", {
+      body: {
+        updated_at: new Date().toISOString(),
+        value,
+      },
+      method: "PATCH",
+      query: { key: `eq.${key}` },
+    });
+    return;
+  }
+
+  await postgrest("/system_settings", {
+    body: {
+      key,
+      updated_at: new Date().toISOString(),
+      value,
+    },
+    method: "POST",
+  });
 }
 
 async function callTelegramApi(method, body) {
@@ -750,6 +1466,11 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/auth/login" && req.method === "POST") {
+    if (isRateLimited(getRateLimitKey(req, "login"), LOGIN_RATE_LIMIT)) {
+      sendJson(res, 429, { error: "Too many login attempts. Try again shortly." });
+      return;
+    }
+
     const body = await readJson(req);
     if (body.user === ADMIN_USER && body.pass === ADMIN_PASS) {
       setSessionCookie(res, body.user);
@@ -769,6 +1490,11 @@ async function handleApi(req, res, url) {
   }
 
   if (!(await requireAuth(req, res))) return;
+
+  if (isRateLimited(getRateLimitKey(req, "api"), API_RATE_LIMIT)) {
+    sendJson(res, 429, { error: "Too many requests. Slow down." });
+    return;
+  }
 
   if (pathname === "/api/messages" && req.method === "GET") {
     const channel = searchParams.get("channel") || "admin_chat";
@@ -801,6 +1527,7 @@ async function handleApi(req, res, url) {
   if (pathname === "/api/messages" && req.method === "POST") {
     const body = await readJson(req);
     const content = typeof body.content === "string" ? body.content.trim() : "";
+    const teachMode = /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
 
     if (!content) {
       sendJson(res, 400, { error: "Message content is required" });
@@ -825,6 +1552,7 @@ async function handleApi(req, res, url) {
             routing: "fallback_poll",
             routing_error:
               taskError instanceof Error ? taskError.message : String(taskError),
+            teach_mode: teachMode,
           },
           processed: false,
           sender: "operator",
@@ -846,6 +1574,7 @@ async function handleApi(req, res, url) {
         metadata: {
           relay_task_id: relayTask?.id || null,
           routing: "direct_relay_task",
+          teach_mode: teachMode,
         },
         processed: true,
         sender: "operator",
@@ -865,6 +1594,8 @@ async function handleApi(req, res, url) {
   if (pathname === "/api/tasks" && req.method === "GET") {
     const state = searchParams.get("state");
     const before = searchParams.get("before");
+    const projectId = searchParams.get("project_id");
+    const queryText = searchParams.get("q");
     const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
     const limit = Number.isFinite(rawLimit)
       ? Math.max(1, Math.min(rawLimit, 200))
@@ -872,11 +1603,15 @@ async function handleApi(req, res, url) {
     const data = await postgrest("/tasks", {
       query: {
         ...(before ? { created_at: `lt.${before}` } : {}),
+        ...(projectId ? { project_id: `eq.${projectId}` } : {}),
+        ...(queryText
+          ? { or: `(title.ilike.*${queryText}*,objective.ilike.*${queryText}*)` }
+          : {}),
         ...(state && state !== "all" ? { state: `eq.${state}` } : {}),
         limit: String(limit),
         order: "created_at.desc",
         select:
-          "id,title,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id",
+          "id,title,objective,acceptance_criteria,state,priority,assigned_role,claimed_by,attempt_count,last_handoff_note,created_at,updated_at,blocked_reason,parent_task_id,project_id,due_at",
       },
     });
     const activityMap = await loadLatestTaskActivityMap(
@@ -892,6 +1627,139 @@ async function handleApi(req, res, url) {
         }))
       : [];
     sendJson(res, 200, tasksWithActivity);
+    return;
+  }
+
+  if (pathname === "/api/tasks" && req.method === "POST") {
+    const body = await readJson(req);
+    const assignedRole = normalizeString(body.assigned_role).toLowerCase();
+    const title = normalizeString(body.title);
+    const objective = normalizeString(body.objective);
+
+    if (!title || !objective || !assignedRole) {
+      sendJson(res, 400, { error: "title, objective, and assigned_role are required" });
+      return;
+    }
+
+    const role = await postgrest("/roles", {
+      query: { id: `eq.${assignedRole}`, limit: "1", select: "id" },
+    });
+    if (!role?.[0]?.id) {
+      sendJson(res, 400, { error: `Role '${assignedRole}' does not exist` });
+      return;
+    }
+
+    const rows = await postgrest("/tasks", {
+      body: {
+        acceptance_criteria: Array.isArray(body.acceptance_criteria)
+          ? body.acceptance_criteria.map((entry) => String(entry))
+          : [],
+        assigned_role: assignedRole,
+        objective,
+        parent_task_id: normalizeString(body.parent_task_id) || null,
+        priority: normalizeString(body.priority, "normal") || "normal",
+        project_id: normalizeString(body.project_id) || null,
+        state: "ready",
+        title,
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+
+    sendJson(res, 201, rows?.[0] || null);
+    return;
+  }
+
+  const taskEditMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+  if (taskEditMatch && req.method === "PATCH") {
+    const [, taskId] = taskEditMatch;
+    const body = await readJson(req);
+    const patch = {};
+
+    if (typeof body.title === "string" && body.title.trim()) {
+      patch.title = body.title.trim();
+    }
+    if (typeof body.objective === "string" && body.objective.trim()) {
+      patch.objective = body.objective.trim();
+    }
+    if (Array.isArray(body.acceptance_criteria)) {
+      patch.acceptance_criteria = body.acceptance_criteria
+        .map((entry) => normalizeString(entry))
+        .filter(Boolean);
+    }
+    if (
+      typeof body.assigned_role === "string" &&
+      body.assigned_role.trim()
+    ) {
+      patch.assigned_role = body.assigned_role.trim().toLowerCase();
+    }
+    if (
+      typeof body.priority === "string" &&
+      TASK_PRIORITY_OPTIONS.has(body.priority.trim().toLowerCase())
+    ) {
+      patch.priority = body.priority.trim().toLowerCase();
+    }
+    if (typeof body.project_id === "string") {
+      patch.project_id = body.project_id.trim() || null;
+    }
+    if (typeof body.parent_task_id === "string") {
+      patch.parent_task_id = body.parent_task_id.trim() || null;
+    }
+    if (typeof body.due_at === "string") {
+      patch.due_at = body.due_at.trim() || null;
+    }
+
+    const rows = await postgrest("/tasks", {
+      body: patch,
+      method: "PATCH",
+      preferRepresentation: true,
+      query: { id: `eq.${taskId}` },
+    });
+    sendJson(res, 200, rows?.[0] || null);
+    return;
+  }
+
+  const taskRunsMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/runs$/);
+  if (taskRunsMatch && req.method === "GET") {
+    const [, taskId] = taskRunsMatch;
+    sendJson(res, 200, await loadTaskRuns(taskId));
+    return;
+  }
+
+  const taskFullMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/full$/);
+  if (taskFullMatch && req.method === "GET") {
+    const [, taskId] = taskFullMatch;
+    const [contextPack, taskRuns] = await Promise.all([
+      postgrest("/rpc/build_context_pack", {
+        body: { p_task_id: taskId },
+        method: "POST",
+      }),
+      loadTaskRuns(taskId),
+    ]);
+    const task = contextPack?.task || null;
+    const parentTask =
+      task?.parent_task_id
+        ? (
+            await postgrest("/tasks", {
+              query: {
+                id: `eq.${task.parent_task_id}`,
+                limit: "1",
+                select: "id,title,state,priority,assigned_role,parent_task_id,project_id,created_at,updated_at",
+              },
+            })
+          )?.[0] || null
+        : null;
+
+    sendJson(res, 200, {
+      artifacts: contextPack?.related_artifacts || [],
+      child_tasks: contextPack?.child_tasks || [],
+      parent_task: parentTask,
+      project: contextPack?.project || null,
+      related_events: contextPack?.recent_events || [],
+      related_memories: contextPack?.related_memories || [],
+      task,
+      task_runs: taskRuns,
+    });
     return;
   }
 
@@ -987,6 +1855,119 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/agents" && req.method === "POST") {
+    const body = await readJson(req);
+    const name = normalizeString(body.name);
+    const roleId = normalizeString(body.role_id).toLowerCase();
+    if (!name || !roleId) {
+      sendJson(res, 400, { error: "name and role_id are required" });
+      return;
+    }
+
+    const rows = await postgrest("/agents", {
+      body: {
+        config: body.config && typeof body.config === "object" ? body.config : {},
+        name,
+        role_id: roleId,
+        status: AGENT_STATUS_OPTIONS.has(normalizeString(body.status))
+          ? normalizeString(body.status)
+          : "active",
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    sendJson(res, 201, rows?.[0] || null);
+    return;
+  }
+
+  const agentActivityMatch = pathname.match(/^\/api\/agents\/([^/]+)\/activity$/);
+  if (agentActivityMatch && req.method === "GET") {
+    const [, agentId] = agentActivityMatch;
+    const [agents, taskRuns, events] = await Promise.all([
+      postgrest("/agents", {
+        query: { id: `eq.${agentId}`, limit: "1", select: "*" },
+      }),
+      postgrest("/task_runs", {
+        query: {
+          agent_id: `eq.${agentId}`,
+          limit: "20",
+          order: "started_at.desc",
+          select:
+            "id,task_id,agent_id,trace_id,status,context_pack,outcome,handoff_note,model_used,effort_used,error_message,started_at,finished_at,created_at",
+        },
+      }),
+      postgrest("/events", {
+        query: {
+          agent_id: `eq.${agentId}`,
+          limit: "20",
+          order: "created_at.desc",
+          select: "*",
+        },
+      }),
+    ]);
+    const taskIds = [...new Set((taskRuns || []).map((run) => run.task_id).filter(Boolean))];
+    const tasks = taskIds.length
+      ? await postgrest("/tasks", {
+          query: {
+            id: `in.(${taskIds.join(",")})`,
+            select: "id,title",
+          },
+        })
+      : [];
+    const taskMap = new Map((tasks || []).map((task) => [task.id, task.title]));
+    sendJson(res, 200, {
+      agent: agents?.[0] || null,
+      events: events || [],
+      task_runs: (taskRuns || []).map((run) => ({
+        ...run,
+        duration_ms:
+          run.finished_at && run.started_at
+            ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
+            : null,
+        task_title: taskMap.get(run.task_id) || null,
+      })),
+    });
+    return;
+  }
+
+  const agentMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
+  if (agentMatch && req.method === "GET") {
+    const [, agentId] = agentMatch;
+    const data = await postgrest("/agents", {
+      query: { id: `eq.${agentId}`, limit: "1", select: "*" },
+    });
+    sendJson(res, 200, data?.[0] || null);
+    return;
+  }
+
+  if (agentMatch && req.method === "PATCH") {
+    const [, agentId] = agentMatch;
+    const body = await readJson(req);
+    const patch = {};
+
+    if (typeof body.name === "string" && body.name.trim()) {
+      patch.name = body.name.trim();
+    }
+    if (typeof body.role_id === "string" && body.role_id.trim()) {
+      patch.role_id = body.role_id.trim().toLowerCase();
+    }
+    if (typeof body.status === "string" && AGENT_STATUS_OPTIONS.has(body.status.trim())) {
+      patch.status = body.status.trim();
+    }
+    if (body.config && typeof body.config === "object") {
+      patch.config = body.config;
+    }
+
+    const rows = await postgrest("/agents", {
+      body: patch,
+      method: "PATCH",
+      preferRepresentation: true,
+      query: { id: `eq.${agentId}` },
+    });
+    sendJson(res, 200, rows?.[0] || null);
+    return;
+  }
+
   if (pathname === "/api/roles" && req.method === "GET") {
     const data = await postgrest("/roles", {
       query: { order: "id.asc", select: "*" },
@@ -995,9 +1976,98 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/roles" && req.method === "POST") {
+    const body = await readJson(req);
+    const roleId = normalizeString(body.id).toLowerCase();
+    if (
+      !roleId ||
+      !normalizeString(body.display_name) ||
+      !normalizeString(body.description) ||
+      !normalizeString(body.policy_doc)
+    ) {
+      sendJson(res, 400, {
+        error: "id, display_name, description, and policy_doc are required",
+      });
+      return;
+    }
+
+    const model = normalizeString(body.model, "sonnet").toLowerCase();
+    const effort = normalizeString(body.effort, "medium").toLowerCase();
+    const rows = await postgrest("/roles", {
+      body: {
+        description: body.description.trim(),
+        display_name: body.display_name.trim(),
+        effort: EFFORT_OPTIONS.has(effort) ? effort : "medium",
+        handoff_when: normalizeString(body.handoff_when),
+        id: roleId,
+        is_system_role: false,
+        max_concurrent_tasks: Number(body.max_concurrent_tasks || 3),
+        model: MODEL_OPTIONS.has(model) ? model : "sonnet",
+        policy_doc: body.policy_doc.trim(),
+        requires_approval_for: normalizeStringArray(body.requires_approval_for),
+        usage_summary: normalizeString(body.usage_summary),
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    sendJson(res, 201, rows?.[0] || null);
+    return;
+  }
+
+  const roleMatch = pathname.match(/^\/api\/roles\/([^/]+)$/);
+  if (roleMatch && req.method === "GET") {
+    const [, roleId] = roleMatch;
+    const data = await postgrest("/roles", {
+      query: { id: `eq.${roleId}`, limit: "1", select: "*" },
+    });
+    sendJson(res, 200, data?.[0] || null);
+    return;
+  }
+
+  if (roleMatch && req.method === "PATCH") {
+    const [, roleId] = roleMatch;
+    const body = await readJson(req);
+    const patch = {};
+    for (const field of [
+      "description",
+      "handoff_when",
+      "policy_doc",
+      "usage_summary",
+    ]) {
+      if (typeof body[field] === "string") {
+        patch[field] = body[field].trim();
+      }
+    }
+    if (typeof body.model === "string" && MODEL_OPTIONS.has(body.model.trim())) {
+      patch.model = body.model.trim();
+    }
+    if (typeof body.effort === "string" && EFFORT_OPTIONS.has(body.effort.trim())) {
+      patch.effort = body.effort.trim();
+    }
+    if (body.max_concurrent_tasks !== undefined) {
+      patch.max_concurrent_tasks = Math.max(1, Number(body.max_concurrent_tasks || 1));
+    }
+    if (Array.isArray(body.requires_approval_for)) {
+      patch.requires_approval_for = normalizeStringArray(body.requires_approval_for);
+    }
+
+    const rows = await postgrest("/roles", {
+      body: patch,
+      method: "PATCH",
+      preferRepresentation: true,
+      query: { id: `eq.${roleId}` },
+    });
+    sendJson(res, 200, rows?.[0] || null);
+    return;
+  }
+
   if (pathname === "/api/memories" && req.method === "GET") {
     const query = searchParams.get("q");
     const before = searchParams.get("before");
+    const layer = searchParams.get("layer");
+    const scopeType = searchParams.get("scope_type");
+    const scopeId = searchParams.get("scope_id");
+    const mode = searchParams.get("mode");
     const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
     const limit = Number.isFinite(rawLimit)
       ? Math.max(1, Math.min(rawLimit, 200))
@@ -1006,13 +2076,63 @@ async function handleApi(req, res, url) {
       query: {
         ...(before ? { created_at: `lt.${before}` } : {}),
         ...(query ? { subject: `ilike.*${query}*` } : {}),
+        ...(layer ? { layer: `eq.${layer}` } : {}),
+        ...(scopeType ? { scope_type: `eq.${scopeType}` } : {}),
+        ...(scopeId ? { scope_id: `eq.${scopeId}` } : {}),
         is_active: "eq.true",
         limit: String(limit),
         order: "created_at.desc",
         select: "*",
       },
     });
-    sendJson(res, 200, data || []);
+    const filtered =
+      mode === "knowledge" || mode === "knowledge_base"
+        ? (data || []).filter(
+            (memory) =>
+              memory.source_agent_id === null ||
+              (Array.isArray(memory.tags) &&
+                memory.tags.some((tag) =>
+                  ["operator_preference", "operator_taught"].includes(tag)
+                ))
+          )
+        : data || [];
+    sendJson(res, 200, filtered);
+    return;
+  }
+
+  if (pathname === "/api/memories" && req.method === "POST") {
+    const body = await readJson(req);
+    const layer = normalizeString(body.layer).toLowerCase();
+    if (!MEMORY_LAYER_OPTIONS.has(layer)) {
+      sendJson(res, 400, { error: "layer must be episodic, semantic, or procedural" });
+      return;
+    }
+
+    const rows = await postgrest("/memories", {
+      body: {
+        confidence: Number(body.confidence ?? 1),
+        content: normalizeString(body.content),
+        is_active: true,
+        layer,
+        scope_id: normalizeString(body.scope_id),
+        scope_type: normalizeString(body.scope_type),
+        source_agent_id: null,
+        subject: normalizeString(body.subject),
+        tags: normalizeStringArray(body.tags),
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    const memory = rows?.[0] || null;
+    if (memory?.id) {
+      await upsertMemoryChunk(
+        memory.id,
+        memory.scope_type,
+        memory.scope_id,
+        `${memory.subject}: ${memory.content}`
+      );
+    }
+    sendJson(res, 201, memory);
     return;
   }
 
@@ -1025,6 +2145,35 @@ async function handleApi(req, res, url) {
       query: { id: `eq.${memoryId}` },
     });
     sendNoContent(res);
+    return;
+  }
+
+  const memoryMatch = pathname.match(/^\/api\/memories\/([^/]+)$/);
+  if (memoryMatch && req.method === "PATCH") {
+    const [, memoryId] = memoryMatch;
+    const body = await readJson(req);
+    const patch = {};
+    if (typeof body.subject === "string") patch.subject = body.subject.trim();
+    if (typeof body.content === "string") patch.content = body.content.trim();
+    if (Array.isArray(body.tags)) patch.tags = normalizeStringArray(body.tags);
+    if (body.confidence !== undefined) patch.confidence = Number(body.confidence);
+
+    const rows = await postgrest("/memories", {
+      body: patch,
+      method: "PATCH",
+      preferRepresentation: true,
+      query: { id: `eq.${memoryId}` },
+    });
+    const memory = rows?.[0] || null;
+    if (memory?.id) {
+      await upsertMemoryChunk(
+        memory.id,
+        memory.scope_type,
+        memory.scope_id,
+        `${memory.subject}: ${memory.content}`
+      );
+    }
+    sendJson(res, 200, memory);
     return;
   }
 
@@ -1051,10 +2200,66 @@ async function handleApi(req, res, url) {
       query: {
         order: "service_name.asc",
         select:
-          "id,service_name,display_name,description,status,error_message,last_verified",
+          "id,service_name,display_name,description,base_url,auth_type,status,error_message,last_verified,updated_at",
       },
     });
     sendJson(res, 200, data || []);
+    return;
+  }
+
+  if (pathname === "/api/services" && req.method === "POST") {
+    const body = await readJson(req);
+    const credential = normalizeString(body.credential);
+    const rows = await postgrest("/service_registry", {
+      body: {
+        auth_type: normalizeString(body.auth_type, "api_key") || "api_key",
+        base_url: normalizeString(body.base_url) || null,
+        credential: credential || null,
+        description: normalizeString(body.description),
+        display_name: normalizeString(body.display_name),
+        last_verified: credential ? new Date().toISOString() : null,
+        service_name: normalizeString(body.service_name).toLowerCase(),
+        status: credential ? "active" : "key_needed",
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    sendJson(res, 201, rows?.[0] || null);
+    return;
+  }
+
+  const serviceEditMatch = pathname.match(/^\/api\/services\/([^/]+)$/);
+  if (serviceEditMatch && req.method === "PATCH") {
+    const [, serviceId] = serviceEditMatch;
+    const body = await readJson(req);
+    const patch = {};
+    for (const field of ["display_name", "description", "base_url", "auth_type", "status"]) {
+      if (typeof body[field] === "string") {
+        patch[field] = body[field].trim();
+      }
+    }
+    if (typeof body.credential === "string") {
+      patch.credential = body.credential.trim();
+      patch.last_verified = new Date().toISOString();
+      patch.status = "active";
+    }
+    const rows = await postgrest("/service_registry", {
+      body: patch,
+      method: "PATCH",
+      preferRepresentation: true,
+      query: { id: `eq.${serviceId}` },
+    });
+    sendJson(res, 200, rows?.[0] || null);
+    return;
+  }
+
+  if (serviceEditMatch && req.method === "DELETE") {
+    const [, serviceId] = serviceEditMatch;
+    await postgrest("/service_registry", {
+      method: "DELETE",
+      query: { id: `eq.${serviceId}` },
+    });
+    sendNoContent(res);
     return;
   }
 
@@ -1172,6 +2377,302 @@ async function handleApi(req, res, url) {
       query: { id: `eq.${scheduleId}` },
     });
     sendNoContent(res);
+    return;
+  }
+
+  if (pathname === "/api/usage/summary" && req.method === "GET") {
+    sendJson(res, 200, await buildUsageSummary());
+    return;
+  }
+
+  if (pathname === "/api/artifacts" && req.method === "GET") {
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "50", 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, 200))
+      : 50;
+    const data = await postgrest("/artifacts", {
+      query: {
+        ...(searchParams.get("artifact_type")
+          ? { artifact_type: `eq.${searchParams.get("artifact_type")}` }
+          : {}),
+        ...(searchParams.get("project_id")
+          ? { project_id: `eq.${searchParams.get("project_id")}` }
+          : {}),
+        ...(searchParams.get("task_id")
+          ? { task_id: `eq.${searchParams.get("task_id")}` }
+          : {}),
+        limit: String(limit),
+        order: "created_at.desc",
+        select:
+          "id,project_id,task_id,artifact_type,name,storage_path,external_url,mime_type,size_bytes,metadata,created_by,created_at",
+      },
+    });
+    sendJson(res, 200, data || []);
+    return;
+  }
+
+  const artifactMatch = pathname.match(/^\/api\/artifacts\/([^/]+)$/);
+  if (artifactMatch && req.method === "GET") {
+    const [, artifactId] = artifactMatch;
+    const data = await postgrest("/artifacts", {
+      query: {
+        id: `eq.${artifactId}`,
+        limit: "1",
+        select:
+          "id,project_id,task_id,artifact_type,name,storage_path,external_url,mime_type,size_bytes,metadata,created_by,created_at",
+      },
+    });
+    sendJson(res, 200, data?.[0] || null);
+    return;
+  }
+
+  if (pathname === "/api/projects" && req.method === "GET") {
+    sendJson(res, 200, await loadProjectsWithStats());
+    return;
+  }
+
+  if (pathname === "/api/projects" && req.method === "POST") {
+    const body = await readJson(req);
+    const rows = await postgrest("/projects", {
+      body: {
+        description: normalizeString(body.description),
+        display_name: normalizeString(body.display_name),
+        repo_url: normalizeString(body.repo_url) || null,
+        slug: normalizeString(body.slug).toLowerCase(),
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    sendJson(res, 201, rows?.[0] || null);
+    return;
+  }
+
+  const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
+  if (projectMatch && req.method === "PATCH") {
+    const [, projectId] = projectMatch;
+    const body = await readJson(req);
+    const patch = {};
+    for (const field of ["description", "display_name", "repo_url", "slug"]) {
+      if (typeof body[field] === "string") {
+        patch[field] = field === "slug" ? body[field].trim().toLowerCase() : body[field].trim();
+      }
+    }
+    const rows = await postgrest("/projects", {
+      body: patch,
+      method: "PATCH",
+      preferRepresentation: true,
+      query: { id: `eq.${projectId}` },
+    });
+    sendJson(res, 200, rows?.[0] || null);
+    return;
+  }
+
+  if (pathname === "/api/skills" && req.method === "GET") {
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "100", 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, 200))
+      : 100;
+    const rows = await postgrest("/memories", {
+      query: {
+        ...(searchParams.get("q")
+          ? { subject: `ilike.*${searchParams.get("q")}*` }
+          : {}),
+        ...(searchParams.get("scope_type")
+          ? { scope_type: `eq.${searchParams.get("scope_type")}` }
+          : {}),
+        contains: undefined,
+        is_active: "eq.true",
+        layer: "eq.procedural",
+        limit: String(limit),
+        order: "updated_at.desc",
+        select:
+          "id,subject,content,tags,scope_type,scope_id,is_active,created_at,updated_at,superseded_by,source_agent_id",
+      },
+    });
+    const requiredTags = normalizeStringArray(
+      String(searchParams.get("tags") || "")
+        .split(",")
+        .map((part) => part.trim())
+    );
+    const skills = (rows || [])
+      .filter((row) => Array.isArray(row.tags) && row.tags.includes(SKILL_TAG))
+      .map(parseSkillMemory)
+      .filter((skill) =>
+        requiredTags.length ? requiredTags.every((tag) => skill.tags.includes(tag)) : true
+      );
+    sendJson(res, 200, skills);
+    return;
+  }
+
+  if (pathname === "/api/skills" && req.method === "POST") {
+    const body = await readJson(req);
+    const name = normalizeString(body.name).replace(/^skill:/, "");
+    const tags = [SKILL_TAG, ...normalizeStringArray(body.tags)];
+    const scopeType = normalizeString(body.scope_type, "company") || "company";
+    const scopeId =
+      scopeType === "company"
+        ? normalizeString(body.scope_id, "system") || "system"
+        : normalizeString(body.scope_id);
+    const rows = await postgrest("/memories", {
+      body: {
+        content: buildSkillContent(body, 1),
+        layer: "procedural",
+        scope_id: scopeId,
+        scope_type: scopeType,
+        source_agent_id: null,
+        subject: `skill:${name}`,
+        tags,
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    const memory = rows?.[0] || null;
+    if (memory?.id) {
+      await upsertMemoryChunk(
+        memory.id,
+        memory.scope_type,
+        memory.scope_id,
+        buildSkillChunkContent({ ...body, name })
+      );
+    }
+    sendJson(res, 201, memory ? parseSkillMemory(memory) : null);
+    return;
+  }
+
+  const skillMatch = pathname.match(/^\/api\/skills\/([^/]+)$/);
+  if (skillMatch && req.method === "GET") {
+    const [, skillId] = skillMatch;
+    const data = await postgrest("/memories", {
+      query: {
+        id: `eq.${skillId}`,
+        limit: "1",
+        select:
+          "id,subject,content,tags,scope_type,scope_id,is_active,created_at,updated_at,superseded_by,source_agent_id",
+      },
+    });
+    const memory = data?.[0] || null;
+    if (!memory) {
+      sendJson(res, 404, { error: "Skill not found" });
+      return;
+    }
+    const versions = await postgrest("/memories", {
+      query: {
+        layer: "eq.procedural",
+        scope_id: `eq.${memory.scope_id}`,
+        scope_type: `eq.${memory.scope_type}`,
+        subject: `eq.${memory.subject}`,
+        order: "created_at.desc",
+        select:
+          "id,subject,content,tags,scope_type,scope_id,is_active,created_at,updated_at,superseded_by,source_agent_id",
+      },
+    });
+    sendJson(res, 200, {
+      skill: parseSkillMemory(memory),
+      versions: (versions || []).map((version) => {
+        const parsed = parseSkillMemory(version);
+        return {
+          created_at: parsed.created_at,
+          id: parsed.id,
+          is_active: parsed.is_active,
+          updated_at: parsed.updated_at,
+          use_count: parsed.use_count,
+          version: parsed.version,
+        };
+      }),
+    });
+    return;
+  }
+
+  if (skillMatch && req.method === "PATCH") {
+    const [, skillId] = skillMatch;
+    const body = await readJson(req);
+    const existing = await postgrest("/memories", {
+      query: {
+        id: `eq.${skillId}`,
+        limit: "1",
+        select:
+          "id,subject,content,tags,scope_type,scope_id,is_active,created_at,updated_at,superseded_by,source_agent_id",
+      },
+    });
+    const previous = existing?.[0] || null;
+    if (!previous) {
+      sendJson(res, 404, { error: "Skill not found" });
+      return;
+    }
+    const previousSkill = parseSkillMemory(previous);
+    const rows = await postgrest("/memories", {
+      body: {
+        content: buildSkillContent(
+          {
+            ...previousSkill,
+            ...body,
+            last_used_at: previousSkill.last_used_at,
+            use_count: previousSkill.use_count,
+          },
+          previousSkill.version + 1
+        ),
+        layer: "procedural",
+        scope_id: previous.scope_id,
+        scope_type: previous.scope_type,
+        source_agent_id: null,
+        subject: previous.subject,
+        superseded_by: null,
+        tags: [SKILL_TAG, ...normalizeStringArray(body.tags || previous.tags)],
+      },
+      method: "POST",
+      preferRepresentation: true,
+    });
+    const memory = rows?.[0] || null;
+    if (memory?.id) {
+      await postgrest("/memories", {
+        body: { is_active: false, superseded_by: memory.id },
+        method: "PATCH",
+        query: { id: `eq.${skillId}` },
+      });
+      await upsertMemoryChunk(
+        memory.id,
+        memory.scope_type,
+        memory.scope_id,
+        buildSkillChunkContent({
+          ...previousSkill,
+          ...body,
+          name: previousSkill.name,
+        })
+      );
+    }
+    sendJson(res, 200, memory ? parseSkillMemory(memory) : null);
+    return;
+  }
+
+  if (skillMatch && req.method === "DELETE") {
+    const [, skillId] = skillMatch;
+    await postgrest("/memories", {
+      body: { is_active: false },
+      method: "PATCH",
+      query: { id: `eq.${skillId}` },
+    });
+    sendNoContent(res);
+    return;
+  }
+
+  if (pathname === "/api/settings/agent-instructions" && req.method === "GET") {
+    const setting = await getSystemSetting("agent_instructions_override");
+    sendJson(res, 200, {
+      content:
+        typeof setting?.value?.content === "string" ? setting.value.content : "",
+      updated_at: setting?.updated_at || null,
+    });
+    return;
+  }
+
+  if (pathname === "/api/settings/agent-instructions" && req.method === "PATCH") {
+    const body = await readJson(req);
+    const content = typeof body.content === "string" ? body.content : "";
+    await saveSystemSetting("agent_instructions_override", { content });
+    sendJson(res, 200, {
+      content,
+      updated_at: new Date().toISOString(),
+    });
     return;
   }
 

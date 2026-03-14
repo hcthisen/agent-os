@@ -1,6 +1,7 @@
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { withDecryptedCredential } from "../service-registry.js";
 import { upsertTaskRequirement } from "../task_requirements.js";
 
 interface ServiceRow {
@@ -80,7 +81,7 @@ export async function serviceRequire(args: {
       throw new Error(`Failed to register required service '${serviceName}': ${error.message}`);
     }
 
-    service = data;
+    service = await withDecryptedCredential(data);
   } else {
     const patch = buildServicePatch(service, {
       baseUrl: args.base_url,
@@ -105,8 +106,12 @@ export async function serviceRequire(args: {
         throw new Error(`Failed to update service '${serviceName}': ${error.message}`);
       }
 
-      service = data;
+      service = await withDecryptedCredential(data);
     }
+  }
+
+  if (!service) {
+    throw new Error(`Service '${serviceName}' could not be loaded after registration.`);
   }
 
   const ready = service.status === "active" && Boolean(service.credential);
@@ -194,7 +199,7 @@ function buildServicePatch(
 
 async function loadService(serviceName: string): Promise<ServiceRow | null> {
   const db = getDb();
-  const { data, error } = await db
+  const { data: rawData, error } = await db
     .from("service_registry")
     .select(
       "id,service_name,display_name,description,base_url,auth_type,credential,status,error_message,updated_at"
@@ -206,7 +211,7 @@ async function loadService(serviceName: string): Promise<ServiceRow | null> {
     throw new Error(`Failed to load service '${serviceName}': ${error.message}`);
   }
 
-  return data || null;
+  return await withDecryptedCredential(rawData);
 }
 
 async function logServiceRequirementEvent(args: {

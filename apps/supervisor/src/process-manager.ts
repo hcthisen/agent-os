@@ -9,6 +9,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -21,17 +22,19 @@ import {
 } from "./runtime-provider.js";
 
 interface ActiveProcess {
+  durationCheck: ReturnType<typeof setInterval> | null;
   heartbeatInFlight: Promise<void> | null;
   inactivityCheck: ReturnType<typeof setInterval> | null;
   lastActivityAt: Date;
   lastActivitySummary: string | null;
   lastHeartbeatAt: Date | null;
+  maxRunDurationMs: number;
   proc: ChildProcess;
   provider: RuntimeProvider;
   responsePath: string | null;
   roleId: string;
   taskId: string;
-  terminationReason: "inactivity_timeout" | null;
+  terminationReason: "inactivity_timeout" | "max_duration_timeout" | null;
   agentId: string;
   runId: string;
   traceId: string;
@@ -74,6 +77,33 @@ const WORKSPACE_EXCLUDED_NAMES = new Set([
   "public-live",
   "workspaces",
 ]);
+const CHILD_ENV_ALLOWLIST = [
+  "CI",
+  "COLORTERM",
+  "FORCE_COLOR",
+  "GIT_ASKPASS",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "NODE_EXTRA_CA_CERTS",
+  "NO_COLOR",
+  "PATH",
+  "PATHEXT",
+  "SHELL",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "SSH_ASKPASS",
+  "SSH_AUTH_SOCK",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_STATE_HOME",
+] as const;
 
 export function getActiveCount(): number {
   return activeProcesses.size;
@@ -83,6 +113,102 @@ export function hasCapacity(): boolean {
   return activeProcesses.size < config.concurrencyLimit;
 }
 
+export function getActiveTaskIds(): string[] {
+  return [...new Set([...activeProcesses.values()].map((active) => active.taskId))];
+}
+
+export async function cleanupWorkspaces(): Promise<void> {
+  const db = getDb();
+  const cutoffMs = Date.now() - config.workspaceCleanupHours * 60 * 60 * 1000;
+  const { data: runs, error } = await db
+    .from("task_runs")
+    .select("task_id,finished_at,status")
+    .in("status", ["completed", "failed", "timeout", "interrupted"])
+    .not("finished_at", "is", null)
+    .order("finished_at", { ascending: false })
+    .limit(2000)
+    .returns<Array<{ finished_at: string; status: string; task_id: string }>>();
+
+  if (error) {
+    console.error("Failed to load task runs for workspace cleanup:", error);
+    return;
+  }
+
+  const latestFinishedByTask = new Map<string, number>();
+  const recentKeepTaskIds = new Set<string>();
+
+  for (const run of runs || []) {
+    if (!run.task_id || !run.finished_at) {
+      continue;
+    }
+
+    if (!latestFinishedByTask.has(run.task_id)) {
+      latestFinishedByTask.set(run.task_id, new Date(run.finished_at).getTime());
+    }
+
+    if (recentKeepTaskIds.size < 5) {
+      recentKeepTaskIds.add(run.task_id);
+    }
+  }
+
+  const keepTaskIds = new Set([
+    ...getActiveTaskIds(),
+    ...recentKeepTaskIds,
+  ]);
+
+  let workspaceEntries: string[];
+  try {
+    workspaceEntries = await readdir(config.workspacesDir);
+  } catch (workspaceError) {
+    const code = (workspaceError as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") {
+      return;
+    }
+
+    console.error("Failed to read workspaces directory:", workspaceError);
+    return;
+  }
+
+  const deleted: string[] = [];
+  for (const entry of workspaceEntries) {
+    if (!entry || keepTaskIds.has(entry)) {
+      continue;
+    }
+
+    try {
+      const workspacePath = join(config.workspacesDir, entry);
+      const stats = await lstat(workspacePath);
+      if (!stats.isDirectory()) {
+        continue;
+      }
+
+      const latestFinishedAt = latestFinishedByTask.get(entry) || null;
+      const shouldDelete = latestFinishedAt
+        ? latestFinishedAt < cutoffMs
+        : stats.mtimeMs < cutoffMs;
+
+      if (!shouldDelete) {
+        continue;
+      }
+
+      await rm(workspacePath, {
+        force: true,
+        recursive: true,
+      });
+      deleted.push(entry);
+    } catch (cleanupError) {
+      console.error(`Failed to remove workspace for task ${entry}:`, cleanupError);
+    }
+  }
+
+  if (deleted.length) {
+    const preview = deleted.slice(0, 10).join(", ");
+    console.log(
+      `Workspace cleanup removed ${deleted.length} workspace(s): ${preview}${deleted.length > 10 ? ", ..." : ""}`
+    );
+  }
+}
+
 export async function launchAgent(
   taskId: string,
   agentId: string,
@@ -90,7 +216,8 @@ export async function launchAgent(
   roleId: string,
   model: string,
   effort: string,
-  contextPack: Record<string, unknown>
+  contextPack: Record<string, unknown>,
+  maxRunDurationMs = config.maxRunDurationMs
 ): Promise<string> {
   const db = getDb();
   const runId = randomUUID();
@@ -134,11 +261,17 @@ export async function launchAgent(
   const prompt = buildPrompt(agentName, roleId, contextPack, activeProvider);
   const responsePath =
     activeProvider === "openai" ? join(workDir, "codex-last-message.txt") : null;
+  const mcpServerEnv = buildPerTaskMcpEnv({
+    agentId,
+    roleId,
+    runId,
+    traceId,
+    workDir,
+  });
   const providerHomeDir =
     activeProvider === "openai"
-      ? await prepareCodexHome(workDir)
+      ? await prepareCodexHome(workDir, mcpServerEnv)
       : config.agentHomeDir;
-  const composeRuntimeEnv = getComposeRuntimeEnv();
 
   // Write MCP config with env vars resolved
   const mcpConfig = {
@@ -146,25 +279,7 @@ export async function launchAgent(
       "agent-os": {
         command: "node",
         args: ["/app/apps/mcp/dist/index.js"],
-        env: {
-          POSTGREST_URL:
-            process.env.POSTGREST_URL || process.env.SUPABASE_URL || "",
-          SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || "",
-          AGENT_ID: agentId,
-          CADDY_SITE_SNIPPETS_DIR: config.caddySiteSnippetsDir,
-          COMPOSE_CURRENT_CONTAINER_ID:
-            composeRuntimeEnv.COMPOSE_CURRENT_CONTAINER_ID || "",
-          COMPOSE_CURRENT_SERVICE: composeRuntimeEnv.COMPOSE_CURRENT_SERVICE || "",
-          COMPOSE_PROJECT: composeRuntimeEnv.COMPOSE_PROJECT || "",
-          TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
-          ROOT_DOMAIN: config.rootDomain,
-          WORKSPACE_DIR: workDir,
-          PUBLIC_LIVE_DIR: config.publicLiveDir,
-          PUBLIC_SITE_URL: config.publicSiteUrl,
-          ROLE_ID: roleId,
-          RUN_ID: runId,
-          TRACE_ID: traceId,
-        },
+        env: mcpServerEnv,
       },
     },
   };
@@ -219,11 +334,13 @@ export async function launchAgent(
   );
 
   const active: ActiveProcess = {
+    durationCheck: null,
     heartbeatInFlight: null,
     inactivityCheck: null,
     lastActivityAt: new Date(),
     lastActivitySummary: "Agent process launched.",
     lastHeartbeatAt: null,
+    maxRunDurationMs,
     proc,
     provider: activeProvider,
     responsePath,
@@ -262,25 +379,72 @@ export async function launchAgent(
   active.inactivityCheck = setInterval(() => {
     const current = activeProcesses.get(runId);
     if (!current) {
-      clearInterval(active.inactivityCheck!);
+      if (active.inactivityCheck) {
+        clearInterval(active.inactivityCheck);
+      }
       return;
     }
 
     const inactivityMs = Date.now() - current.lastActivityAt.getTime();
-    if (inactivityMs < config.processInactivityTimeoutMs) {
+    if (inactivityMs < config.processInactivityTimeoutMs || current.terminationReason) {
       return;
     }
 
     current.terminationReason = "inactivity_timeout";
-    clearInterval(current.inactivityCheck!);
-    current.inactivityCheck = null;
+    if (current.inactivityCheck) {
+      clearInterval(current.inactivityCheck);
+      current.inactivityCheck = null;
+    }
+    if (current.durationCheck) {
+      clearInterval(current.durationCheck);
+      current.durationCheck = null;
+    }
     console.warn(
       `Process ${runId} inactive for ${inactivityMs}ms, killing task ${current.taskId}`
     );
     void logInactivityTimeout(current, inactivityMs);
-    proc.kill("SIGTERM");
+    current.proc.kill("SIGTERM");
     setTimeout(() => {
-      if (activeProcesses.has(runId)) proc.kill("SIGKILL");
+      const activeProcess = activeProcesses.get(runId);
+      if (activeProcess) {
+        activeProcess.proc.kill("SIGKILL");
+      }
+    }, 10000);
+  }, config.processInactivityCheckMs);
+
+  active.durationCheck = setInterval(() => {
+    const current = activeProcesses.get(runId);
+    if (!current) {
+      if (active.durationCheck) {
+        clearInterval(active.durationCheck);
+      }
+      return;
+    }
+
+    const durationMs = Date.now() - current.startedAt.getTime();
+    if (durationMs < current.maxRunDurationMs || current.terminationReason) {
+      return;
+    }
+
+    current.terminationReason = "max_duration_timeout";
+    if (current.inactivityCheck) {
+      clearInterval(current.inactivityCheck);
+      current.inactivityCheck = null;
+    }
+    if (current.durationCheck) {
+      clearInterval(current.durationCheck);
+      current.durationCheck = null;
+    }
+    console.warn(
+      `Process ${runId} exceeded max duration after ${durationMs}ms, killing task ${current.taskId}`
+    );
+    void logMaxDurationTimeout(current, durationMs);
+    current.proc.kill("SIGTERM");
+    setTimeout(() => {
+      const activeProcess = activeProcesses.get(runId);
+      if (activeProcess) {
+        activeProcess.proc.kill("SIGKILL");
+      }
     }, 10000);
   }, config.processInactivityCheckMs);
 
@@ -297,6 +461,9 @@ async function handleProcessExit(
 
   if (active.inactivityCheck) {
     clearInterval(active.inactivityCheck);
+  }
+  if (active.durationCheck) {
+    clearInterval(active.durationCheck);
   }
   activeProcesses.delete(runId);
   const db = getDb();
@@ -351,7 +518,8 @@ async function handleProcessExit(
       status:
         success
           ? "completed"
-          : active.terminationReason === "inactivity_timeout"
+          : active.terminationReason === "inactivity_timeout" ||
+              active.terminationReason === "max_duration_timeout"
             ? "timeout"
             : signal === "SIGTERM"
               ? "timeout"
@@ -578,6 +746,36 @@ async function logInactivityTimeout(
   }
 }
 
+async function logMaxDurationTimeout(
+  active: ActiveProcess,
+  durationMs: number
+): Promise<void> {
+  const db = getDb();
+  const durationMinutes = Math.max(1, Math.round(durationMs / 60000));
+  const { error } = await db.from("events").insert({
+    trace_id: active.traceId,
+    agent_id: active.agentId,
+    event_type: "task.max_duration_timeout",
+    severity: "warning",
+    scope_type: "task",
+    scope_id: active.taskId,
+    summary: `Agent stopped after reaching the max duration of ${durationMinutes} minutes.`,
+    detail: {
+      duration_ms: durationMs,
+      max_run_duration_ms: active.maxRunDurationMs,
+      run_id: active.runId,
+      started_at: active.startedAt.toISOString(),
+    },
+  });
+
+  if (error) {
+    console.error(
+      `Failed to log max-duration timeout for task ${active.taskId}:`,
+      error
+    );
+  }
+}
+
 function buildProcessExitMessage(
   active: ActiveProcess,
   code: number | null,
@@ -588,6 +786,13 @@ function buildProcessExitMessage(
       1,
       Math.round(config.processInactivityTimeoutMs / 60000)
     )} minutes without agent activity.`;
+  }
+
+  if (active.terminationReason === "max_duration_timeout") {
+    return `Stopped after exceeding the max run duration of ${Math.max(
+      1,
+      Math.round(active.maxRunDurationMs / 60000)
+    )} minutes.`;
   }
 
   return `Exit code: ${code}, signal: ${signal}`;
@@ -604,6 +809,13 @@ function buildFailedTaskNote(
       1,
       Math.round(config.processInactivityTimeoutMs / 60000)
     )} minutes without activity. Last activity: ${lastActivity}`;
+  }
+
+  if (active.terminationReason === "max_duration_timeout") {
+    return `Agent stopped after exceeding the max run duration of ${Math.max(
+      1,
+      Math.round(active.maxRunDurationMs / 60000)
+    )} minutes.`;
   }
 
   return `Process exited with code ${code}${signal ? `, signal ${signal}` : ""}. Output tail: ${active.output.slice(-500)}`;
@@ -646,12 +858,20 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
   args: string[];
   env: NodeJS.ProcessEnv;
 } {
-  const composeRuntimeEnv = getComposeRuntimeEnv();
-  const commonEnv = {
-    ...process.env,
+  const commonEnv = buildChildProcessEnv({
+    AGENT_ID: input.agentId,
+    ...buildProviderAuthEnv(input.activeProvider, input.homeDir),
+    MCP_CONFIG_PATH: input.mcpConfigPath,
     HOME: input.homeDir,
+    PUBLIC_LIVE_DIR: config.publicLiveDir,
+    PUBLIC_SITE_URL: config.publicSiteUrl,
+    ROLE_ID: input.roleId,
+    ROOT_DOMAIN: config.rootDomain,
+    RUN_ID: input.runId,
+    TRACE_ID: input.traceId,
     USERPROFILE: input.homeDir,
-  };
+    WORKSPACE_DIR: input.workDir,
+  });
 
   if (input.activeProvider === "anthropic") {
     const anthropicModel = input.model || "opus";
@@ -675,25 +895,6 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
     };
   }
 
-  const mcpEnv = {
-    POSTGREST_URL: process.env.POSTGREST_URL || process.env.SUPABASE_URL || "",
-    SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || "",
-    AGENT_ID: input.agentId,
-    CADDY_SITE_SNIPPETS_DIR: config.caddySiteSnippetsDir,
-    COMPOSE_CURRENT_CONTAINER_ID:
-      composeRuntimeEnv.COMPOSE_CURRENT_CONTAINER_ID || "",
-    COMPOSE_CURRENT_SERVICE: composeRuntimeEnv.COMPOSE_CURRENT_SERVICE || "",
-    COMPOSE_PROJECT: composeRuntimeEnv.COMPOSE_PROJECT || "",
-    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
-    ROOT_DOMAIN: config.rootDomain,
-    WORKSPACE_DIR: input.workDir,
-    PUBLIC_LIVE_DIR: config.publicLiveDir,
-    PUBLIC_SITE_URL: config.publicSiteUrl,
-    ROLE_ID: input.roleId,
-    RUN_ID: input.runId,
-    TRACE_ID: input.traceId,
-  };
-
   const args = [
     "exec",
     "--skip-git-repo-check",
@@ -705,16 +906,6 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
     input.workDir,
     "-c",
     `model_reasoning_effort=${tomlString(input.effort)}`,
-    "-c",
-    `mcp_servers.agent_os.command=${tomlString("node")}`,
-    "-c",
-    `mcp_servers.agent_os.args=[${tomlString("/app/apps/mcp/dist/index.js")}]`,
-    "-c",
-    `mcp_servers.agent_os.env=${tomlInlineTable(mcpEnv)}`,
-    "-c",
-    "mcp_servers.agent_os.enabled=true",
-    "-c",
-    "mcp_servers.agent_os.startup_timeout_sec=30",
   ];
 
   if (input.model) {
@@ -731,6 +922,71 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
     command: "codex",
     args,
     env: commonEnv,
+  };
+}
+
+function buildChildProcessEnv(
+  extraEnv: Record<string, string>
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+
+  for (const key of CHILD_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(extraEnv)) {
+    env[key] = value;
+  }
+
+  return env;
+}
+
+function buildPerTaskMcpEnv(input: {
+  agentId: string;
+  roleId: string;
+  runId: string;
+  traceId: string;
+  workDir: string;
+}): Record<string, string> {
+  const composeRuntimeEnv = getComposeRuntimeEnv();
+  return {
+    POSTGREST_URL: process.env.POSTGREST_URL || process.env.SUPABASE_URL || "",
+    SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || "",
+    AGENT_ID: input.agentId,
+    CADDY_SITE_SNIPPETS_DIR: config.caddySiteSnippetsDir,
+    COMPOSE_CURRENT_CONTAINER_ID:
+      composeRuntimeEnv.COMPOSE_CURRENT_CONTAINER_ID || "",
+    COMPOSE_CURRENT_SERVICE: composeRuntimeEnv.COMPOSE_CURRENT_SERVICE || "",
+    COMPOSE_PROJECT: composeRuntimeEnv.COMPOSE_PROJECT || "",
+    ROOT_DOMAIN: config.rootDomain,
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
+    WORKSPACE_DIR: input.workDir,
+    PUBLIC_LIVE_DIR: config.publicLiveDir,
+    PUBLIC_SITE_URL: config.publicSiteUrl,
+    ROLE_ID: input.roleId,
+    RUN_ID: input.runId,
+    TRACE_ID: input.traceId,
+  };
+}
+
+function buildProviderAuthEnv(
+  provider: RuntimeProvider,
+  homeDir: string
+): Record<string, string> {
+  if (provider === "anthropic") {
+    return {
+      CLAUDE_CONFIG_DIR: join(homeDir, ".claude"),
+      CLAUDE_CREDENTIALS_PATH: join(homeDir, ".claude", ".credentials.json"),
+      CLAUDE_LEGACY_CREDENTIALS_PATH: join(homeDir, ".claude.json"),
+    };
+  }
+
+  return {
+    CODEX_AUTH_PATH: join(homeDir, ".codex", "auth.json"),
+    CODEX_HOME: join(homeDir, ".codex"),
   };
 }
 
@@ -764,7 +1020,10 @@ async function ensureProviderAuth(provider: RuntimeProvider): Promise<void> {
   }
 }
 
-async function prepareCodexHome(workDir: string): Promise<string> {
+async function prepareCodexHome(
+  workDir: string,
+  mcpServerEnv: Record<string, string>
+): Promise<string> {
   const homeDir = join(workDir, ".provider-home");
   const codexDir = join(homeDir, ".codex");
   await mkdir(codexDir, { recursive: true });
@@ -784,14 +1043,7 @@ async function prepareCodexHome(workDir: string): Promise<string> {
 
   await writeFile(
     join(codexDir, "config.toml"),
-    [
-      'model = "gpt-5.4"',
-      'model_reasoning_effort = "high"',
-      "",
-      "[features]",
-      "apps = false",
-      "",
-    ].join("\n")
+    buildCodexConfigToml(mcpServerEnv)
   );
 
   await Promise.all([
@@ -818,6 +1070,30 @@ async function copyOptionalFile(source: string, destination: string): Promise<vo
   } catch {
     // Best effort only.
   }
+}
+
+function buildCodexConfigToml(mcpServerEnv: Record<string, string>): string {
+  const mcpEnvLines = Object.entries(mcpServerEnv)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `"${key}" = ${tomlString(value)}`);
+
+  return [
+    'model = "gpt-5.4"',
+    'model_reasoning_effort = "high"',
+    "",
+    "[features]",
+    "apps = false",
+    "",
+    "[mcp_servers.agent_os]",
+    `command = ${tomlString("node")}`,
+    `args = [${tomlString("/app/apps/mcp/dist/index.js")}]`,
+    "enabled = true",
+    "startup_timeout_sec = 30",
+    "",
+    "[mcp_servers.agent_os.env]",
+    ...mcpEnvLines,
+    "",
+  ].join("\n");
 }
 
 async function seedWorkspaceFromTemplate(workDir: string): Promise<void> {
@@ -946,15 +1222,51 @@ function formatBriefing(contextPack: Record<string, unknown>): string {
   const {
     agent_identity: _agentIdentity,
     available_roles: _availableRoles,
+    relevant_skills: relevantSkills,
     role: _role,
     role_policy: _rolePolicy,
     ...briefingContext
   } = contextPack;
+  const skillSection = formatRelevantSkills(relevantSkills);
 
   return `# Task Briefing
 
 ${JSON.stringify(briefingContext, null, 2)}
+${skillSection}
 `;
+}
+
+function formatRelevantSkills(value: unknown): string {
+  const skills = Array.isArray(value)
+    ? value.filter(
+        (entry): entry is Record<string, unknown> =>
+          Boolean(entry) && typeof entry === "object"
+      )
+    : [];
+
+  if (!skills.length) {
+    return "";
+  }
+
+  const blocks = skills.map((skill) => {
+    const steps = Array.isArray(skill.steps)
+      ? skill.steps
+          .map((step) => String((step as Record<string, unknown>).instruction || "").trim())
+          .filter(Boolean)
+      : [];
+    const lines = [
+      `### Skill: ${String(skill.display_name || skill.name || "Unknown Skill")}`,
+      `Trigger: ${String(skill.trigger_when || "").trim() || "Not specified"}`,
+      "Steps:",
+      ...(steps.length
+        ? steps.map((instruction, index) => `${index + 1}. ${instruction}`)
+        : ["1. Review the skill definition in memory before acting."]),
+    ];
+
+    return lines.join("\n");
+  });
+
+  return `\n## Relevant Skills\n\n${blocks.join("\n\n")}\n`;
 }
 
 async function writeRuntimeDocs(
@@ -964,7 +1276,7 @@ async function writeRuntimeDocs(
   roleId: string,
   activeProvider: RuntimeProvider
 ): Promise<void> {
-  const agentsInstructions = await readFile(config.agentsInstructionsPath, "utf8");
+  const agentsInstructions = await loadAgentInstructions();
 
   await Promise.all([
     writeFile(join(workDir, "AGENTS_INSCTRUCTIONS.md"), agentsInstructions),
@@ -976,6 +1288,29 @@ async function writeRuntimeDocs(
     ),
     writeFile(join(workDir, "TASK_BRIEFING.md"), formatBriefing(contextPack)),
   ]);
+}
+
+async function loadAgentInstructions(): Promise<string> {
+  const db = getDb();
+
+  try {
+    const { data, error } = await db
+      .from("system_settings")
+      .select("value")
+      .eq("key", "agent_instructions_override")
+      .maybeSingle<{ value?: { content?: string } }>();
+
+    if (!error) {
+      const override = String(data?.value?.content || "").trim();
+      if (override) {
+        return override;
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to load agent instructions override:", error);
+  }
+
+  return await readFile(config.agentsInstructionsPath, "utf8");
 }
 
 function formatRolePolicy(contextPack: Record<string, unknown>): string {

@@ -147,8 +147,10 @@ Today that means:
 
 **Why:** Interactive permission prompts make autonomous background work impossible.
 
-**How safety is maintained:** Container isolation, scoped workspaces, MCP allowlists, and
-architect approval for high-impact infrastructure changes.
+**How safety is maintained:** Scoped workspaces, MCP allowlists, and explicit supervisor
+env scrubbing so agent subprocesses do not inherit the full control-plane secret set.
+This does not create a hard sandbox boundary, but it materially reduces blast radius
+when the provider CLIs must run in bypass mode.
 
 ---
 
@@ -257,6 +259,20 @@ nothing when idle.
 **Why:** The system should be able to add roles without rebuilding the runtime. New roles
 should appear through `roles`, `agents`, Supabase-backed policy docs, schedules, and
 permissions.
+
+---
+
+## D-020: MCP Does Not Get Direct Docker Socket Access on VPS
+
+**Decision:** On the VPS overlay, the Docker socket is mounted into the supervisor only,
+not into MCP.
+
+**Why:** MCP already reaches runtime-side infrastructure changes through the supervisor
+control-plane endpoint. Giving MCP a direct Docker socket mount would widen the runtime
+trust boundary without adding necessary capability.
+
+**Consequence:** Supervisor remains the only container with direct Docker control. MCP
+must continue to route service control and public-site route actions through supervisor.
 
 **What still requires redeploy:** New MCP tools, supervisor logic changes, admin UI
 changes, new Docker services, and fundamental schema changes.

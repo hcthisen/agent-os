@@ -1,0 +1,2 @@
+-- Follow-up slot reserved after consolidating runtime hardening and skill context
+-- work into 029_runtime_hardening_and_skills.sql during the implementation pass.

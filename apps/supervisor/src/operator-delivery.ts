@@ -74,12 +74,51 @@ export async function queueOperatorRelayMessage(args: {
   taskId?: string | null;
 }): Promise<OperatorRelayQueueResult> {
   const db = getDb();
+  const notificationKey =
+    typeof args.metadata?.notification_key === "string" &&
+    args.metadata.notification_key.trim()
+      ? args.metadata.notification_key.trim()
+      : null;
   const metadata = {
     ...(args.metadata || {}),
     hidden_from_operator: true,
     operator_visible: false,
     routed_via: "relay",
   };
+
+  if (notificationKey) {
+    let duplicateQuery = db
+      .from("messages")
+      .select("id")
+      .eq("channel", "admin_chat")
+      .eq("direction", "inbound")
+      .contains("metadata", {
+        notification_key: notificationKey,
+        routed_via: "relay",
+      })
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    duplicateQuery =
+      args.taskId === null || typeof args.taskId === "undefined"
+        ? duplicateQuery.is("task_id", null)
+        : duplicateQuery.eq("task_id", args.taskId);
+
+    const { data: existing, error: existingError } =
+      await duplicateQuery.maybeSingle<{ id: string }>();
+
+    if (existingError) {
+      console.error(
+        `Failed to check duplicate relay notification for ${notificationKey}:`,
+        existingError
+      );
+    } else if (existing?.id) {
+      return {
+        messageId: existing.id,
+        queued: false,
+      };
+    }
+  }
 
   const { data, error } = await db
     .from("messages")

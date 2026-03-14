@@ -85,8 +85,10 @@ function buildRelayObjective(
   message: InboundMessage,
   history: ConversationMessage[]
 ): string {
+  const content = String(message.content || "").trim();
+  const teachMode = /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
   const transcript = [...history, {
-    content: message.content,
+    content,
     created_at: message.created_at,
     direction: "inbound",
     sender: message.sender,
@@ -97,7 +99,7 @@ function buildRelayObjective(
   return `Process this inbound message from ${message.sender} via ${message.channel}. Classify intent and route appropriately.
 
 Current message:
-${message.content}
+${content}
 
 Recent conversation transcript:
 ${transcript}
@@ -106,7 +108,10 @@ Routing reminders:
 - If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless an approved plan already exists.
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
-- If the request is multi-phase, prefer a staged task graph with explicit depends_on prerequisites so follow-up work waits automatically instead of starting in parallel by accident.`;
+- If the request is multi-phase, prefer a staged task graph with explicit depends_on prerequisites so follow-up work waits automatically instead of starting in parallel by accident.
+- If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
+
+Teach mode detected: ${teachMode ? "yes" : "no"}.`;
 }
 
 function formatConversationMessage(message: ConversationMessage): string {

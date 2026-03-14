@@ -235,6 +235,34 @@ export interface ServiceRegistryEntry {
   updated_at: string;
 }
 
+export interface SkillStep {
+  order: number;
+  instruction: string;
+  tool_hint: string | null;
+  required: boolean;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  trigger_when: string;
+  steps: SkillStep[];
+  input_schema: Record<string, unknown>;
+  output_schema: Record<string, unknown>;
+  required_services: string[];
+  scope_type: ScopeType;
+  scope_id: string;
+  tags: string[];
+  version: number;
+  last_used_at: string | null;
+  use_count: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Message {
   id: string;
   channel: string;
@@ -260,6 +288,7 @@ export interface ContextPack {
   pending_approvals: Approval[];
   recent_events: Event[];
   related_memories: Memory[];
+  relevant_skills?: Skill[];
   related_artifacts: Artifact[];
   dependency_tasks: Task[];
   child_tasks: Task[];

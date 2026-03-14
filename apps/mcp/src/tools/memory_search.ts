@@ -1,6 +1,7 @@
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope, getCurrentTaskContext, type ScopeType } from "../scope.js";
+import { withDecryptedCredential } from "../service-registry.js";
 
 const OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002";
 const OPENAI_SERVICE_NAME = "openai";
@@ -245,11 +246,12 @@ async function hydrateChunkSources(chunks: SearchChunk[]): Promise<Array<Record<
 async function generateQueryEmbedding(query: string): Promise<number[] | null> {
   try {
     const db = getDb();
-    const { data, error } = await db
+    const { data: rawData, error } = await db
       .from("service_registry")
       .select("service_name,base_url,credential,status")
       .eq("service_name", OPENAI_SERVICE_NAME)
       .maybeSingle<EmbeddingServiceRow>();
+    const data = await withDecryptedCredential(rawData);
 
     if (error || !data || data.status !== "active" || !data.credential) {
       return null;

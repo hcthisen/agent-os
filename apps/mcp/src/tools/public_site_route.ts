@@ -1,9 +1,7 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { resolveComposeRuntime, runDocker } from "../compose_runtime.js";
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
+import { callSupervisorControl } from "../supervisor-control.js";
 import { upsertTaskRequirement } from "../task_requirements.js";
 
 type RouteAction = "delete" | "upsert" | "verify";
@@ -14,6 +12,18 @@ interface RouteRow {
   desired_state: DesiredRouteState;
   hostname: string;
   id: string;
+  target_path: string | null;
+}
+
+interface PublicSiteRouteControlResult {
+  action: RouteAction;
+  changed: boolean;
+  current_contents: string | null;
+  previous_contents: string | null;
+  reload_result: Record<string, unknown> | null;
+  reloaded: boolean;
+  snippet_path: string;
+  success: boolean;
   target_path: string | null;
 }
 
@@ -54,43 +64,36 @@ export async function publicSiteRoute(args: {
   target_path?: string;
   reload?: boolean;
 }): Promise<unknown> {
-  const db = getDb();
   const task = await requireCurrentTaskContext();
   const action = normalizeAction(args.action);
   const rootDomain = normalizeRootDomain(process.env.ROOT_DOMAIN);
-  const snippetsDir = normalizeSnippetsDir(process.env.CADDY_SITE_SNIPPETS_DIR);
   const hostname = normalizeHostname(args.hostname, rootDomain);
-  const snippetPath = join(snippetsDir, `${hostname}.caddy`);
   const routeRow = await loadRoute(hostname);
-
-  let previousContents: string | null = null;
-  let nextContents: string | null = null;
   let targetPath = routeRow?.target_path || null;
 
-  try {
-    previousContents = await readFile(snippetPath, "utf8");
-  } catch {
-    previousContents = null;
-  }
-
   if (action === "delete") {
-    await rm(snippetPath, { force: true });
     targetPath = null;
   } else if (action === "upsert") {
     targetPath = normalizeTargetPath(args.target_path);
-    nextContents = buildSnippet(hostname, targetPath);
-    await mkdir(snippetsDir, { recursive: true });
-    await writeFile(snippetPath, nextContents, "utf8");
   }
 
   const shouldReload =
     typeof args.reload === "boolean" ? args.reload : action !== "verify";
-  let reloadResult: Record<string, unknown> | null = null;
-  if (shouldReload) {
-    reloadResult = reloadCaddy();
-  }
+  const controlResult = await callSupervisorControl<PublicSiteRouteControlResult>(
+    "/control/public-site-route",
+    {
+      action,
+      hostname,
+      reload: shouldReload,
+      target_path: targetPath,
+    }
+  );
 
-  const desiredState = resolveDesiredState(action, routeRow, previousContents);
+  const desiredState = resolveDesiredState(
+    action,
+    routeRow,
+    controlResult.previous_contents
+  );
   const verification = await verifyHostname(hostname, desiredState);
 
   const trackedRoute = await upsertRouteRow({
@@ -116,11 +119,13 @@ export async function publicSiteRoute(args: {
 
   await logRouteEvent({
     action,
+    changed: controlResult.changed,
+    currentContents: controlResult.current_contents,
     hostname,
-    previousContents,
-    reloadResult,
+    previousContents: controlResult.previous_contents,
+    reloadResult: controlResult.reload_result,
     requirementId: String(requirement.id || ""),
-    snippetPath,
+    snippetPath: controlResult.snippet_path,
     targetPath,
     taskId: task.id,
     verification,
@@ -129,12 +134,12 @@ export async function publicSiteRoute(args: {
   return {
     success: true,
     action,
-    changed: previousContents !== (action === "delete" ? null : nextContents),
+    changed: controlResult.changed,
     hostname,
-    reloaded: shouldReload,
-    reload_result: reloadResult,
+    reloaded: controlResult.reloaded,
+    reload_result: controlResult.reload_result,
     route: trackedRoute,
-    snippet_path: snippetPath,
+    snippet_path: controlResult.snippet_path,
     target_path: targetPath,
     task_requirement: requirement,
     verification,
@@ -163,14 +168,6 @@ function normalizeRootDomain(value: string | undefined): string {
     throw new Error("public_site_route requires ROOT_DOMAIN to be configured");
   }
 
-  return normalized;
-}
-
-function normalizeSnippetsDir(value: string | undefined): string {
-  const normalized = String(value || "").trim();
-  if (!normalized) {
-    throw new Error("public_site_route requires CADDY_SITE_SNIPPETS_DIR to be configured");
-  }
   return normalized;
 }
 
@@ -219,44 +216,6 @@ function normalizeTargetPath(value: string | undefined): string {
   }
 
   return normalized.replace(/\/+$/, "");
-}
-
-function buildSnippet(hostname: string, targetPath: string): string {
-  const lines = [`${hostname} {`, "  encode zstd gzip"];
-
-  if (targetPath !== "/") {
-    lines.push(`  rewrite * ${targetPath}{uri}`);
-  }
-
-  lines.push("  reverse_proxy public:80", "}", "");
-  return lines.join("\n");
-}
-
-function reloadCaddy(): Record<string, unknown> {
-  const runtime = resolveComposeRuntime();
-  const containerId = runDocker([
-    "ps",
-    "-aq",
-    "--no-trunc",
-    "--filter",
-    `label=com.docker.compose.project=${runtime.project}`,
-    "--filter",
-    "label=com.docker.compose.service=caddy",
-    "--latest",
-  ]).trim();
-
-  if (!containerId) {
-    throw new Error(`No running caddy service found for project '${runtime.project}'`);
-  }
-
-  runDocker(["exec", containerId, "caddy", "reload", "--config", "/etc/caddy/Caddyfile"]);
-
-  return {
-    container_id: containerId,
-    project: runtime.project,
-    service: "caddy",
-    state: "reloaded",
-  };
 }
 
 function resolveDesiredState(
@@ -403,6 +362,8 @@ async function upsertRouteRow(args: {
 
 async function logRouteEvent(input: {
   action: RouteAction;
+  changed: boolean;
+  currentContents: string | null;
   hostname: string;
   previousContents: string | null;
   reloadResult: Record<string, unknown> | null;
@@ -430,13 +391,8 @@ async function logRouteEvent(input: {
           : `Upserted public route ${input.hostname} -> ${input.targetPath}.`,
     detail: {
       action: input.action,
-      changed:
-        input.previousContents !==
-        (input.action === "delete"
-          ? null
-          : input.action === "verify"
-            ? input.previousContents
-            : buildSnippet(input.hostname, input.targetPath || "/")),
+      changed: input.changed,
+      current_contents: input.currentContents,
       hostname: input.hostname,
       reload_result: input.reloadResult,
       requirement_id: input.requirementId,

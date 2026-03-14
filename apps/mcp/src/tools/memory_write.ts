@@ -2,6 +2,20 @@ import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope } from "../scope.js";
 
+export interface WriteMemoryRecordInput {
+  chunk_content?: string;
+  confidence?: number;
+  content: string;
+  layer: string;
+  scope_id: string;
+  scope_type: string;
+  source_agent_id?: string | null;
+  source_event_id?: string;
+  subject: string;
+  supersedes_memory_id?: string;
+  tags?: string[];
+}
+
 export const memoryWriteDef = {
   name: "memory_write",
   description:
@@ -49,6 +63,22 @@ export async function memoryWrite(args: {
   source_event_id?: string;
   supersedes_memory_id?: string;
 }): Promise<unknown> {
+  const result = await writeMemoryRecord(args);
+  if (result.chunk_warning) {
+    return {
+      success: true,
+      memory: result.memory,
+      warning: result.chunk_warning,
+    };
+  }
+
+  return { success: true, memory: result.memory };
+}
+
+export async function writeMemoryRecord(args: WriteMemoryRecordInput): Promise<{
+  chunk_warning?: string;
+  memory: Record<string, unknown>;
+}> {
   const db = getDb();
   const ctx = getAgentContext();
 
@@ -62,14 +92,11 @@ export async function memoryWrite(args: {
       .maybeSingle<{ id: string; scope_type: string; scope_id: string }>();
 
     if (previousError) {
-      return { success: false, error: previousError.message };
+      throw new Error(previousError.message);
     }
 
     if (!previous) {
-      return {
-        success: false,
-        error: `Memory '${args.supersedes_memory_id}' does not exist`,
-      };
+      throw new Error(`Memory '${args.supersedes_memory_id}' does not exist`);
     }
 
     await enforceScope(previous.scope_type, previous.scope_id);
@@ -77,10 +104,9 @@ export async function memoryWrite(args: {
       previous.scope_type !== args.scope_type ||
       previous.scope_id !== args.scope_id
     ) {
-      return {
-        success: false,
-        error: "Superseded memory must be in the same scope as the replacement memory",
-      };
+      throw new Error(
+        "Superseded memory must be in the same scope as the replacement memory"
+      );
     }
 
     await db
@@ -106,14 +132,14 @@ export async function memoryWrite(args: {
       tags: args.tags || [],
       confidence: args.confidence ?? 1.0,
       source_event_id: args.source_event_id || null,
-      source_agent_id: ctx.agent_id,
+      source_agent_id: args.source_agent_id === undefined ? ctx.agent_id : args.source_agent_id,
       superseded_by: null,
     })
     .select()
     .single();
 
   if (error) {
-    return { success: false, error: error.message };
+    throw new Error(error.message);
   }
 
   if (args.supersedes_memory_id) {
@@ -128,16 +154,15 @@ export async function memoryWrite(args: {
     source_id: data.id,
     scope_type: args.scope_type,
     scope_id: args.scope_id,
-    content: `${args.subject}: ${args.content}`,
+    content: args.chunk_content || `${args.subject}: ${args.content}`,
   });
 
   if (chunkError) {
     return {
-      success: true,
+      chunk_warning: `Memory written but chunk creation failed: ${chunkError.message}`,
       memory: data,
-      warning: `Memory written but chunk creation failed: ${chunkError.message}`,
     };
   }
 
-  return { success: true, memory: data };
+  return { memory: data };
 }

@@ -171,6 +171,7 @@ services:
       CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
       POSTGREST_URL: http://rest:3000
       MCP_CONFIG_PATH: /app/mcp-config.json
+      SUPERVISOR_CONTROL_URL: http://127.0.0.1:3001
       AGENT_HOME_DIR: /home/node
       AGENT_RUN_AS_UID: 1000
       AGENT_RUN_AS_GID: 1000
@@ -209,6 +210,7 @@ services:
       CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
       POSTGREST_URL: http://rest:3000
       ROOT_DOMAIN: ${ROOT_DOMAIN:-}
+      SUPERVISOR_CONTROL_URL: http://supervisor:3001
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - config:/config:ro

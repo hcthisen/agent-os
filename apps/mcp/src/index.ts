@@ -59,6 +59,10 @@ import {
 } from "./tools/schedule_create.js";
 import { roleUpsertDef, roleUpsert } from "./tools/role_upsert.js";
 import { agentUpsertDef, agentUpsert } from "./tools/agent_upsert.js";
+import { skillCreateDef, skillCreate } from "./tools/skill_create.js";
+import { skillSearchDef, skillSearch } from "./tools/skill_search.js";
+import { skillGetDef, skillGet } from "./tools/skill_get.js";
+import { skillLogUseDef, skillLogUse } from "./tools/skill_log_use.js";
 
 const tools = [
   taskClaimDef,
@@ -82,6 +86,10 @@ const tools = [
   scheduleCreateDef,
   roleUpsertDef,
   agentUpsertDef,
+  skillCreateDef,
+  skillSearchDef,
+  skillGetDef,
+  skillLogUseDef,
 ];
 
 const handlers: Record<string, (args: any) => Promise<unknown>> = {
@@ -106,6 +114,10 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   schedule_create: scheduleCreate,
   role_upsert: roleUpsert,
   agent_upsert: agentUpsert,
+  skill_create: skillCreate,
+  skill_search: skillSearch,
+  skill_get: skillGet,
+  skill_log_use: skillLogUse,
 };
 
 async function extractPolicyAction(
@@ -224,6 +236,19 @@ async function extractPolicyAction(
       type: "system.modify",
       taskId,
       desc: `Upsert agent: ${String(args?.name || args?.id || "unknown agent")}`,
+    };
+  }
+
+  if (name === "skill_create") {
+    const taskId = (await getCurrentTaskContext())?.id;
+    if (!taskId) {
+      return null;
+    }
+
+    return {
+      type: "system.modify",
+      taskId,
+      desc: `Create skill: ${String(args?.name || "unknown skill")}`,
     };
   }
 

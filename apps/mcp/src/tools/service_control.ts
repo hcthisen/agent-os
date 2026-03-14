@@ -1,29 +1,30 @@
-import { spawn } from "node:child_process";
-import {
-  MANAGED_SERVICES,
-  inspectContainers,
-  inspectServices,
-  resolveComposeRuntime,
-  runDocker,
-  type ManagedServiceName,
-  type ManagedServiceStatus,
-} from "../compose_runtime.js";
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { getCurrentTaskContext } from "../scope.js";
+import { callSupervisorControl } from "../supervisor-control.js";
 
-const RELOAD_COMMANDS: Record<string, string[]> = {
-  caddy: ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
-  public: ["nginx", "-s", "reload"],
-};
+const MANAGED_SERVICES = [
+  "admin",
+  "auth",
+  "autoheal",
+  "browser",
+  "caddy",
+  "db",
+  "mcp",
+  "public",
+  "realtime",
+  "rest",
+  "storage",
+  "supervisor",
+] as const;
 
-type AllowedService = ManagedServiceName;
+type AllowedService = (typeof MANAGED_SERVICES)[number];
 type ServiceControlAction = "reload" | "restart" | "status";
 
 export const serviceControlDef = {
   name: "service_control",
   description:
-    "Inspect, restart, or reload allowlisted VPS services through the managed Docker runtime. Use reload for Caddy or Nginx; use restart for other services.",
+    "Inspect, restart, or reload allowlisted VPS services through the managed supervisor control plane. Use reload for Caddy or Nginx; use restart for other services.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -56,54 +57,30 @@ export async function serviceControl(args: {
   services?: string[];
 }): Promise<unknown> {
   const action = normalizeAction(args.action);
-  const runtime = resolveComposeRuntime();
   const requestedServices = normalizeRequestedServices(args, action);
-  const serviceStates = inspectServices(runtime, requestedServices);
-
-  if (action === "status") {
-    return {
-      action,
-      current_service: runtime.currentService,
-      project: runtime.project,
-      services: serviceStates,
-      success: true,
-    };
-  }
-
   const task = await getCurrentTaskContext();
-  if (!task) {
+
+  if (action !== "status" && !task) {
     throw new Error("service_control restart/reload requires an active claimed task");
   }
 
-  const results: Array<Record<string, unknown>> = [];
-
-  for (const serviceState of serviceStates) {
-    if (!serviceState.container_id) {
-      throw new Error(`Service '${serviceState.service}' is not running in project '${runtime.project}'`);
+  const result = await callSupervisorControl<Record<string, unknown>>(
+    "/control/service-control",
+    {
+      action,
+      service: args.service,
+      services: requestedServices,
     }
+  );
 
-    if (action === "reload") {
-      results.push(await reloadService(serviceState));
-      continue;
-    }
-
-    results.push(await restartService(serviceState, runtime.currentContainerId));
+  if (task) {
+    const results = Array.isArray(result.results)
+      ? (result.results as Array<Record<string, unknown>>)
+      : [];
+    await logServiceControlEvent(action, results, task.id);
   }
 
-  await logServiceControlEvent(action, results, task.id);
-
-  return {
-    action,
-    current_service: runtime.currentService,
-    project: runtime.project,
-    results,
-    success: true,
-    warning:
-      results.some((entry) => entry.self_target === true) &&
-      action === "restart"
-        ? "A self-targeted restart was queued. The current agent run may terminate when the supervisor container restarts."
-        : undefined,
-  };
+  return result;
 }
 
 function normalizeAction(value: string | undefined): ServiceControlAction {
@@ -147,64 +124,6 @@ function normalizeRequestedServices(
   return deduped as AllowedService[];
 }
 
-async function restartService(
-  serviceState: ManagedServiceStatus,
-  currentContainerId: string | null
-): Promise<Record<string, unknown>> {
-  const containerId = serviceState.container_id!;
-
-  if (currentContainerId && containerId.startsWith(currentContainerId)) {
-    queueSelfRestart(containerId);
-    return {
-      action: "restart",
-      queued: true,
-      self_target: true,
-      service: serviceState.service,
-      state: "queued",
-    };
-  }
-
-  if (serviceState.state === "running") {
-    runDocker(["restart", containerId]);
-  } else {
-    runDocker(["start", containerId]);
-  }
-
-  const [updatedState] = inspectContainers([containerId]);
-
-  return {
-    action: "restart",
-    container_id: containerId,
-    service: serviceState.service,
-    self_target: false,
-    state: updatedState?.State?.Status || "unknown",
-  };
-}
-
-async function reloadService(
-  serviceState: ManagedServiceStatus
-): Promise<Record<string, unknown>> {
-  const command = RELOAD_COMMANDS[serviceState.service];
-  if (!command) {
-    throw new Error(`service_control does not support reload for '${serviceState.service}'`);
-  }
-
-  if (serviceState.state !== "running") {
-    throw new Error(`Cannot reload '${serviceState.service}' because it is not running`);
-  }
-
-  runDocker(["exec", serviceState.container_id!, ...command]);
-  const [updatedState] = inspectContainers([serviceState.container_id!]);
-
-  return {
-    action: "reload",
-    container_id: serviceState.container_id,
-    service: serviceState.service,
-    self_target: serviceState.self_target,
-    state: updatedState?.State?.Status || "unknown",
-  };
-}
-
 async function logServiceControlEvent(
   action: ServiceControlAction,
   results: Array<Record<string, unknown>>,
@@ -230,13 +149,4 @@ async function logServiceControlEvent(
   if (error) {
     console.error("Failed to record service control event:", error);
   }
-}
-
-function queueSelfRestart(containerId: string): void {
-  const child = spawn("sh", ["-lc", `sleep 1; docker restart ${containerId}`], {
-    detached: true,
-    stdio: "ignore",
-  });
-
-  child.unref();
 }

@@ -1,5 +1,6 @@
 import { getDb } from "./db.js";
 import { queueOperatorRelayMessage } from "./operator-delivery.js";
+import { getServiceRegistryRuntime } from "./service-registry.js";
 
 const EMBEDDING_BATCH_SIZE = 10;
 const EMBEDDING_POLL_MS = 30000; // 30 seconds
@@ -80,20 +81,11 @@ export async function processEmbeddings(): Promise<void> {
 
   if (!chunks?.length) return;
 
-  const { data: service, error: serviceError } = await db
-    .from("service_registry")
-    .select(
-      "id,credential,base_url,error_message,service_name,status,updated_at"
-    )
-    .eq("service_name", OPENAI_SERVICE_NAME)
-    .maybeSingle<EmbeddingService>();
+  const resolvedService = (await getServiceRegistryRuntime(
+    OPENAI_SERVICE_NAME
+  )) as EmbeddingService | null;
 
-  if (serviceError) {
-    console.error("Failed to load embedding service configuration:", serviceError);
-    return;
-  }
-
-  if (!service) {
+  if (!resolvedService) {
     const keyNeededService = await ensureOpenAiServiceKeyNeeded(null);
     if (keyNeededService) {
       await notifyOpenAiKeyNeeded(keyNeededService);
@@ -101,22 +93,22 @@ export async function processEmbeddings(): Promise<void> {
     return;
   }
 
-  if (service.status === "disabled") {
+  if (resolvedService.status === "disabled") {
     return;
   }
 
-  if (service.status === "key_needed") {
-    await notifyOpenAiKeyNeeded(service);
+  if (resolvedService.status === "key_needed") {
+    await notifyOpenAiKeyNeeded(resolvedService);
     return;
   }
 
-  if (service.status === "error") {
-    await notifyOpenAiServiceError(service);
+  if (resolvedService.status === "error") {
+    await notifyOpenAiServiceError(resolvedService);
     return;
   }
 
-  if (!service.credential) {
-    const keyNeededService = await ensureOpenAiServiceKeyNeeded(service);
+  if (!resolvedService.credential) {
+    const keyNeededService = await ensureOpenAiServiceKeyNeeded(resolvedService);
     if (keyNeededService) {
       await notifyOpenAiKeyNeeded(keyNeededService);
     }
@@ -124,7 +116,7 @@ export async function processEmbeddings(): Promise<void> {
   }
 
   try {
-    const baseUrl = (service.base_url || OPENAI_SERVICE_BASE_URL).replace(
+    const baseUrl = (resolvedService.base_url || OPENAI_SERVICE_BASE_URL).replace(
       /\/+$/,
       ""
     );
@@ -132,7 +124,7 @@ export async function processEmbeddings(): Promise<void> {
     const response = await fetch(`${baseUrl}/embeddings`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${service.credential}`,
+        Authorization: `Bearer ${resolvedService.credential}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -146,7 +138,7 @@ export async function processEmbeddings(): Promise<void> {
 
       if (response.status === 401 || response.status === 403) {
         const errorService = await markOpenAiServiceError(
-          service,
+          resolvedService,
           `OpenAI embeddings request failed with ${response.status}. Update the API key in Settings > Service Connections.`
         );
         if (errorService) {
