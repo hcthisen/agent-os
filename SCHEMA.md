@@ -411,7 +411,8 @@ to FTS-only mode.
 ### artifacts
 
 Index of files, PRs, docs, reports, and other work products. The actual files live in
-Supabase Storage or as git objects. This table is the searchable metadata layer.
+Supabase Storage, the task workspace, or an external system. This table is the searchable
+metadata layer.
 
 | Column        | Type      | Notes                                            |
 |---------------|-----------|--------------------------------------------------|
@@ -419,7 +420,8 @@ Supabase Storage or as git objects. This table is the searchable metadata layer.
 | project_id    | uuid FK→projects |                                             |
 | task_id       | uuid FK→tasks |                                               |
 | artifact_type | text      | `file`, `pr`, `doc`, `report`, `invoice`,        |
-|               |           | `screenshot`, `contract`, `ticket`, `audio`.     |
+|               |           | `screenshot`, `delivery_page`, `contract`,       |
+|               |           | `ticket`, `audio`.                               |
 | name          | text      |                                                  |
 | storage_path  | text      | Supabase Storage path.                           |
 | external_url  | text      | GitHub PR, Google Doc, etc.                      |
@@ -430,6 +432,10 @@ Supabase Storage or as git objects. This table is the searchable metadata layer.
 | created_at    | timestamptz |                                                |
 
 **Indexes:** project_id, task_id, artifact_type.
+
+`delivery_page` is a persisted operator-facing result package. It stores rendered HTML,
+plain text, summary, and artifact references so constrained chat channels can deliver a
+short summary plus a link to a richer result page.
 
 ### handoffs
 

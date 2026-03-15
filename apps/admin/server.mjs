@@ -28,6 +28,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const SESSION_SECRET = process.env.JWT_SECRET || "agent-os-admin";
 const SESSION_COOKIE = "agent_os_admin_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const RESULT_DELIVERY_PURPOSE = "operator-result";
 const TELEGRAM_WEBHOOK_URL = (
   process.env.TELEGRAM_WEBHOOK_URL ||
   (ADMIN_PUBLIC_URL ? `${ADMIN_PUBLIC_URL}/api/integrations/telegram/webhook` : "")
@@ -155,6 +156,14 @@ function sendNoContent(res, headers = {}) {
   res.end();
 }
 
+function sendHtml(res, status, html, headers = {}) {
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    ...headers,
+  });
+  res.end(html);
+}
+
 function calculateNextRun(cronExpr) {
   const parts = String(cronExpr || "").trim().split(/\s+/);
   if (parts.length !== 5) {
@@ -245,6 +254,32 @@ function getSession(req) {
     return session;
   } catch {
     return null;
+  }
+}
+
+function signResultDeliveryToken(taskId) {
+  return createHmac("sha256", SESSION_SECRET)
+    .update(`${RESULT_DELIVERY_PURPOSE}:${taskId}`)
+    .digest("base64url");
+}
+
+function isValidResultDeliveryToken(taskId, token) {
+  if (!taskId || !token) {
+    return false;
+  }
+
+  const expected = signResultDeliveryToken(taskId);
+
+  try {
+    const provided = Buffer.from(token);
+    const actual = Buffer.from(expected);
+    if (provided.length !== actual.length) {
+      return false;
+    }
+
+    return timingSafeEqual(provided, actual);
+  } catch {
+    return false;
   }
 }
 
@@ -551,6 +586,61 @@ async function loadMessagesFeed(options = {}) {
       : data || [];
 
   return Array.isArray(visibleData) ? [...visibleData].reverse() : visibleData;
+}
+
+async function loadResultDeliveryArtifact(taskId) {
+  const rows = await postgrest("/artifacts", {
+    query: {
+      artifact_type: "eq.delivery_page",
+      limit: "1",
+      order: "created_at.desc",
+      select: "id,name,task_id,external_url,metadata,created_at",
+      task_id: `eq.${taskId}`,
+    },
+  }).catch(() => []);
+
+  return rows?.[0] || null;
+}
+
+function buildFallbackResultDeliveryHtml(taskId, artifact) {
+  const metadata =
+    artifact?.metadata && typeof artifact.metadata === "object" ? artifact.metadata : {};
+  const title = normalizeString(metadata.title) || normalizeString(artifact?.name) || "Task result";
+  const summary = normalizeString(metadata.summary) || "Result is available for this task.";
+  const plainText = normalizeString(metadata.plain_text);
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body { font-family: Georgia, serif; background: #f5f1e7; color: #221f18; margin: 0; padding: 32px; }
+      main { max-width: 860px; margin: 0 auto; background: #fffaf0; border: 1px solid #ddd3bf; border-radius: 18px; padding: 28px; }
+      pre { white-space: pre-wrap; background: #f3ead8; border-radius: 12px; padding: 16px; border: 1px solid #ddd3bf; }
+      .meta { color: #5f5a4f; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="meta">Task ${escapeHtml(taskId)}</p>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(summary)}</p>
+      ${plainText ? `<pre>${escapeHtml(plainText)}</pre>` : ""}
+    </main>
+  </body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function loadTasksFeed(options = {}) {
@@ -1873,6 +1963,11 @@ function scoreRelayProjectMatch(project, signals) {
   for (const hostname of Array.isArray(signals?.hostnames) ? signals.hostnames : []) {
     if (knownHostnames.has(hostname)) {
       score += 10;
+      continue;
+    }
+
+    for (const knownHostname of knownHostnames) {
+      score += scoreProbableHostnameTypo(hostname, knownHostname);
     }
   }
 
@@ -1901,6 +1996,35 @@ function scoreRelayProjectMatch(project, signals) {
   }
 
   return score;
+}
+
+function scoreProbableHostnameTypo(left, right) {
+  const normalizedLeft = normalizeRelayProjectSlug(left);
+  const normalizedRight = normalizeRelayProjectSlug(right);
+  if (!normalizedLeft || !normalizedRight || normalizedLeft === normalizedRight) {
+    return 0;
+  }
+
+  if (Math.min(normalizedLeft.length, normalizedRight.length) < 8) {
+    return 0;
+  }
+
+  const leftStem = extractHostnameStem(left);
+  const rightStem = extractHostnameStem(right);
+  if (!leftStem || leftStem !== rightStem) {
+    return 0;
+  }
+
+  const distance = levenshteinDistance(normalizedLeft, normalizedRight);
+  if (distance === 1) {
+    return 7;
+  }
+
+  if (distance === 2 && sharesTldPrefix(left, right)) {
+    return 6;
+  }
+
+  return 0;
 }
 
 async function createAutoManagedRelayProject(signals, message) {
@@ -1964,6 +2088,56 @@ function normalizeRelayProjectSlug(value) {
     .replace(/^www\./, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function extractHostnameStem(value) {
+  const hostname = extractHostnames(value)[0];
+  if (!hostname) {
+    return "";
+  }
+
+  const segments = hostname.split(".").filter(Boolean);
+  if (segments.length <= 1) {
+    return hostname;
+  }
+
+  return segments.slice(0, -1).join(".");
+}
+
+function sharesTldPrefix(left, right) {
+  const leftHostname = extractHostnames(left)[0];
+  const rightHostname = extractHostnames(right)[0];
+  if (!leftHostname || !rightHostname) {
+    return false;
+  }
+
+  const leftTld = leftHostname.split(".").pop() || "";
+  const rightTld = rightHostname.split(".").pop() || "";
+  return leftTld.startsWith(rightTld) || rightTld.startsWith(leftTld);
+}
+
+function levenshteinDistance(left, right) {
+  if (left === right) {
+    return 0;
+  }
+
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
+    let diagonal = previous[0];
+    previous[0] = leftIndex + 1;
+
+    for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
+      const temp = previous[rightIndex + 1];
+      previous[rightIndex + 1] = Math.min(
+        previous[rightIndex + 1] + 1,
+        previous[rightIndex] + 1,
+        diagonal + (left[leftIndex] === right[rightIndex] ? 0 : 1)
+      );
+      diagonal = temp;
+    }
+  }
+
+  return previous[right.length];
 }
 
 function extractHostnames(value) {
@@ -4571,6 +4745,37 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/health") {
       sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    const deliveryMatch = url.pathname.match(
+      /^\/deliveries\/([0-9a-f-]{36})\/([A-Za-z0-9_-]+)$/i
+    );
+    if (deliveryMatch && req.method === "GET") {
+      const [, taskId, token] = deliveryMatch;
+      if (!isValidResultDeliveryToken(taskId, token)) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      const artifact = await loadResultDeliveryArtifact(taskId);
+      if (!artifact) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      const metadata =
+        artifact.metadata && typeof artifact.metadata === "object"
+          ? artifact.metadata
+          : {};
+      const html =
+        typeof metadata.html === "string" && metadata.html.trim()
+          ? metadata.html
+          : buildFallbackResultDeliveryHtml(taskId, artifact);
+      sendHtml(res, 200, html, {
+        "Cache-Control": "private, max-age=300",
+        "X-Robots-Tag": "noindex, nofollow",
+      });
       return;
     }
 

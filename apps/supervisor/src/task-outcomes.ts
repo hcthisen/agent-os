@@ -3,6 +3,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { getDb } from "./db.js";
 import { config } from "./config.js";
 import { sendAdminOnlyMessage, sendManagedMessage } from "./operator-delivery.js";
+import { maybePublishOperatorResultPage } from "./result-delivery.js";
 import { maybeAutocaptureReusableSkill } from "./skill-autocapture.js";
 
 const TASK_SELECT_FIELDS =
@@ -129,7 +130,25 @@ export async function monitorTaskOutcomes(): Promise<void> {
       completionCandidate.artifactSummary
     );
     const deliveryTarget = await resolveRootRequestDeliveryTarget(rootTask.id);
-    await sendOperatorCompletion(rootTask.id, notificationKey, content, deliveryTarget);
+    const resultPageUrl = await maybePublishOperatorResultPage({
+      deliveryChannel: deliveryTarget.channel,
+      requestTasks,
+      rootTaskId: rootTask.id,
+      rootTaskTitle: rootTask.title,
+      selectedTask: completionCandidate.task,
+      summary: content,
+    });
+    const deliveredContent = formatDeliveredCompletionMessage(
+      content,
+      resultPageUrl,
+      deliveryTarget.channel
+    );
+    await sendOperatorCompletion(
+      rootTask.id,
+      notificationKey,
+      deliveredContent,
+      deliveryTarget
+    );
   }
 }
 
@@ -774,6 +793,20 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function formatDeliveredCompletionMessage(
+  content: string,
+  resultPageUrl: string | null,
+  channel: "admin_chat" | "telegram"
+): string {
+  if (!resultPageUrl) {
+    return content;
+  }
+
+  const summaryLimit = channel === "telegram" ? 280 : 360;
+  const brief = trimSentence(content, summaryLimit);
+  return `${brief}\n\nFull result: ${resultPageUrl}`;
+}
+
 async function resolveRootRequestDeliveryTarget(
   rootTaskId: string
 ): Promise<DeliveryTarget> {
@@ -935,6 +968,7 @@ async function sendOperatorCompletion(
 
 export const taskOutcomeTestHooks = {
   chooseOperatorDeliveryTarget,
+  formatDeliveredCompletionMessage,
   normalizeArtifactSummary,
   pickBestCompletionCandidate,
   summarizeArtifactDocument,

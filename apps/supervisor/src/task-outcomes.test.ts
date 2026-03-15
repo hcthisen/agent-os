@@ -125,3 +125,16 @@ test("telegram-originated relay requests resolve completion delivery back to tel
   assert.equal(target.chatId, 123456);
   assert.equal(target.sourceMessageId, "telegram-source");
 });
+
+test("delivered completion message appends a full result link and keeps a compact summary", () => {
+  const content =
+    "Done. Review complete. This is a long result summary that should still keep the main point visible in chat while moving the full report into a richer result page for the operator.";
+  const delivered = taskOutcomeTestHooks.formatDeliveredCompletionMessage(
+    content,
+    "https://admin.example.com/deliveries/task-123/token-456",
+    "telegram"
+  );
+
+  assert.match(delivered, /Full result: https:\/\/admin\.example\.com\/deliveries\/task-123\/token-456/);
+  assert.match(delivered, /^Done\. Review complete\./);
+});

@@ -198,6 +198,7 @@ The app provides:
 - Memory and event inspection
 - Service connection management
 - Operational health views
+- Tokenized rich-result pages for operator-facing reports when chat delivery would be too cramped
 
 #### Provider Authentication
 
@@ -209,6 +210,17 @@ The admin surface handles connection of the active coding provider:
 
 The system never extracts provider tokens. It only checks whether the native CLI can run
 successfully after login.
+
+#### Result Delivery
+
+Operator replies should be channel-aware. Short status updates belong in chat. Large
+reviews, audits, research reports, plans, and similar outputs should be packaged as a
+short chat summary plus a richer linked result page.
+
+The supervisor generates that result package at completion time, stores it as a
+`delivery_page` artifact on the root task, and sends a signed link on the admin domain.
+This keeps Telegram and chat concise without forcing the operator to dig through task
+artifacts to read the actual output.
 
 #### Service Connections
 

@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+# ──────────────────────────────────────────────────────────────────────
+# Agent-OS  ·  VPS setup and configuration
+#
+# Called directly or via bootstrap.sh. Supports two modes:
+#
+# Interactive (prompts for everything):
+#   bash scripts/install-vps.sh
+#
+# Non-interactive (via env vars — no prompts):
+#   AGENT_OS_DOMAIN=example.com \
+#   AGENT_OS_ADMIN_USER=admin \
+#   AGENT_OS_ADMIN_PASS=supersecretpassword \
+#   TELEGRAM_BOT_TOKEN=123456:ABC-DEF... \
+#     bash scripts/install-vps.sh
+#
+# Optional env vars:
+#   TELEGRAM_BOT_TOKEN   Telegram bot token (default: none)
+# ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,11 +29,18 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
-if command -v sudo >/dev/null 2>&1 && [[ "${EUID}" -ne 0 ]]; then
+if command -v sudo >/dev/null 2>&1 && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   SUDO="sudo"
 else
   SUDO=""
 fi
+
+# ── Reopen stdin from terminal when piped (e.g. curl | bash) ────────
+if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
+  exec 0</dev/tty
+fi
+
+# ── Input helpers ────────────────────────────────────────────────────
 
 prompt_nonempty() {
   local prompt="$1"
@@ -106,6 +131,8 @@ normalize_domain() {
   printf '%s' "${raw,,}"
 }
 
+# ── OS detection (for Docker install) ────────────────────────────────
+
 require_supported_os() {
   if [[ ! -f /etc/os-release ]]; then
     echo "Cannot detect the VPS distribution." >&2
@@ -154,6 +181,8 @@ EOF
   ${SUDO} apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   ${SUDO} systemctl enable --now docker
 }
+
+# ── Config writers ───────────────────────────────────────────────────
 
 write_env_file() {
   local admin_user="$1"
@@ -209,13 +238,34 @@ EOF
   ${SUDO} systemctl enable agent-os.service
 }
 
+# ── Main ─────────────────────────────────────────────────────────────
+
 main() {
   install_docker_if_needed
 
-  admin_user="$(prompt_env_safe_value "Admin username")"
-  admin_pass="$(prompt_password)"
-  root_domain="$(normalize_domain "$(prompt_nonempty "Root domain pointed at this VPS")")"
-  telegram_bot_token="$(prompt_optional_env_safe_value "Telegram bot token (optional, press Enter to skip)")"
+  # Resolve config: env vars take priority, then interactive prompts
+  admin_user="${AGENT_OS_ADMIN_USER:-}"
+  admin_pass="${AGENT_OS_ADMIN_PASS:-}"
+  root_domain="${AGENT_OS_DOMAIN:-}"
+  telegram_bot_token="${TELEGRAM_BOT_TOKEN:-}"
+
+  if [[ -z "${admin_user}" ]]; then
+    admin_user="$(prompt_env_safe_value "Admin username")"
+  fi
+
+  if [[ -z "${admin_pass}" ]]; then
+    admin_pass="$(prompt_password)"
+  fi
+
+  if [[ -z "${root_domain}" ]]; then
+    root_domain="$(normalize_domain "$(prompt_nonempty "Root domain pointed at this VPS")")"
+  else
+    root_domain="$(normalize_domain "${root_domain}")"
+  fi
+
+  if [[ -z "${telegram_bot_token}" ]]; then
+    telegram_bot_token="$(prompt_optional_env_safe_value "Telegram bot token (optional, press Enter to skip)")"
+  fi
 
   if [[ ! "${root_domain}" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
     echo "Invalid root domain: ${root_domain}" >&2
@@ -233,23 +283,28 @@ EOF
   write_env_file "${admin_user}" "${admin_pass}" "${root_domain}" "${telegram_bot_token}"
   install_systemd_unit
 
+  echo ""
+  echo "Starting Agent-OS stack..."
   AGENT_OS_ENV_FILE="${ENV_FILE}" bash "${ROOT_DIR}/scripts/manage-vps-stack.sh" up
 
   cat <<EOF
 
-Agent-OS is deploying on the VPS.
+  ┌─────────────────────────────────────────────────┐
+  │            Agent-OS is deploying                 │
+  └─────────────────────────────────────────────────┘
 
-Admin URL: https://admin.${root_domain}
-Public URL: https://${root_domain}
-Env file: ${ENV_FILE}
+  Admin:   https://admin.${root_domain}
+  Public:  https://${root_domain}
+  Config:  ${ENV_FILE}
 
-Additional public routes can be added as Caddy snippets in:
-  ${CADDY_ROOT}/sites
+  Caddy snippets: ${CADDY_ROOT}/sites
 
-Use these commands for day-2 operations:
-  bash scripts/manage-vps-stack.sh status
-  bash scripts/manage-vps-stack.sh logs
-  bash scripts/manage-vps-stack.sh restart public
+  Day-2 commands:
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh status
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh logs
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh reload
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh restart [service]
+
 EOF
 }
 

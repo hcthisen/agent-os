@@ -42,6 +42,24 @@ test("relay project auto-create requires durable execution work", () => {
   );
 });
 
+test("relay project matching tolerates a probable hostname typo for the same initiative", () => {
+  const score = messageRouterTestHooks.scoreRelayProjectMatch(
+    {
+      display_name: "scalebytech.com",
+      metadata: { hostnames: ["scalebytech.com"] },
+      repo_url: null,
+      slug: "scalebytech-com",
+    },
+    {
+      candidate_labels: ["scalebytech.con"],
+      hostnames: ["scalebytech.con"],
+      slug: "scalebytech-con",
+    }
+  );
+
+  assert.ok(score >= 6);
+});
+
 test("task continuation summary pushes adaptation and skill evolution", () => {
   const summary = taskPollerTestHooks.buildTaskContinuationSummary(
     {

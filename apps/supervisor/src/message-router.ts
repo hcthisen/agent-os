@@ -900,6 +900,11 @@ function scoreRelayProjectMatch(
   for (const hostname of signals.hostnames) {
     if (knownHostnames.has(hostname)) {
       score += 10;
+      continue;
+    }
+
+    for (const knownHostname of knownHostnames) {
+      score += scoreProbableHostnameTypo(hostname, knownHostname);
     }
   }
 
@@ -928,6 +933,35 @@ function scoreRelayProjectMatch(
   }
 
   return score;
+}
+
+function scoreProbableHostnameTypo(left: string, right: string): number {
+  const normalizedLeft = normalizeRelayProjectSlug(left);
+  const normalizedRight = normalizeRelayProjectSlug(right);
+  if (!normalizedLeft || !normalizedRight || normalizedLeft === normalizedRight) {
+    return 0;
+  }
+
+  if (Math.min(normalizedLeft.length, normalizedRight.length) < 8) {
+    return 0;
+  }
+
+  const leftStem = extractHostnameStem(left);
+  const rightStem = extractHostnameStem(right);
+  if (!leftStem || leftStem !== rightStem) {
+    return 0;
+  }
+
+  const distance = levenshteinDistance(normalizedLeft, normalizedRight);
+  if (distance === 1) {
+    return 7;
+  }
+
+  if (distance === 2 && sharesTldPrefix(left, right)) {
+    return 6;
+  }
+
+  return 0;
 }
 
 async function createAutoManagedRelayProject(
@@ -1006,6 +1040,56 @@ function normalizeRelayProjectSlug(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function extractHostnameStem(value: string): string {
+  const hostname = extractHostnames(value)[0];
+  if (!hostname) {
+    return "";
+  }
+
+  const segments = hostname.split(".").filter(Boolean);
+  if (segments.length <= 1) {
+    return hostname;
+  }
+
+  return segments.slice(0, -1).join(".");
+}
+
+function sharesTldPrefix(left: string, right: string): boolean {
+  const leftHostname = extractHostnames(left)[0];
+  const rightHostname = extractHostnames(right)[0];
+  if (!leftHostname || !rightHostname) {
+    return false;
+  }
+
+  const leftTld = leftHostname.split(".").pop() || "";
+  const rightTld = rightHostname.split(".").pop() || "";
+  return leftTld.startsWith(rightTld) || rightTld.startsWith(leftTld);
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
+    let diagonal = previous[0];
+    previous[0] = leftIndex + 1;
+
+    for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
+      const temp = previous[rightIndex + 1];
+      previous[rightIndex + 1] = Math.min(
+        previous[rightIndex + 1] + 1,
+        previous[rightIndex] + 1,
+        diagonal + (left[leftIndex] === right[rightIndex] ? 0 : 1)
+      );
+      diagonal = temp;
+    }
+  }
+
+  return previous[right.length];
+}
+
 function extractHostnames(value: string): string[] {
   const matches = [
     ...String(value || "").matchAll(
@@ -1031,6 +1115,7 @@ function readProjectMetadataStringArray(value: unknown): string[] {
 export const messageRouterTestHooks = {
   extractHostnames,
   extractRelayProjectSignals,
+  scoreRelayProjectMatch,
   normalizeRelayProjectSlug,
   shouldAutoCreateRelayProject,
 };
