@@ -98,9 +98,9 @@ prompt_password() {
 
   while true; do
     read -r -s -p "Admin password: " first
-    echo
+    echo >&2
     read -r -s -p "Confirm admin password: " second
-    echo
+    echo >&2
 
     if [[ -z "${first}" ]]; then
       echo "Password cannot be empty." >&2
@@ -249,6 +249,7 @@ main() {
   root_domain="${AGENT_OS_DOMAIN:-}"
   telegram_bot_token="${TELEGRAM_BOT_TOKEN:-}"
 
+  echo "" >&2
   if [[ -z "${admin_user}" ]]; then
     admin_user="$(prompt_env_safe_value "Admin username")"
   fi
