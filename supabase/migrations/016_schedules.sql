@@ -14,7 +14,7 @@ CREATE TABLE schedules (
 INSERT INTO schedules (name, cron_expr, assigned_role, task_template) VALUES
   ('sentinel-health-check', '*/30 * * * *', 'sentinel', '{
     "title": "Sentinel health check",
-    "objective": "Run system health checks: queue depth, cost trends, auth status, service health, approval expiry, memory staleness.",
+    "objective": "Run system health checks: queue depth, cost trends, auth status, service lifecycle context, and memory staleness.",
     "acceptance_criteria": ["Health report event logged"],
     "priority": "normal"
   }'::jsonb);

@@ -362,11 +362,20 @@ function loadManagedServiceSnapshot(): Record<string, unknown> {
   try {
     const runtime = resolveComposeRuntime();
     const services = inspectServices(runtime, MANAGED_SERVICES);
+    const summarized = summarizeManagedServices(services);
 
     return {
+      attention_required: summarized
+        .filter((service) => service.attention_required)
+        .map((service) => ({
+          health: service.health,
+          service: service.service,
+          state: service.state,
+          status_reason: service.status_reason,
+        })),
       current_service: runtime.currentService,
       project: runtime.project,
-      services: summarizeManagedServices(services),
+      services: summarized,
     };
   } catch (error) {
     return {
@@ -380,12 +389,16 @@ function summarizeManagedServices(
   services: ManagedServiceStatus[]
 ): Array<Record<string, unknown>> {
   return services.map((service) => ({
+    attention_required: service.attention_required,
     container_id: service.container_id,
     container_name: service.container_name,
     health: service.health,
     ip_addresses: service.ip_addresses,
+    lifecycle: service.lifecycle,
+    lifecycle_note: service.lifecycle_note,
     service: service.service,
     state: service.state,
+    status_reason: service.status_reason,
   }));
 }
 

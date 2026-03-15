@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { getDb } from "../db.js";
 import { enforceScope, getCurrentTaskContext } from "../scope.js";
 import { assertTaskMutationAllowed } from "../simulation.js";
@@ -221,28 +222,30 @@ export async function taskCreate(args: {
     };
   }
 
-  const { data, error } = await db
+  const taskId = randomUUID();
+  const insertPayload = {
+    id: taskId,
+    title: args.title,
+    objective: args.objective,
+    acceptance_criteria: args.acceptance_criteria || [],
+    assigned_role: args.assigned_role,
+    priority: args.priority || "normal",
+    parent_task_id: parentTaskId,
+    depends_on: dependencyIds,
+    project_id: projectId,
+    customer_id: customerId,
+    department_id: departmentId,
+    is_system_modification: args.is_system_modification || false,
+    state: args.state || "ready",
+  };
+
+  const { error } = await db
     .from("tasks")
-    .insert({
-      title: args.title,
-      objective: args.objective,
-      acceptance_criteria: args.acceptance_criteria || [],
-      assigned_role: args.assigned_role,
-      priority: args.priority || "normal",
-      parent_task_id: parentTaskId,
-      depends_on: dependencyIds,
-      project_id: projectId,
-      customer_id: customerId,
-      department_id: departmentId,
-      is_system_modification: args.is_system_modification || false,
-      state: args.state || "ready",
-    })
-    .select()
-    .single();
+    .insert(insertPayload);
 
   if (error) {
     return { success: false, error: error.message };
   }
 
-  return { success: true, task: data };
+  return { success: true, task: insertPayload };
 }

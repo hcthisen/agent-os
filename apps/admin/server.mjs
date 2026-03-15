@@ -107,6 +107,17 @@ function endOfDayIso(value) {
   return value ? `${value}T23:59:59.999Z` : null;
 }
 
+function chunkArray(values, chunkSize) {
+  const size = Math.max(1, Number.parseInt(String(chunkSize || 1), 10) || 1);
+  const chunks = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -793,14 +804,25 @@ async function buildUsageSummary() {
     },
   });
   const taskIds = [...new Set((taskRuns || []).map((run) => run.task_id).filter(Boolean))];
-  const tasks = taskIds.length
-    ? await postgrest("/tasks", {
-        query: {
-          id: `in.(${taskIds.join(",")})`,
-          select: "id,assigned_role",
-        },
-      })
-    : [];
+  const tasks = [];
+
+  for (const taskIdChunk of chunkArray(taskIds, 50)) {
+    if (!taskIdChunk.length) {
+      continue;
+    }
+
+    const rows = await postgrest("/tasks", {
+      query: {
+        id: `in.(${taskIdChunk.join(",")})`,
+        select: "id,assigned_role",
+      },
+    }).catch(() => []);
+
+    if (Array.isArray(rows) && rows.length) {
+      tasks.push(...rows);
+    }
+  }
+
   const taskMap = new Map((tasks || []).map((task) => [task.id, task.assigned_role]));
 
   function summarizeWindow(startMs) {
@@ -1294,6 +1316,7 @@ async function createRelayTaskForInboundMessage(message) {
       assigned_role: "relay",
       objective: relayRouting.objective,
       priority: "high",
+      project_id: relayRouting.project?.id || null,
       state: "ready",
       title,
     },
@@ -1324,6 +1347,11 @@ async function prepareRelayTaskRouting(message) {
     matchedSkills,
     teachMode
   );
+  const project = await resolveRelayProject(
+    message,
+    history,
+    executionDecision.requiresExecution
+  );
   const transcript = [...history, {
     content,
     created_at: new Date().toISOString(),
@@ -1345,12 +1373,17 @@ Routing reminders:
 - If the request depends on a third-party service, account, API key, CDN, email provider, or similar credentialed integration, route to sage for a plan before builder implementation unless the task already has a clear staged execution plan in context.
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
-- If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
+- Treat projects as internal persistent initiatives, not operator setup work. Reuse an existing project when this message continues the same website, customer implementation, campaign, or product surface. If execution work starts a new durable initiative with a stable identifier such as a hostname, site, or named initiative, create or attach a project automatically so follow-up tasks, artifacts, memories, and skills stay grouped over time.
+- If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Also treat repeated requests, recurring scheduled work, and proven multi-step workflows as candidates for shared skills. Create a semantic memory for durable facts and constraints, or a shared skill for repeatable procedures, then confirm back to the operator what was stored.
+- If the message repeats work that previously failed or stalled, do not route it as a blind retry. Tell the next role to inspect prior handoff notes and choose a materially different approach.
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can follow the existing procedure instead of recreating it.
 - When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role, reference the matched skill by name, and keep any operator reply to a brief acknowledgement instead of a false completion claim.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
+
+Project persistence:
+${formatRelayProjectDecision(project)}
 
 Teach mode detected: ${teachMode ? "yes" : "no"}.
 Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
@@ -1365,6 +1398,7 @@ Routing requirement: ${
     execution_reason: executionDecision.reason,
     matched_skills: matchedSkills,
     objective,
+    project,
     recommended_role: executionDecision.recommendedRole,
     requires_execution: executionDecision.requiresExecution,
     teach_mode: teachMode,
@@ -1375,6 +1409,7 @@ function buildRelayAcceptanceCriteria(relayRouting) {
   if (relayRouting?.requires_execution) {
     return [
       "Message classified",
+      "Durable initiative continued or attached when appropriate",
       "Appropriate downstream child task created",
       "Operator kept informed without falsely claiming the work is already complete",
     ];
@@ -1426,6 +1461,14 @@ function classifyRelayExecutionRequest(content, matchedSkills, teachMode) {
     };
   }
 
+  if (looksLikeConversationProbe(content)) {
+    return {
+      reason: "conversation_probe",
+      recommendedRole: null,
+      requiresExecution: false,
+    };
+  }
+
   if (!matchedSkills.length) {
     return {
       reason: "no_matched_skill",
@@ -1456,6 +1499,28 @@ function classifyRelayExecutionRequest(content, matchedSkills, teachMode) {
       : null,
     requiresExecution,
   };
+}
+
+function looksLikeConversationProbe(content) {
+  const normalized = normalizeString(content).toLowerCase();
+  if (!normalized || normalized.length > 140) {
+    return false;
+  }
+
+  const probePhrase =
+    /\b(quick test|test message|test from telegram|just testing|can you respond|can you reply|did you get this|are you there|do you see this)\b/.test(
+      normalized
+    ) ||
+    (/^(hi|hello|hey|ping|test|testing)\b/.test(normalized) &&
+      normalized.length <= 80);
+
+  if (!probePhrase) {
+    return false;
+  }
+
+  return !/\b(deploy|build|create|remove|delete|fix|update|verify|review|plan|investigate|publish|implement|child task|task graph)\b/.test(
+    normalized
+  );
 }
 
 function looksLikeInformationalRelayQuestion(content) {
@@ -1617,12 +1682,318 @@ function shouldHideAdminMessage(message) {
   );
 }
 
+function formatRelayProjectDecision(project) {
+  if (!project) {
+    return "- No persistent initiative is attached yet. If downstream execution reveals a stable ongoing initiative, attach it instead of leaving the work project-less.";
+  }
+
+  return [
+    `- Attached project: ${project.display_name} (${project.slug})`,
+    `- Mode: ${project.mode}`,
+    `- Reason: ${project.reason}`,
+    "- Keep follow-up tasks, artifacts, memories, and skills inside this project unless the scope clearly changes.",
+  ].join("\n");
+}
+
+async function resolveRelayProject(message, history, requiresExecution) {
+  const signals = extractRelayProjectSignals(message.content);
+  const existingProject = await findExistingProjectForSignals(signals);
+  if (existingProject) {
+    return {
+      ...existingProject,
+      mode: "existing_project",
+    };
+  }
+
+  const recentConversationProject = await loadRecentConversationProject(history);
+  if (
+    recentConversationProject &&
+    (
+      (!signals.slug && !signals.hostnames.length && !signals.candidate_labels.length) ||
+      scoreRelayProjectMatch(recentConversationProject, signals) >= 6
+    )
+  ) {
+    return {
+      display_name: recentConversationProject.display_name,
+      id: recentConversationProject.id,
+      mode: "continued_conversation",
+      reason: "Recent messages in this conversation already belong to the same initiative.",
+      slug: recentConversationProject.slug,
+    };
+  }
+
+  if (!signals.slug && !signals.hostnames.length && !signals.candidate_labels.length) {
+    return null;
+  }
+
+  if (!shouldAutoCreateRelayProject(signals, message.content, requiresExecution)) {
+    return null;
+  }
+
+  const createdProject = await createAutoManagedRelayProject(signals, message);
+  if (!createdProject) {
+    return null;
+  }
+
+  return {
+    ...createdProject,
+    mode: "created_project",
+    reason: "Created a persistent initiative automatically so future work continues in the same context.",
+  };
+}
+
+async function loadRecentConversationProject(history) {
+  const taskIds = [...new Set(
+    [...(Array.isArray(history) ? history : [])]
+      .reverse()
+      .flatMap((message) => {
+        const directTaskId =
+          typeof message?.task_id === "string" && message.task_id ? message.task_id : null;
+        const relayTaskId =
+          typeof message?.metadata?.relay_task_id === "string" && message.metadata.relay_task_id
+            ? message.metadata.relay_task_id
+            : null;
+        return [directTaskId, relayTaskId].filter(Boolean);
+      })
+  )];
+
+  if (!taskIds.length) {
+    return null;
+  }
+
+  const taskRows = await postgrest("/tasks", {
+    query: {
+      id: `in.(${taskIds.join(",")})`,
+      limit: String(taskIds.length),
+      select: "id,project_id",
+    },
+  }).catch((error) => {
+    console.error("[admin] Failed to inspect recent relay tasks for project continuity:", error);
+    return [];
+  });
+
+  const projectIdByTaskId = new Map((taskRows || []).map((row) => [row.id, row.project_id]));
+  const orderedProjectIds = taskIds
+    .map((taskId) => projectIdByTaskId.get(taskId))
+    .filter(Boolean);
+
+  if (!orderedProjectIds.length) {
+    return null;
+  }
+
+  const rows = await postgrest("/projects", {
+    query: {
+      archived: "eq.false",
+      id: `eq.${orderedProjectIds[0]}`,
+      limit: "1",
+      select: "id,slug,display_name,metadata,repo_url",
+    },
+  }).catch((error) => {
+    console.error("[admin] Failed to load continuation project:", error);
+    return [];
+  });
+
+  return rows?.[0] || null;
+}
+
+function extractRelayProjectSignals(content) {
+  const hostnames = extractHostnames(content);
+  const quotedLabels = [...normalizeString(content).matchAll(/["“]([^"\n]{3,60})["”]/g)]
+    .map((match) => normalizeString(match[1]))
+    .filter(Boolean);
+  const leadLabel = hostnames[0] || quotedLabels[0] || "";
+
+  return {
+    candidate_labels: [...new Set([...quotedLabels, ...hostnames].filter(Boolean))],
+    hostnames,
+    slug: leadLabel ? normalizeRelayProjectSlug(leadLabel) : null,
+  };
+}
+
+function shouldAutoCreateRelayProject(signals, content, requiresExecution) {
+  if (!requiresExecution || !signals?.slug) {
+    return false;
+  }
+
+  if (Array.isArray(signals.hostnames) && signals.hostnames.length > 0) {
+    return true;
+  }
+
+  return (
+    Array.isArray(signals.candidate_labels) &&
+    signals.candidate_labels.length > 0 &&
+    /\b(site|website|app|project|campaign|customer|client|store|landing page|implementation)\b/i.test(
+      normalizeString(content)
+    )
+  );
+}
+
+async function findExistingProjectForSignals(signals) {
+  const rows = await postgrest("/projects", {
+    query: {
+      archived: "eq.false",
+      limit: "200",
+      order: "updated_at.desc",
+      select: "id,slug,display_name,repo_url,metadata,updated_at",
+    },
+  }).catch((error) => {
+    console.error("[admin] Failed to load projects for relay initiative matching:", error);
+    return [];
+  });
+
+  const ranked = (rows || [])
+    .map((project) => ({
+      project,
+      score: scoreRelayProjectMatch(project, signals),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (!ranked.length || ranked[0].score < 6) {
+    return null;
+  }
+
+  return {
+    display_name: ranked[0].project.display_name,
+    id: ranked[0].project.id,
+    reason:
+      ranked[0].score >= 10
+        ? "Matched an existing initiative by hostname."
+        : "Matched an existing initiative by slug or display name.",
+    slug: ranked[0].project.slug,
+  };
+}
+
+function scoreRelayProjectMatch(project, signals) {
+  let score = 0;
+  const metadataHostnames = readMetadataStringArray(project?.metadata?.hostnames);
+  const repoHostnames = extractHostnames(project?.repo_url || "");
+  const knownHostnames = new Set([...metadataHostnames, ...repoHostnames]);
+
+  for (const hostname of Array.isArray(signals?.hostnames) ? signals.hostnames : []) {
+    if (knownHostnames.has(hostname)) {
+      score += 10;
+    }
+  }
+
+  if (signals?.slug && project?.slug === signals.slug) {
+    score += 8;
+  }
+
+  const normalizedDisplayName = normalizeRelayProjectSlug(project?.display_name || "");
+  for (const label of Array.isArray(signals?.candidate_labels) ? signals.candidate_labels : []) {
+    const normalizedLabel = normalizeRelayProjectSlug(label);
+    if (!normalizedLabel) {
+      continue;
+    }
+
+    if (normalizedDisplayName === normalizedLabel) {
+      score += 6;
+      continue;
+    }
+
+    if (
+      normalizedDisplayName.includes(normalizedLabel) ||
+      normalizedLabel.includes(normalizedDisplayName)
+    ) {
+      score += 3;
+    }
+  }
+
+  return score;
+}
+
+async function createAutoManagedRelayProject(signals, message) {
+  if (!signals?.slug) {
+    return null;
+  }
+
+  const slug = await ensureUniqueProjectSlug(signals.slug);
+  const displayName = signals.candidate_labels?.[0] || signals.slug;
+  const rows = await postgrest("/projects", {
+    body: {
+      description:
+        `Auto-managed initiative created from an inbound ${message.channel} request. ` +
+        "The system should continue related tasks, artifacts, memories, and skills here.",
+      display_name: displayName,
+      metadata: {
+        auto_created_from: "relay",
+        auto_managed: true,
+        hostnames: signals.hostnames || [],
+        last_inbound_channel: message.channel,
+        last_inbound_sender: message.sender,
+        last_routed_at: new Date().toISOString(),
+      },
+      slug,
+    },
+    method: "POST",
+    preferRepresentation: true,
+  }).catch((error) => {
+    console.error("[admin] Failed to create auto-managed relay project:", error);
+    return [];
+  });
+
+  return rows?.[0] || null;
+}
+
+async function ensureUniqueProjectSlug(baseSlug) {
+  for (let suffix = 0; suffix < 20; suffix += 1) {
+    const candidate = suffix === 0 ? baseSlug : `${baseSlug}-${suffix + 1}`;
+    const rows = await postgrest("/projects", {
+      query: {
+        limit: "1",
+        select: "id",
+        slug: `eq.${candidate}`,
+      },
+    }).catch((error) => {
+      throw new Error(`Failed to check project slug '${candidate}': ${error.message}`);
+    });
+
+    if (!rows?.[0]?.id) {
+      return candidate;
+    }
+  }
+
+  return `${baseSlug}-${Date.now()}`;
+}
+
+function normalizeRelayProjectSlug(value) {
+  return normalizeString(value)
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function extractHostnames(value) {
+  const matches = [
+    ...normalizeString(value).matchAll(
+      /\b(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi
+    ),
+  ];
+
+  return [...new Set(
+    matches
+      .map((match) => normalizeString(match[1]).toLowerCase().replace(/^www\./, ""))
+      .filter(Boolean)
+  )];
+}
+
+function readMetadataStringArray(value) {
+  return Array.isArray(value)
+    ? value
+        .map((entry) => (typeof entry === "string" ? normalizeString(entry).toLowerCase() : ""))
+        .filter(Boolean)
+    : [];
+}
+
 async function loadRecentConversationMessages(message) {
   const query = {
     channel: `eq.${message.channel}`,
     limit: String(RELAY_HISTORY_LIMIT),
     order: "created_at.desc",
-    select: "id,direction,sender,content,created_at,metadata",
+    select: "id,direction,sender,content,created_at,metadata,task_id",
   };
   const chatId =
     message.channel === "telegram" &&
@@ -2230,6 +2601,20 @@ function formatSkillDraftMessage(draft) {
     .join("\n\n");
 }
 
+function formatSavedSkillMessage(draft) {
+  const steps = draft.steps
+    .map((step) => `${step.order}. ${step.instruction}`)
+    .join("\n");
+
+  return [
+    `Stored shared skill "${draft.display_name}" as ${draft.name}.`,
+    `Trigger: ${draft.trigger_when}`,
+    steps ? `Steps:\n${steps}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 async function postAdminSystemMessage({ content, metadata, taskId = null }) {
   const rows = await postgrest("/messages", {
     body: {
@@ -2290,7 +2675,12 @@ async function createSkillDraftRecord({ content, sourceMessageId }) {
   return normalizeSkillDraftRow(rows?.[0] || null);
 }
 
-async function confirmSkillDraftRecord(draftId) {
+async function confirmSkillDraftRecord(draftId, options = {}) {
+  const confirmedBy =
+    typeof options.confirmedBy === "string" && options.confirmedBy.trim()
+      ? options.confirmedBy.trim()
+      : "operator";
+  const shouldAnnounce = options.announce !== false;
   const draft = await loadSkillDraftById(draftId);
   if (!draft) {
     throw new Error("Skill draft not found");
@@ -2354,7 +2744,7 @@ async function confirmSkillDraftRecord(draftId) {
   const updatedDraftRows = await postgrest("/skill_drafts", {
     body: {
       confirmed_at: now,
-      confirmed_by: "operator",
+      confirmed_by: confirmedBy,
       confirmed_skill_id: skillRow.id,
       status: "confirmed",
       updated_at: now,
@@ -2367,15 +2757,18 @@ async function confirmSkillDraftRecord(draftId) {
   const updatedDraft = normalizeSkillDraftRow(updatedDraftRows?.[0] || draft);
   const skill = parseSkillMemoryRow(skillRow);
 
-  await postAdminSystemMessage({
-    content: `Saved shared skill "${updatedDraft.display_name}" as ${updatedDraft.name}.`,
-    metadata: {
-      operator_visible: true,
-      saved_skill_id: skill?.id || null,
-      skill_draft_id: updatedDraft.id,
-      skill_draft_status: "confirmed",
-    },
-  });
+  if (shouldAnnounce) {
+    await postAdminSystemMessage({
+      content: formatSavedSkillMessage(updatedDraft),
+      metadata: {
+        operator_visible: true,
+        saved_skill_id: skill?.id || null,
+        skill_draft: updatedDraft,
+        skill_draft_id: updatedDraft.id,
+        skill_draft_status: "confirmed",
+      },
+    });
+  }
 
   return { draft: updatedDraft, skill };
 }
@@ -2450,14 +2843,9 @@ async function processInboundOperatorMessage({
   });
 
   if (skillDraft) {
-    await postAdminSystemMessage({
-      content: formatSkillDraftMessage(skillDraft),
-      metadata: {
-        operator_visible: true,
-        skill_draft: skillDraft,
-        skill_draft_id: skillDraft.id,
-        skill_draft_status: "pending",
-      },
+    const confirmedSkill = await confirmSkillDraftRecord(skillDraft.id, {
+      announce: true,
+      confirmedBy: "operator_message",
     });
 
     return {
@@ -2465,12 +2853,15 @@ async function processInboundOperatorMessage({
       relayTask: null,
       metadata: {
         ...baseMetadata,
+        saved_skill_id: confirmedSkill.skill?.id || null,
         skill_draft_candidate: true,
-        skill_draft_id: skillDraft.id,
+        skill_draft_id: confirmedSkill.draft.id,
+        skill_draft_status: "confirmed",
         teach_mode: true,
       },
       result: {
-        draft: skillDraft,
+        draft: confirmedSkill.draft,
+        skill: confirmedSkill.skill,
       },
     };
   }
@@ -2489,6 +2880,8 @@ async function processInboundOperatorMessage({
       ...baseMetadata,
       matched_skill_names:
         relayTask?.routing_hints?.matched_skills?.map((skill) => skill.name) || [],
+      relay_project_id: relayTask?.routing_hints?.project?.id || null,
+      relay_project_mode: relayTask?.routing_hints?.project?.mode || null,
       recommended_role: relayTask?.routing_hints?.recommended_role || null,
       relay_task_id: relayTask?.id || null,
       requires_execution: relayTask?.routing_hints?.requires_execution || false,

@@ -19,6 +19,7 @@ interface ConversationMessage {
   direction: string;
   metadata?: Record<string, unknown> | null;
   sender: string;
+  task_id?: string | null;
 }
 
 /**
@@ -32,12 +33,29 @@ export async function routeMessages(): Promise<void> {
     .select("*")
     .eq("processed", false)
     .eq("direction", "inbound")
+    .neq("sender", "system")
     .order("created_at")
     .limit(10);
 
   if (error || !messages?.length) return;
 
   for (const msg of (messages || []) as InboundMessage[]) {
+    if (shouldSkipRelayRouting(msg)) {
+      await db
+        .from("messages")
+        .update({
+          metadata: {
+            ...(msg.metadata || {}),
+            processed_reason: "internal_message_skipped",
+            routed_via: "skipped",
+          },
+          processed: true,
+        })
+        .eq("id", msg.id)
+        .eq("processed", false);
+      continue;
+    }
+
     const history = await loadRecentConversationMessages(msg);
     const relayRouting = await prepareRelayTaskRouting(msg, history);
 
@@ -45,12 +63,13 @@ export async function routeMessages(): Promise<void> {
     const { data: relayTask, error: taskErr } = await db
       .from("tasks")
       .insert({
-        title: `Process message: ${msg.content.slice(0, 50)}...`,
-        objective: relayRouting.objective,
         acceptance_criteria: buildRelayAcceptanceCriteria(relayRouting),
-        state: "ready",
-        priority: "high",
         assigned_role: "relay",
+        objective: relayRouting.objective,
+        priority: "high",
+        project_id: relayRouting.project?.id || null,
+        state: "ready",
+        title: `Process message: ${msg.content.slice(0, 50)}...`,
       })
       .select("id")
       .single();
@@ -76,7 +95,16 @@ export async function routeMessages(): Promise<void> {
     // Mark message as processed
     await db
       .from("messages")
-      .update({ processed: true, task_id: relayTask.id })
+      .update({
+        metadata: {
+          ...(msg.metadata || {}),
+          relay_project_id: relayRouting.project?.id || null,
+          relay_project_mode: relayRouting.project?.mode || null,
+          routed_via: "relay",
+        },
+        processed: true,
+        task_id: relayTask.id,
+      })
       .eq("id", msg.id);
   }
 }
@@ -96,10 +124,19 @@ interface RelevantSkill {
   use_count: number;
 }
 
+interface RelayProjectDecision {
+  display_name: string;
+  id: string;
+  mode: "continued_conversation" | "existing_project" | "created_project";
+  reason: string;
+  slug: string;
+}
+
 interface RelayRoutingDecision {
   execution_reason: string;
   matched_skills: RelevantSkill[];
   objective: string;
+  project: RelayProjectDecision | null;
   recommended_role: string | null;
   requires_execution: boolean;
   teach_mode: boolean;
@@ -116,6 +153,11 @@ async function prepareRelayTaskRouting(
     content,
     matchedSkills,
     teachMode
+  );
+  const project = await resolveRelayProject(
+    message,
+    history,
+    executionDecision.requiresExecution
   );
   const transcript = [...history, {
     content,
@@ -139,12 +181,17 @@ Routing reminders:
 - If the message states a stable operator preference or constraint, record it as durable memory. Do not store secrets in memory.
 - If the request creates or removes a public hostname, treat route activation or teardown plus external verification as required work, not optional follow-up.
 - If the request is multi-phase, prefer a staged task graph with explicit depends_on prerequisites so follow-up work waits automatically instead of starting in parallel by accident.
-- If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Create a semantic memory for durable facts or a shared skill for repeatable procedures at company scope, then confirm back to the operator what was stored.
+- Treat projects as internal persistent initiatives, not operator setup work. Reuse an existing project when this message continues the same website, customer implementation, campaign, or product surface. If execution work starts a new durable initiative with a stable identifier such as a hostname, site, or named initiative, create or attach a project automatically so follow-up tasks, artifacts, memories, and skills stay grouped over time.
+- If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Also treat repeated requests, recurring scheduled work, and proven multi-step workflows as candidates for shared skills. Create a semantic memory for durable facts and constraints, or a shared skill for repeatable procedures, then confirm back to the operator what was stored.
+- If the message repeats work that previously failed or stalled, do not route it as a blind retry. Tell the next role to inspect prior handoff notes and choose a materially different approach.
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can reuse the existing procedure instead of recreating it.
 - When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role, reference the matched skill by name, and keep any operator reply to a brief acknowledgement instead of a false completion claim.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
+
+Project persistence:
+${formatRelayProjectDecision(project)}
 
 Teach mode detected: ${teachMode ? "yes" : "no"}.
 Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
@@ -159,6 +206,7 @@ Routing requirement: ${
     execution_reason: executionDecision.reason,
     matched_skills: matchedSkills,
     objective,
+    project,
     recommended_role: executionDecision.recommendedRole,
     requires_execution: executionDecision.requiresExecution,
     teach_mode: teachMode,
@@ -169,6 +217,7 @@ function buildRelayAcceptanceCriteria(relayRouting: RelayRoutingDecision): strin
   if (relayRouting.requires_execution) {
     return [
       "Message classified",
+      "Durable initiative continued or attached when appropriate",
       "Appropriate downstream child task created",
       "Operator kept informed without falsely claiming the work is already complete",
     ];
@@ -208,6 +257,15 @@ async function createRelayExecutionRequirement(
   }
 }
 
+function shouldSkipRelayRouting(message: InboundMessage): boolean {
+  return (
+    message.sender === "system" ||
+    message.metadata?.hidden_from_operator === true ||
+    message.metadata?.operator_visible === false ||
+    message.metadata?.routed_via === "relay"
+  );
+}
+
 function detectRelayTeachMode(content: string): boolean {
   return /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
 }
@@ -224,6 +282,14 @@ function classifyRelayExecutionRequest(
   if (teachMode) {
     return {
       reason: "explicit_training",
+      recommendedRole: null,
+      requiresExecution: false,
+    };
+  }
+
+  if (looksLikeConversationProbe(content)) {
+    return {
+      reason: "conversation_probe",
       recommendedRole: null,
       requiresExecution: false,
     };
@@ -259,6 +325,28 @@ function classifyRelayExecutionRequest(
       : null,
     requiresExecution,
   };
+}
+
+function looksLikeConversationProbe(content: string): boolean {
+  const normalized = String(content || "").trim().toLowerCase();
+  if (!normalized || normalized.length > 140) {
+    return false;
+  }
+
+  const probePhrase =
+    /\b(quick test|test message|test from telegram|just testing|can you respond|can you reply|did you get this|are you there|do you see this)\b/.test(
+      normalized
+    ) ||
+    (/^(hi|hello|hey|ping|test|testing)\b/.test(normalized) &&
+      normalized.length <= 80);
+
+  if (!probePhrase) {
+    return false;
+  }
+
+  return !/\b(deploy|build|create|remove|delete|fix|update|verify|review|plan|investigate|publish|implement|child task|task graph)\b/.test(
+    normalized
+  );
 }
 
 function looksLikeInformationalRelayQuestion(content: string): boolean {
@@ -527,7 +615,7 @@ async function loadRecentConversationMessages(
       : null;
   let query = db
     .from("messages")
-    .select("id,direction,sender,content,created_at,metadata")
+    .select("id,direction,sender,content,created_at,metadata,task_id")
     .eq("channel", message.channel)
     .neq("id", message.id)
     .order("created_at", { ascending: false })
@@ -562,3 +650,387 @@ function isRelayVisibleConversationMessage(message: ConversationMessage): boolea
     message.metadata?.operator_visible !== false
   );
 }
+
+function formatRelayProjectDecision(project: RelayProjectDecision | null): string {
+  if (!project) {
+    return "- No persistent initiative is attached yet. If downstream execution reveals a stable ongoing initiative, attach it instead of leaving the work project-less.";
+  }
+
+  return [
+    `- Attached project: ${project.display_name} (${project.slug})`,
+    `- Mode: ${project.mode}`,
+    `- Reason: ${project.reason}`,
+    "- Keep follow-up tasks, artifacts, memories, and skills inside this project unless the scope clearly changes.",
+  ].join("\n");
+}
+
+async function resolveRelayProject(
+  message: InboundMessage,
+  history: ConversationMessage[],
+  requiresExecution: boolean
+): Promise<RelayProjectDecision | null> {
+  const signals = extractRelayProjectSignals(message.content);
+  const existingProject = await findExistingProjectForSignals(signals);
+  if (existingProject) {
+    return {
+      ...existingProject,
+      mode: "existing_project",
+    };
+  }
+
+  const recentConversationProject = await loadRecentConversationProject(history);
+  if (
+    recentConversationProject &&
+    (
+      (!signals.slug && !signals.hostnames.length && !signals.candidate_labels.length) ||
+      scoreRelayProjectMatch(recentConversationProject, signals) >= 6
+    )
+  ) {
+    return {
+      display_name: recentConversationProject.display_name,
+      id: recentConversationProject.id,
+      mode: "continued_conversation",
+      reason: "Recent messages in this conversation already belong to the same initiative.",
+      slug: recentConversationProject.slug,
+    };
+  }
+
+  if (!signals.slug && !signals.hostnames.length && !signals.candidate_labels.length) {
+    return null;
+  }
+
+  if (!shouldAutoCreateRelayProject(signals, message.content, requiresExecution)) {
+    return null;
+  }
+
+  const db = getDb();
+  const createdProject = await createAutoManagedRelayProject(db, signals, message);
+  if (!createdProject) {
+    return null;
+  }
+
+  return {
+    ...createdProject,
+    mode: "created_project",
+    reason: "Created a persistent initiative automatically so future work continues in the same context.",
+  };
+}
+
+async function loadRecentConversationProject(
+  history: ConversationMessage[]
+): Promise<{
+  display_name: string;
+  id: string;
+  metadata: Record<string, unknown> | null;
+  reason: string;
+  repo_url: string | null;
+  slug: string;
+} | null> {
+  const db = getDb();
+  const taskIds = [...new Set(
+    [...history]
+      .reverse()
+      .flatMap((message) => {
+        const directTaskId =
+          typeof message.task_id === "string" && message.task_id ? message.task_id : null;
+        const relayTaskId =
+          typeof message.metadata?.relay_task_id === "string" && message.metadata.relay_task_id
+            ? message.metadata.relay_task_id
+            : null;
+        return [directTaskId, relayTaskId].filter((value): value is string => Boolean(value));
+      })
+  )];
+
+  if (!taskIds.length) {
+    return null;
+  }
+
+  const { data: taskRows, error: taskError } = await db
+    .from("tasks")
+    .select("id,project_id")
+    .in("id", taskIds)
+    .returns<Array<{ id: string; project_id: string | null }>>();
+
+  if (taskError) {
+    console.error("Failed to inspect recent relay tasks for project continuity:", taskError);
+    return null;
+  }
+
+  const projectIdByTaskId = new Map((taskRows || []).map((row) => [row.id, row.project_id]));
+  const orderedProjectIds = taskIds
+    .map((taskId) => projectIdByTaskId.get(taskId))
+    .filter((value): value is string => Boolean(value));
+
+  if (!orderedProjectIds.length) {
+    return null;
+  }
+
+  const { data: project, error: projectError } = await db
+    .from("projects")
+    .select("id,slug,display_name,metadata,repo_url")
+    .eq("id", orderedProjectIds[0])
+    .eq("archived", false)
+    .maybeSingle<{
+      display_name: string;
+      id: string;
+      metadata: Record<string, unknown> | null;
+      repo_url: string | null;
+      slug: string;
+    }>();
+
+  if (projectError) {
+    console.error("Failed to load conversation continuation project:", projectError);
+    return null;
+  }
+
+  if (!project) {
+    return null;
+  }
+
+  return {
+    ...project,
+    reason: "Recent messages in this conversation already belong to this initiative.",
+  };
+}
+
+function extractRelayProjectSignals(content: string): {
+  candidate_labels: string[];
+  hostnames: string[];
+  slug: string | null;
+} {
+  const hostnames = extractHostnames(content);
+  const quotedLabels = [...String(content || "").matchAll(/["“]([^"\n]{3,60})["”]/g)]
+    .map((match) => String(match[1] || "").trim())
+    .filter(Boolean);
+  const leadLabel = hostnames[0] || quotedLabels[0] || "";
+
+  return {
+    candidate_labels: [...new Set([...quotedLabels, ...hostnames].filter(Boolean))],
+    hostnames,
+    slug: leadLabel ? normalizeRelayProjectSlug(leadLabel) : null,
+  };
+}
+
+function shouldAutoCreateRelayProject(
+  signals: { candidate_labels: string[]; hostnames: string[]; slug: string | null },
+  content: string,
+  requiresExecution: boolean
+): boolean {
+  if (!requiresExecution || !signals.slug) {
+    return false;
+  }
+
+  if (signals.hostnames.length > 0) {
+    return true;
+  }
+
+  return (
+    signals.candidate_labels.length > 0 &&
+    /\b(site|website|app|project|campaign|customer|client|store|landing page|implementation)\b/i.test(
+      content
+    )
+  );
+}
+
+async function findExistingProjectForSignals(signals: {
+  candidate_labels: string[];
+  hostnames: string[];
+  slug: string | null;
+}): Promise<{ display_name: string; id: string; reason: string; slug: string } | null> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("projects")
+    .select("id,slug,display_name,repo_url,metadata,updated_at")
+    .eq("archived", false)
+    .order("updated_at", { ascending: false })
+    .limit(200)
+    .returns<
+      Array<{
+        display_name: string;
+        id: string;
+        metadata: Record<string, unknown> | null;
+        repo_url: string | null;
+        slug: string;
+        updated_at: string;
+      }>
+    >();
+
+  if (error) {
+    console.error("Failed to load projects for relay initiative matching:", error);
+    return null;
+  }
+
+  const ranked = (data || [])
+    .map((project) => ({
+      project,
+      score: scoreRelayProjectMatch(project, signals),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (!ranked.length || ranked[0].score < 6) {
+    return null;
+  }
+
+  return {
+    display_name: ranked[0].project.display_name,
+    id: ranked[0].project.id,
+    reason:
+      ranked[0].score >= 10
+        ? "Matched an existing initiative by hostname."
+        : "Matched an existing initiative by slug or display name.",
+    slug: ranked[0].project.slug,
+  };
+}
+
+function scoreRelayProjectMatch(
+  project: {
+    display_name: string;
+    metadata: Record<string, unknown> | null;
+    repo_url: string | null;
+    slug: string;
+  },
+  signals: { candidate_labels: string[]; hostnames: string[]; slug: string | null }
+): number {
+  let score = 0;
+  const metadataHostnames = readProjectMetadataStringArray(project.metadata?.hostnames);
+  const repoHostnames = extractHostnames(project.repo_url || "");
+  const knownHostnames = new Set([...metadataHostnames, ...repoHostnames]);
+
+  for (const hostname of signals.hostnames) {
+    if (knownHostnames.has(hostname)) {
+      score += 10;
+    }
+  }
+
+  if (signals.slug && project.slug === signals.slug) {
+    score += 8;
+  }
+
+  const normalizedDisplayName = normalizeRelayProjectSlug(project.display_name);
+  for (const label of signals.candidate_labels) {
+    const normalizedLabel = normalizeRelayProjectSlug(label);
+    if (!normalizedLabel) {
+      continue;
+    }
+
+    if (normalizedDisplayName === normalizedLabel) {
+      score += 6;
+      continue;
+    }
+
+    if (
+      normalizedDisplayName.includes(normalizedLabel) ||
+      normalizedLabel.includes(normalizedDisplayName)
+    ) {
+      score += 3;
+    }
+  }
+
+  return score;
+}
+
+async function createAutoManagedRelayProject(
+  db: ReturnType<typeof getDb>,
+  signals: { candidate_labels: string[]; hostnames: string[]; slug: string | null },
+  message: InboundMessage
+): Promise<{ display_name: string; id: string; reason: string; slug: string } | null> {
+  if (!signals.slug) {
+    return null;
+  }
+
+  const slug = await ensureUniqueProjectSlug(db, signals.slug);
+  const displayName = signals.candidate_labels[0] || signals.slug;
+  const { data, error } = await db
+    .from("projects")
+    .insert({
+      description:
+        `Auto-managed initiative created from an inbound ${message.channel} request. ` +
+        "The system should continue related tasks, artifacts, memories, and skills here.",
+      display_name: displayName,
+      metadata: {
+        auto_created_from: "relay",
+        auto_managed: true,
+        hostnames: signals.hostnames,
+        last_inbound_channel: message.channel,
+        last_inbound_sender: message.sender,
+        last_routed_at: new Date().toISOString(),
+      },
+      slug,
+    })
+    .select("id,slug,display_name")
+    .single<{ display_name: string; id: string; slug: string }>();
+
+  if (error) {
+    console.error("Failed to create auto-managed relay project:", error);
+    return null;
+  }
+
+  return {
+    ...data,
+    reason: "Created a persistent initiative automatically so future work continues in the same context.",
+  };
+}
+
+async function ensureUniqueProjectSlug(
+  db: ReturnType<typeof getDb>,
+  baseSlug: string
+): Promise<string> {
+  for (let suffix = 0; suffix < 20; suffix += 1) {
+    const candidate = suffix === 0 ? baseSlug : `${baseSlug}-${suffix + 1}`;
+    const { data, error } = await db
+      .from("projects")
+      .select("id")
+      .eq("slug", candidate)
+      .maybeSingle<{ id: string }>();
+
+    if (error) {
+      throw new Error(`Failed to check project slug '${candidate}': ${error.message}`);
+    }
+
+    if (!data?.id) {
+      return candidate;
+    }
+  }
+
+  return `${baseSlug}-${Date.now()}`;
+}
+
+function normalizeRelayProjectSlug(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function extractHostnames(value: string): string[] {
+  const matches = [
+    ...String(value || "").matchAll(
+      /\b(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi
+    ),
+  ];
+
+  return [...new Set(
+    matches
+      .map((match) => String(match[1] || "").trim().toLowerCase().replace(/^www\./, ""))
+      .filter(Boolean)
+  )];
+}
+
+function readProjectMetadataStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map((entry) => (typeof entry === "string" ? entry.trim().toLowerCase() : ""))
+        .filter(Boolean)
+    : [];
+}
+
+export const messageRouterTestHooks = {
+  extractHostnames,
+  extractRelayProjectSignals,
+  normalizeRelayProjectSlug,
+  shouldAutoCreateRelayProject,
+};

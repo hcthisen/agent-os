@@ -4,11 +4,13 @@
       "command": "node",
       "args": ["apps/mcp/dist/index.js"],
       "env": {
-        "SUPABASE_URL": "${SUPABASE_URL}",
-        "SUPABASE_SERVICE_KEY": "${SUPABASE_SERVICE_KEY}",
+        "POSTGREST_URL": "${POSTGREST_URL}",
+        "SUPABASE_ANON_KEY": "${SUPABASE_ANON_KEY}",
+        "AGENT_RUNTIME_JWT": "${AGENT_RUNTIME_JWT}",
         "AGENT_ID": "${AGENT_ID}",
         "ROLE_ID": "${ROLE_ID}",
         "RUN_ID": "${RUN_ID}",
+        "TASK_ID": "${TASK_ID}",
         "TRACE_ID": "${TRACE_ID}"
       }
     }

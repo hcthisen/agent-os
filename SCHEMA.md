@@ -83,7 +83,11 @@ per-agent behavior via the admin panel without changing the role definition.
 
 ### projects
 
-Organizational container for related tasks.
+Persistent initiative container for related tasks, artifacts, memories, and skills.
+This is an internal runtime concept first and an operator-facing admin concept second.
+The normal path is that the system creates or reuses a project automatically when work
+becomes durable and multi-step; the human should only need manual project creation as an
+override.
 
 | Column       | Type      | Notes                                             |
 |--------------|-----------|---------------------------------------------------|
@@ -96,6 +100,13 @@ Organizational container for related tasks.
 | archived     | bool      | Default false. Archived projects are hidden.      |
 | created_at   | timestamptz |                                                 |
 | updated_at   | timestamptz |                                                 |
+
+**Agent-first behavior:** Root relay work should attach to an existing project when the
+conversation clearly continues the same website, customer implementation, campaign,
+product surface, or other durable initiative. If a new durable initiative starts and a
+stable identifier exists such as a hostname or named site, the system should create the
+project automatically so downstream tasks inherit `project_id` and persistence stays
+intact across future requests.
 
 ### tasks
 
@@ -122,6 +133,8 @@ The atomic unit of work. **Strict state machine enforced by database trigger.**
 | depends_on          | uuid[]       | Task IDs that must complete first.          |
 | is_system_modification | bool      | True if this task modifies roles/agents/    |
 |                     |              | policies. Route through architect-owned work. |
+| simulation_only     | bool         | Default false. Enables non-destructive      |
+|                     |              | runtime verification and dry-run execution. |
 | last_handoff_note   | text         | Updated on every handoff.                   |
 | due_at              | timestamptz  | Optional deadline.                          |
 | started_at          | timestamptz  | Set by trigger when entering running.       |
@@ -134,9 +147,9 @@ The atomic unit of work. **Strict state machine enforced by database trigger.**
 
 If `customer_id` or `department_id` is set, those scopes become part of the agent's
 allowed working context for the life of the claimed task. MCP scope enforcement,
-`build_context_pack()`, and default memory/skill retrieval must include those scopes so
-customer- or department-specific knowledge can be read without leaking across unrelated
-work.
+`build_context_pack_runtime()`, and default memory/skill retrieval must include those
+scopes so customer- or department-specific knowledge can be read without leaking across
+unrelated work.
 
 `depends_on` is not just metadata. Scheduler behavior must treat a task in `ready` as
 launchable only when every referenced dependency task is `completed`. Dependency-waiting
@@ -308,8 +321,9 @@ with `scope_type = 'company'` and `scope_id = 'system'`.
 
 ### skill_drafts
 
-Pending procedural drafts generated from operator chat before they are committed as
-shared skills.
+Procedural draft records generated from operator chat or runtime capture before or during
+commit into shared skills. Chat-taught skills can be auto-confirmed immediately; the draft
+row still records what was captured and when.
 
 | Column             | Type      | Notes                                            |
 |--------------------|-----------|--------------------------------------------------|
@@ -388,12 +402,11 @@ normalization or tuning. FTS catches exact terms ("Stripe", "invoice #4521"). Ve
 search catches semantic similarity ("payment processing issues" matches "Stripe webhook
 failures"). RRF gives you both without a weighted formula that would need calibration.
 
-**Why the MCP server generates the embedding, not the database function:** The embedding
-for `query_embedding` must be generated before calling this function. The MCP server
-handles this: it takes the agent's text query, generates an embedding (via the API key
-in the service registry, e.g. OpenAI `text-embedding-ada-002` or a Supabase-hosted
-model), and passes both the text and embedding to this function. If no embedding service
-is configured, the function falls back to FTS-only mode.
+**Why the embedding is generated outside the database function:** `query_embedding` must
+exist before calling this function. For agent-run MCP sessions, the request now goes
+through the supervisor control plane so third-party embedding credentials stay outside
+the agent-visible runtime. If no embedding service is configured, the function falls back
+to FTS-only mode.
 
 ### artifacts
 
@@ -486,8 +499,9 @@ encrypted.
 **The admin panel reads and writes this table directly** (via PostgREST with the admin
 JWT). When an agent needs a key, it creates a row with `status: key_needed`. The admin
 panel shows this as a pending request. The operator pastes the key, the admin panel
-encrypts and stores it. The MCP server reads the decrypted key when the agent calls a
-tool that needs it.
+encrypts and stores it. Plaintext credential access is restricted to trusted control-plane
+paths such as the supervisor. Agent-run MCP sessions do not receive decrypted credentials
+directly.
 
 ### system_settings
 
@@ -545,10 +559,12 @@ Communication queue for human-to-system and system-to-human messages.
 show messages in real time. The supervisor also subscribes to inserts on this table to
 trigger relay invocations.
 
-## Context Pack Assembly: `build_context_pack()`
+## Context Pack Assembly: `build_context_pack()` / `build_context_pack_runtime()`
 
-A Postgres function that assembles everything an agent needs to start work. Called by the
-supervisor before launching a native coding CLI process.
+A Postgres function assembles everything an agent needs to start work. The supervisor
+builds the canonical pack with `build_context_pack(task_id)` on the trusted control
+plane. Agent-run MCP sessions use the narrower `build_context_pack_runtime(task_id)`
+wrapper, which is restricted to the explicit runtime task context.
 
 **Input:** `task_id` (uuid)
 
@@ -595,28 +611,38 @@ The context pack should preserve the task-graph view needed for autonomous orche
 - `dependency_tasks` tells an agent what must finish before this task can run.
 - `child_tasks` lets an agent see already-created follow-up work.
 - `task_requirements` exposes service and verification gates that block completion.
+- The supervisor may enrich the runtime task briefing with `similar_task_history`,
+  `adaptation_guidance`, and `skill_evolution_directive` so agents can avoid repeating a
+  failed approach and can capture better repeatable procedures as shared skills.
+- If a completed task handoff includes a structured `Reusable procedure:` block, the
+  supervisor may persist that procedure automatically as a shared skill so the learned
+  workflow survives the task.
 
 ## Row Level Security
 
-All tables that agents access through the MCP server must have RLS enabled. The MCP
-server connects with the service key (bypasses RLS) but validates scope in application
-code. RLS is the fallback safety net.
+All tables that agent-run MCP sessions access must have RLS enabled. Trusted control-
+plane paths such as the supervisor may still use the service role for orchestration work,
+but task-bound MCP sessions now connect with the anon key plus a short-lived runtime JWT.
+RLS is therefore an active enforcement layer for agent execution, not only a fallback.
 
 **JWT claims available in RLS policies:**
 - `agent_id` (uuid)
 - `role_id` (text)
 - `run_id` (uuid)
+- `task_id` (uuid)
+- `system_task` (bool)
 
 **Key policies:**
 
 - **tasks**: Agents can only read/claim tasks assigned to their `role_id`.
 - **memories**: Agents can read memories where `scope_type = 'company'` OR
   `scope_type = 'role' AND scope_id = their role_id` OR scoped to their current
-  task/project (validated by the MCP server via join).
+  task/project/customer/department (validated in RLS via the runtime task context).
 - **events**: Agents can insert events (with their agent_id). Read access follows
   same scope rules as memories.
-- **service_registry**: Agents cannot read the `credential` column. Only the MCP
-  server (service key) reads credentials.
+- **service_registry**: Agents cannot read the `credential` column or execute plaintext
+  credential RPCs. Only trusted control-plane paths can decrypt or use third-party
+  credentials directly.
 
 ## Async Processing
 

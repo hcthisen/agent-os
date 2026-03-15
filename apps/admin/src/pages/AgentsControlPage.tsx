@@ -301,7 +301,7 @@ export function AgentsControlPage() {
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Agents</h2>
           <p style={{ ...shellStyles.muted, margin: 0 }}>
-            Runtime provider controls plus agent identity, instructions, and execution profile.
+            Runtime provider controls plus persistent agent identities. Prefer better task routing, initiatives, and shared skills before adding a new agent.
           </p>
         </div>
       </div>
@@ -487,7 +487,7 @@ export function AgentsControlPage() {
           >
             <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Agents</h3>
             <button onClick={beginCreateAgent} style={shellStyles.button} type="button">
-              Create Agent
+              Manual Agent Override
             </button>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

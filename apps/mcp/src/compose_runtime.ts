@@ -16,6 +16,7 @@ export const MANAGED_SERVICES = [
 ] as const;
 
 export type ManagedServiceName = (typeof MANAGED_SERVICES)[number];
+export type ManagedServiceLifecycle = "always_on" | "manual";
 
 export interface DockerInspectState {
   ExitCode?: number;
@@ -50,14 +51,73 @@ export interface ComposeRuntime {
 }
 
 export interface ManagedServiceStatus {
+  attention_required: boolean;
   container_id: string | null;
   container_name: string | null;
   health: string | null;
   ip_addresses: string[];
+  lifecycle: ManagedServiceLifecycle;
+  lifecycle_note: string;
   self_target: boolean;
   service: string;
   state: string;
+  status_reason: string;
 }
+
+const SERVICE_LIFECYCLE: Record<
+  ManagedServiceName,
+  { idle_states?: string[]; lifecycle: ManagedServiceLifecycle; note: string }
+> = {
+  admin: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  auth: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  autoheal: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  browser: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  caddy: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  db: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  mcp: {
+    idle_states: ["created", "exited", "missing"],
+    lifecycle: "manual",
+    note: "The MCP container is on the manual Compose profile and may be stopped when no agent session needs it.",
+  },
+  public: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  realtime: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  rest: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  storage: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  supervisor: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+};
 
 export function resolveComposeRuntime(): ComposeRuntime {
   const explicitProject = normalizeEnv("COMPOSE_PROJECT");
@@ -106,6 +166,7 @@ export function inspectService(
   runtime: ComposeRuntime,
   service: ManagedServiceName
 ): ManagedServiceStatus {
+  const lifecycle = SERVICE_LIFECYCLE[service];
   const containerId = runDocker([
     "ps",
     "-aq",
@@ -118,14 +179,19 @@ export function inspectService(
   ]).trim();
 
   if (!containerId) {
+    const classification = classifyManagedServiceState(service, "missing", null);
     return {
+      attention_required: classification.attention_required,
       container_id: null,
       container_name: null,
       health: null,
       ip_addresses: [],
+      lifecycle: lifecycle.lifecycle,
+      lifecycle_note: lifecycle.note,
       self_target: false,
       service,
       state: "missing",
+      status_reason: classification.status_reason,
     };
   }
 
@@ -133,19 +199,80 @@ export function inspectService(
   const state = inspect?.State || {};
   const networks = inspect?.NetworkSettings?.Networks || {};
   const health = state.Health?.Status || null;
+  const normalizedState =
+    state.Status || (state.Running ? "running" : "stopped") || "unknown";
+  const classification = classifyManagedServiceState(service, normalizedState, health);
 
   return {
+    attention_required: classification.attention_required,
     container_id: inspect.Id,
     container_name: inspect.Name ? inspect.Name.replace(/^\/+/, "") : null,
     health,
     ip_addresses: Object.values(networks)
       .map((network) => network.IPAddress || "")
       .filter(Boolean),
+    lifecycle: lifecycle.lifecycle,
+    lifecycle_note: lifecycle.note,
     self_target: runtime.currentContainerId
       ? inspect.Id.startsWith(runtime.currentContainerId)
       : false,
     service,
-    state: state.Status || (state.Running ? "running" : "stopped") || "unknown",
+    state: normalizedState,
+    status_reason: classification.status_reason,
+  };
+}
+
+function classifyManagedServiceState(
+  service: ManagedServiceName,
+  state: string,
+  health: string | null
+): { attention_required: boolean; status_reason: string } {
+  const lifecycle = SERVICE_LIFECYCLE[service];
+  if (lifecycle.lifecycle === "manual") {
+    if (lifecycle.idle_states?.includes(state)) {
+      return {
+        attention_required: false,
+        status_reason: "Manual-profile service is idle, which is expected when no task is using it.",
+      };
+    }
+
+    if (state === "running" && health === "unhealthy") {
+      return {
+        attention_required: true,
+        status_reason: "Manual-profile service is active but unhealthy.",
+      };
+    }
+
+    if (state === "running") {
+      return {
+        attention_required: false,
+        status_reason: "Manual-profile service is running and available.",
+      };
+    }
+
+    return {
+      attention_required: true,
+      status_reason: `Manual-profile service is in unexpected state '${state}'.`,
+    };
+  }
+
+  if (state !== "running") {
+    return {
+      attention_required: true,
+      status_reason: `Always-on service is not running (state '${state}').`,
+    };
+  }
+
+  if (health === "unhealthy") {
+    return {
+      attention_required: true,
+      status_reason: "Always-on service is running but unhealthy.",
+    };
+  }
+
+  return {
+    attention_required: false,
+    status_reason: "Always-on service is running normally.",
   };
 }
 

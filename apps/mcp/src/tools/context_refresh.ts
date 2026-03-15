@@ -20,7 +20,7 @@ export async function contextRefresh(args: {
   const db = getDb();
   await enforceScope("task", args.task_id);
 
-  const { data, error } = await db.rpc("build_context_pack", {
+  const { data, error } = await db.rpc("build_context_pack_runtime", {
     p_task_id: args.task_id,
   });
 

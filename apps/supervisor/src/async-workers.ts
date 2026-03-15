@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import { queueOperatorRelayMessage } from "./operator-delivery.js";
+import { sendAdminOnlyMessage } from "./operator-delivery.js";
 import { getServiceRegistryRuntime } from "./service-registry.js";
 
 const EMBEDDING_BATCH_SIZE = 10;
@@ -569,23 +569,24 @@ async function sendOpenAiServiceNotification(args: {
       ? "service_key_needed"
       : "service_error";
 
-  const delivery = await queueOperatorRelayMessage({
+  const delivery = await sendAdminOnlyMessage({
     content: args.content,
     metadata: {
       notification_key: args.notificationKey,
       notification_type: notificationType,
+      operator_visible: true,
       service_name: OPENAI_SERVICE_NAME,
       service_status: args.service.status,
     },
     sender: "system",
   });
 
-  if (!delivery.queued) {
+  if (!delivery.sent) {
     return;
   }
 
   const detail = {
-    delivery: "relay_queue",
+    delivery: "admin_outbound",
     notification_key: args.notificationKey,
     notification_type: notificationType,
     service_name: OPENAI_SERVICE_NAME,

@@ -74,6 +74,11 @@ policy documents and permissions. They are not new binaries or new services.
 - **Managed VPS deployment**: the stack runs on a VPS through Docker Compose + Caddy.
 - **MCP-driven service control**: agents should use `service_control` for supported VPS
   service status, restart, and reload operations.
+- **Agent Browser is the standard browser path**: when an agent needs a real browser, it
+  should use the preinstalled `agent-browser` workflow instead of installing its own
+  browser runtime.
+- **Shared skills capture proven procedures**: recurring jobs, repeated requests, and
+  hard-won multi-step workflows should become scoped shared skills, not just ad hoc notes.
 
 ## Database Schema
 

@@ -8,12 +8,13 @@ export function normalizePostgrestUrl(url: string): string {
 
 export function createPostgrestClient(
   url: string,
-  apiKey: string
+  apiKey: string,
+  bearerToken = apiKey
 ): AgentOsPostgrestClient {
   return new PostgrestClient(normalizePostgrestUrl(url), {
     headers: {
       apikey: apiKey,
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${bearerToken}`,
     },
   });
 }

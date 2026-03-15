@@ -1,51 +1,12 @@
-import { getDb } from "./db.js";
-
-const SERVICE_REGISTRY_ENCRYPTION_KEY =
-  process.env.SERVICE_REGISTRY_ENCRYPTION_KEY || process.env.JWT_SECRET || "";
-
 export interface ServiceRegistryCredentialRow {
   credential: string | null;
-}
-
-function normalizeEncryptedCredential(value: string): string {
-  return value.replace(/\s+/g, "");
-}
-
-function looksEncryptedCredential(value: string): boolean {
-  const normalized = normalizeEncryptedCredential(value);
-  return (
-    normalized.length >= 40 &&
-    normalized.length % 4 === 0 &&
-    /^[A-Za-z0-9+/=]+$/.test(normalized)
-  );
 }
 
 export async function decryptServiceCredential(
   credential: string | null
 ): Promise<string | null> {
-  if (!credential) {
-    return null;
-  }
-
-  if (!SERVICE_REGISTRY_ENCRYPTION_KEY || !looksEncryptedCredential(credential)) {
-    return credential;
-  }
-
-  try {
-    const db = getDb();
-    const { data, error } = await db.rpc("decrypt_credential", {
-      encrypted_text: normalizeEncryptedCredential(credential),
-      encryption_key: SERVICE_REGISTRY_ENCRYPTION_KEY,
-    });
-
-    if (error || typeof data !== "string" || !data.trim()) {
-      return credential;
-    }
-
-    return data;
-  } catch {
-    return credential;
-  }
+  void credential;
+  return null;
 }
 
 export async function withDecryptedCredential<T extends ServiceRegistryCredentialRow>(

@@ -161,7 +161,7 @@ export function OverviewPage({
       <div style={{ marginBottom: 18 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>Overview</h2>
         <p style={{ ...shellStyles.muted, margin: 0 }}>
-          Usage, recent work, projects, and artifacts from the admin control plane.
+          Usage, recent work, initiatives, and artifacts from the autonomous control plane.
         </p>
       </div>
 
@@ -294,9 +294,9 @@ export function OverviewPage({
 
         <div style={{ display: "grid", gap: 16 }}>
           <div style={shellStyles.card}>
-            <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Recent Projects</h3>
+            <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Active Initiatives</h3>
             {projects.length === 0 ? (
-              <div style={shellStyles.muted}>No projects yet.</div>
+              <div style={shellStyles.muted}>No persistent initiatives yet.</div>
             ) : (
               projects.map((project) => (
                 <button

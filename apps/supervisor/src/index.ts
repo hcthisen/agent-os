@@ -18,6 +18,7 @@ import {
   getOpenAiDeviceAuthState,
   startOpenAiDeviceAuth,
 } from "./provider-auth.js";
+import { createRuntimeEmbedding } from "./service-registry.js";
 import http from "node:http";
 
 let running = true;
@@ -209,6 +210,43 @@ async function main() {
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      }
+    } else if (req.url === "/control/runtime-embedding" && req.method === "POST") {
+      try {
+        const payload = await readJsonBody(req);
+        const embedding = await createRuntimeEmbedding({
+          input: String(payload.input || ""),
+          model:
+            typeof payload.model === "string" && payload.model.trim()
+              ? payload.model.trim()
+              : undefined,
+          serviceName:
+            typeof payload.service_name === "string" && payload.service_name.trim()
+              ? payload.service_name.trim()
+              : undefined,
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            success: true,
+            service_name:
+              typeof payload.service_name === "string" && payload.service_name.trim()
+                ? payload.service_name.trim()
+                : "openai",
+            model:
+              typeof payload.model === "string" && payload.model.trim()
+                ? payload.model.trim()
+                : "text-embedding-ada-002",
+            embedding,
+          })
+        );
       } catch (error) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(

@@ -1,11 +1,7 @@
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope, getCurrentTaskContext, type ScopeType } from "../scope.js";
-import { withDecryptedCredential } from "../service-registry.js";
-
-const OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002";
-const OPENAI_SERVICE_NAME = "openai";
-const OPENAI_SERVICE_BASE_URL = "https://api.openai.com/v1";
+import { callSupervisorControl } from "../supervisor-control.js";
 
 interface SearchChunk {
   chunk_content: string;
@@ -37,13 +33,6 @@ interface ArtifactRow {
   name: string;
   storage_path: string | null;
   task_id: string | null;
-}
-
-interface EmbeddingServiceRow {
-  base_url: string | null;
-  credential: string | null;
-  service_name: string;
-  status: string;
 }
 
 export const memorySearchDef = {
@@ -251,40 +240,22 @@ async function hydrateChunkSources(chunks: SearchChunk[]): Promise<Array<Record<
 
 async function generateQueryEmbedding(query: string): Promise<number[] | null> {
   try {
-    const db = getDb();
-    const { data: rawData, error } = await db
-      .from("service_registry")
-      .select("service_name,base_url,credential,status")
-      .eq("service_name", OPENAI_SERVICE_NAME)
-      .maybeSingle<EmbeddingServiceRow>();
-    const data = await withDecryptedCredential(rawData);
-
-    if (error || !data || data.status !== "active" || !data.credential) {
-      return null;
-    }
-
-    const baseUrl = (data.base_url || OPENAI_SERVICE_BASE_URL).replace(/\/+$/, "");
-    const response = await fetch(`${baseUrl}/embeddings`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${data.credential}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        input: query,
-        model: OPENAI_EMBEDDING_MODEL,
-      }),
+    const result = await callSupervisorControl<{
+      embedding: number[] | null;
+      model: string;
+      service_name: string;
+      success: boolean;
+    }>("/control/runtime-embedding", {
+      input: query,
+      model: "text-embedding-ada-002",
+      service_name: "openai",
     });
 
-    if (!response.ok) {
+    if (!result.success || !Array.isArray(result.embedding)) {
       return null;
     }
 
-    const payload = (await response.json()) as {
-      data?: Array<{ embedding?: number[] }>;
-    };
-    const embedding = payload.data?.[0]?.embedding;
-    return Array.isArray(embedding) ? embedding : null;
+    return result.embedding;
   } catch {
     return null;
   }

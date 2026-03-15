@@ -306,11 +306,11 @@ export function TasksControlPage({
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Tasks</h2>
           <p style={{ ...shellStyles.muted, margin: 0 }}>
-            Create tasks, inspect run history, and review artifacts and related context.
+            Tasks are the primary execution unit. Chat is the normal path; use manual task creation here for override, debugging, or direct control-plane intervention.
           </p>
         </div>
         <button onClick={beginCreate} style={shellStyles.button} type="button">
-          Create Task
+          Manual Task Override
         </button>
       </div>
 
@@ -327,7 +327,7 @@ export function TasksControlPage({
           style={{ ...shellStyles.input, width: "100%" }}
           value={projectFilter}
         >
-          <option value="all">All projects</option>
+          <option value="all">All initiatives</option>
           {projects.map((project) => (
             <option key={project.id} value={project.id}>
               {project.display_name}
@@ -443,7 +443,7 @@ export function TasksControlPage({
                       style={{ ...shellStyles.button, ...shellStyles.buttonGhost }}
                       type="button"
                     >
-                      Open Project
+                      Open Initiative
                     </button>
                   )}
                 </div>
@@ -512,7 +512,7 @@ export function TasksControlPage({
                   </select>
                 </div>
                 <div>
-                  <label style={shellStyles.label}>Project</label>
+                  <label style={shellStyles.label}>Initiative</label>
                   <select
                     onChange={(event) =>
                       setTaskForm((current) => ({
@@ -523,7 +523,7 @@ export function TasksControlPage({
                     style={{ ...shellStyles.input, width: "100%" }}
                     value={taskForm.project_id}
                   >
-                    <option value="">No project</option>
+                    <option value="">No initiative</option>
                     {projects.map((project) => (
                       <option key={project.id} value={project.id}>
                         {project.display_name}

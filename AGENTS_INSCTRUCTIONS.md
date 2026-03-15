@@ -93,9 +93,10 @@ the `service_control` MCP tool if the target service is supported there. Do not 
 that control path with direct Docker commands unless your task explicitly requires lower-
 level infrastructure work that is already in scope.
 
-For browser-based work such as visual QA, screenshots, page interaction, or login flows,
-use the preinstalled `agent-browser` workflow or the managed browser path already
-provided by the system. Do not waste time trying to install Chromium, Playwright, or
+For any work that needs a real browser - including visual QA, screenshots, page
+interaction, login flows, research, scraping, downloads, or form submission - use the
+preinstalled `agent-browser` workflow or the managed browser path already provided by
+the system. Do not waste time trying to install Chromium, Playwright, Selenium, or
 other browser runtimes inside the task workspace.
 
 ### 4. End every session with a handoff note
@@ -107,6 +108,9 @@ handoff note containing:
 - **What changed**: State of the project/task after your work.
 - **What is blocked**: Anything you could not complete and why.
 - **What to do next**: Clear instructions for the next agent or session.
+- **Operator-ready result**: When the work produces findings, recommendations, a review,
+  an audit, a plan, or research, include a short executive summary of the actual result.
+  Do not only say that a report, screenshot set, or artifact exists in the workspace.
 
 If you crash without writing a handoff, the system has no record of your work beyond
 git commits. The handoff note is how the next agent (or your next session) picks up
@@ -156,6 +160,39 @@ Every memory must have:
 If your new fact contradicts an existing memory, use the `supersedes_memory_id` field
 to mark the old one as outdated.
 
+Create or update a shared skill when the successful procedure should be reused later.
+This is especially important when:
+
+- a scheduled job or recurring workflow is being set up
+- the operator asks for the same kind of work more than once
+- the task was difficult and required retries or iteration before you found the working procedure
+- the work is a multi-step recipe, such as research then drafting then review then publishing
+- similar work failed before and you discovered a better procedure this time
+
+Use semantic memory for facts, preferences, and constraints. Use a shared skill for the
+ordered procedure that reliably produces the result.
+
+If you discover or improve a reusable procedure during execution, prefer calling
+`skill_create` directly before you finish. If you cannot do that cleanly in the current
+task, include a `Reusable procedure:` block in your handoff note so the supervisor can
+persist it automatically. Use this format:
+
+```text
+Reusable procedure:
+Name: short, stable slug
+Display name: Human-readable name
+Scope: project | role | company | customer | department | task
+Trigger: When this procedure should be reused
+Tags: optional, comma-separated, no secrets
+Steps:
+- First action
+- Second action
+- Verification or cleanup action
+```
+
+Do this whenever a repeated request, scheduled workflow, or difficult task produced a
+better durable procedure than the one the system had before.
+
 ### 7. Respect scope boundaries
 
 You can only access data within your role's scope chain. Do not attempt to:
@@ -179,6 +216,22 @@ If you encounter:
 Then **stop and get the missing input**. Use `task_create` to request another role's
 input. Use `handoff_create` to pass the task if it is outside your domain. Ask the
 operator only when required facts, intent, or credentials are missing.
+
+Do not ask the operator to manually create or organize backend objects that the system
+can manage itself. Tasks are the primary execution unit. Shared skills are the primary
+reuse unit. Projects are internal persistent initiative containers for keeping related
+tasks, artifacts, memories, and skills together over time. If durable work needs that
+container, create or reuse it yourself instead of pushing that setup back to the human.
+
+Do not create a new persistent agent profile unless routing, shared skills, project
+continuity, and normal task decomposition are insufficient. Most repeated work should be
+solved by better projects, better task graphs, and better shared skills, not by adding a
+new agent identity.
+
+Do not repeat a failed or blocked approach blindly. If the task briefing includes
+similar prior tasks, adaptation guidance, or skill evolution guidance, use that context
+first and change the plan materially when the old path underperformed. The system is
+expected to evolve its procedure, not just rerun it.
 
 When a task has multiple stages, prefer creating a task graph instead of relying on
 manual follow-up. `task_create` supports `depends_on`, so you can queue later review,
@@ -244,6 +297,11 @@ Before you were launched, the supervisor built a context pack for your task. Thi
 - **dependency_tasks**: Tasks that must complete before this one can start.
 - **child_tasks**: Direct follow-up tasks already attached to this task.
 - **task_requirements**: Service or verification requirements that block completion.
+- **similar_task_history**: Prior related tasks that may show what worked or failed.
+- **adaptation_guidance**: Explicit instruction to change strategy when prior runs failed
+  or stalled.
+- **skill_evolution_directive**: A reminder to capture improved repeatable procedures as
+  shared skills.
 
 If you need more context mid-run, use `context_refresh` to get an updated pack, or
 `memory_search` for specific queries.

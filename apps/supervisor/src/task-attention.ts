@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
-import { queueOperatorRelayMessage } from "./operator-delivery.js";
+import { sendAdminOnlyMessage } from "./operator-delivery.js";
 import {
   buildDependencyWaitNote,
   getUnsatisfiedDependencies,
@@ -170,6 +170,10 @@ async function shouldNotifyOperator(
   task: AttentionTask,
   rootTask: OperatorRootTask | null
 ): Promise<boolean> {
+  if (task.assigned_role === "relay") {
+    return false;
+  }
+
   if (task.assigned_role === "sentinel" && !task.parent_task_id) {
     return false;
   }
@@ -356,11 +360,12 @@ async function sendOperatorNotification(
 ): Promise<void> {
   const db = getDb();
   const notificationType = "task_attention";
-  const delivery = await queueOperatorRelayMessage({
+  const delivery = await sendAdminOnlyMessage({
     content,
     metadata: {
       notification_key: notificationKey,
       notification_type: notificationType,
+      operator_visible: true,
       task_state: task.state,
       task_title: task.title,
     },
@@ -368,7 +373,7 @@ async function sendOperatorNotification(
     taskId: task.id,
   });
 
-  if (!delivery.queued) {
+  if (!delivery.sent) {
     return;
   }
 
@@ -384,7 +389,7 @@ async function sendOperatorNotification(
     scope_id: task.id,
     summary: content.slice(0, 500),
     detail: {
-      delivery: "relay_queue",
+      delivery: "admin_outbound",
       notification_key: notificationKey,
       notification_type: notificationType,
       task_state: task.state,

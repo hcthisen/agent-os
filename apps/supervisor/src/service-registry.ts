@@ -115,3 +115,39 @@ export async function getServiceRegistryRuntime(
 
   return withDecryptedCredential(rawService);
 }
+
+export async function createRuntimeEmbedding(args: {
+  input: string;
+  model?: string;
+  serviceName?: string;
+}): Promise<number[] | null> {
+  const serviceName = String(args.serviceName || "openai").trim().toLowerCase();
+  const service = await getServiceRegistryRuntime(serviceName);
+
+  if (!service || service.status !== "active" || !service.credential) {
+    return null;
+  }
+
+  const baseUrl = String(service.base_url || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const response = await fetch(`${baseUrl}/embeddings`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${service.credential}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      input: args.input,
+      model: String(args.model || "text-embedding-ada-002").trim() || "text-embedding-ada-002",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Embedding request failed with status ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    data?: Array<{ embedding?: number[] }>;
+  };
+  const embedding = payload.data?.[0]?.embedding;
+  return Array.isArray(embedding) ? embedding : null;
+}

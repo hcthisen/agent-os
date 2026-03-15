@@ -16,6 +16,7 @@ type ManagedServiceName =
   | "rest"
   | "storage"
   | "supervisor";
+type ManagedServiceLifecycle = "always_on" | "manual";
 
 type RouteAction = "delete" | "upsert" | "verify";
 
@@ -44,13 +45,17 @@ interface DockerInspectResult {
 }
 
 interface ManagedServiceStatus {
+  attention_required: boolean;
   container_id: string | null;
   container_name: string | null;
   health: string | null;
   ip_addresses: string[];
+  lifecycle: ManagedServiceLifecycle;
+  lifecycle_note: string;
   self_target: boolean;
   service: ManagedServiceName;
   state: string;
+  status_reason: string;
 }
 
 const MANAGED_SERVICES: ManagedServiceName[] = [
@@ -71,6 +76,61 @@ const MANAGED_SERVICES: ManagedServiceName[] = [
 const RELOAD_COMMANDS: Partial<Record<ManagedServiceName, string[]>> = {
   caddy: ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
   public: ["nginx", "-s", "reload"],
+};
+
+const SERVICE_LIFECYCLE: Record<
+  ManagedServiceName,
+  { idle_states?: string[]; lifecycle: ManagedServiceLifecycle; note: string }
+> = {
+  admin: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  auth: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  autoheal: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  browser: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  caddy: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  db: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  mcp: {
+    idle_states: ["created", "exited", "missing"],
+    lifecycle: "manual",
+    note: "The MCP container is on the manual Compose profile and may be stopped when no agent session needs it.",
+  },
+  public: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  realtime: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  rest: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  storage: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
+  supervisor: {
+    lifecycle: "always_on",
+    note: "This service should stay running under normal operation.",
+  },
 };
 
 export async function handlePublicSiteRouteControl(args: {
@@ -341,14 +401,19 @@ function inspectServices(
     const containerId = findLatestServiceContainerId(runtime, service);
 
     if (!containerId) {
+      const classification = classifyManagedServiceState(service, "missing", null);
       return {
+        attention_required: classification.attention_required,
         container_id: null,
         container_name: null,
         health: null,
         ip_addresses: [],
+        lifecycle: SERVICE_LIFECYCLE[service].lifecycle,
+        lifecycle_note: SERVICE_LIFECYCLE[service].note,
         self_target: false,
         service,
         state: "missing",
+        status_reason: classification.status_reason,
       };
     }
 
@@ -356,21 +421,82 @@ function inspectServices(
     const state = inspect?.State || {};
     const networks = inspect?.NetworkSettings?.Networks || {};
     const health = state.Health?.Status || null;
+    const normalizedState =
+      state.Status || (state.Running ? "running" : "stopped") || "unknown";
+    const classification = classifyManagedServiceState(service, normalizedState, health);
 
     return {
+      attention_required: classification.attention_required,
       container_id: inspect.Id,
       container_name: inspect.Name ? inspect.Name.replace(/^\/+/, "") : null,
       health,
       ip_addresses: Object.values(networks)
         .map((network) => network.IPAddress || "")
         .filter(Boolean),
+      lifecycle: SERVICE_LIFECYCLE[service].lifecycle,
+      lifecycle_note: SERVICE_LIFECYCLE[service].note,
       self_target: runtime.currentContainerId
         ? inspect.Id.startsWith(runtime.currentContainerId)
         : false,
       service,
-      state: state.Status || (state.Running ? "running" : "stopped") || "unknown",
+      state: normalizedState,
+      status_reason: classification.status_reason,
     };
   });
+}
+
+function classifyManagedServiceState(
+  service: ManagedServiceName,
+  state: string,
+  health: string | null
+): { attention_required: boolean; status_reason: string } {
+  const lifecycle = SERVICE_LIFECYCLE[service];
+  if (lifecycle.lifecycle === "manual") {
+    if (lifecycle.idle_states?.includes(state)) {
+      return {
+        attention_required: false,
+        status_reason: "Manual-profile service is idle, which is expected when no task is using it.",
+      };
+    }
+
+    if (state === "running" && health === "unhealthy") {
+      return {
+        attention_required: true,
+        status_reason: "Manual-profile service is active but unhealthy.",
+      };
+    }
+
+    if (state === "running") {
+      return {
+        attention_required: false,
+        status_reason: "Manual-profile service is running and available.",
+      };
+    }
+
+    return {
+      attention_required: true,
+      status_reason: `Manual-profile service is in unexpected state '${state}'.`,
+    };
+  }
+
+  if (state !== "running") {
+    return {
+      attention_required: true,
+      status_reason: `Always-on service is not running (state '${state}').`,
+    };
+  }
+
+  if (health === "unhealthy") {
+    return {
+      attention_required: true,
+      status_reason: "Always-on service is running but unhealthy.",
+    };
+  }
+
+  return {
+    attention_required: false,
+    status_reason: "Always-on service is running normally.",
+  };
 }
 
 function inspectContainers(containerIds: string[]): DockerInspectResult[] {

@@ -92,6 +92,9 @@ The supervisor prepares provider-specific runtime state before launch:
   `skipDangerousModePermissionPrompt: true`
 - Codex: prepares an isolated `.provider-home/.codex/config.toml` inside the task
   workspace with apps disabled and the selected reasoning settings
+- MCP: writes a task-local config that contains only the anon key plus a short-lived
+  `AGENT_RUNTIME_JWT` bound to the explicit `task_id`, `run_id`, `agent_id`, and
+  `role_id`
 
 ### Base Profiles, Reasoning Effort, and Provider Mapping
 
@@ -177,8 +180,9 @@ events, artifacts, schedules, service registry entries, system settings, and
 message history.
 
 It also provides Auth, Storage, Realtime, and Edge Functions. The admin UI uses the anon
-key. The supervisor and MCP server use the service key. Agents never receive the service
-key directly.
+key. Trusted control-plane paths such as the supervisor still use the service role where
+needed, but agent-run MCP sessions use the anon key plus a short-lived per-run runtime
+JWT. Agents never receive the service-role key directly.
 
 ### 2. Admin App
 
@@ -266,15 +270,16 @@ system execute multi-phase plans autonomously without manually waiting between s
 ### 5. MCP Server
 
 The MCP server is the agent's only sanctioned control plane. Agents do not connect to the
-database directly and should not manipulate the VPS stack with ad hoc shell commands when
-a managed MCP action exists.
+database with control-plane credentials and should not manipulate the VPS stack with ad
+hoc shell commands when a managed MCP action exists.
 
 The MCP server:
 
 - validates identity and scope
 - enforces task and role policy
 - writes events and memories
-- mediates access to service credentials
+- mediates access to service requirements while keeping plaintext third-party credentials
+  on trusted control-plane paths
 - publishes the public site
 - exposes managed service status/restart/reload actions on the VPS
 
@@ -423,6 +428,11 @@ The builder creates those artifacts within architect-owned system design work. T
 the new role automatically in future context packs and can launch it through the same
 native provider CLI runtime.
 
+This should be a last-resort evolution path. Most improvement should happen through
+better task routing, project continuity, and shared skill evolution. Create a new
+persistent agent only when those mechanisms are insufficient and the work truly needs a
+separate durable identity or policy boundary.
+
 What still requires redeployment:
 
 - new MCP tools
@@ -489,6 +499,18 @@ Memory retrieval follows scope order:
 2. current project or customer
 3. current role
 4. company-wide context
+
+Projects are kept because they solve a real mid-level persistence problem. A single task
+is too narrow, and company/customer scope is often too broad. The correct model is not
+"the operator manages projects" but "the system manages persistent initiatives and lets
+the operator inspect them when needed." Root chat requests should therefore reuse or
+create projects automatically when work clearly belongs to a durable initiative such as a
+site, campaign, product surface, or customer implementation.
+
+Shared skills follow the same agent-first model. Clear procedural instruction from chat
+should save directly into the shared skill library, and completed work should feed back
+into that library whenever an agent captures a better reusable procedure. The admin UI is
+mainly for inspection, correction, and override.
 
 Hybrid search combines full-text search with vector similarity through Reciprocal Rank
 Fusion. Tables are still the source of truth. Embeddings are a retrieval aid.
@@ -557,9 +579,9 @@ Shipping a placeholder integration without the required service is considered in
 
 ### Agents Never Hold Privileged Keys
 
-Supabase service keys, provider API keys, and third-party credentials are held by the
-MCP server, Edge Functions, or tightly scoped admin paths. Agents call tools that act on
-their behalf.
+Supabase service-role keys, provider API keys, and third-party plaintext credentials are
+held by the supervisor, Edge Functions, or tightly scoped admin paths. Agents operate
+with a short-lived runtime JWT that is limited to the current run and task scope.
 
 ### Native Provider CLI Only
 
@@ -568,9 +590,9 @@ SDK tokens or share those credentials with arbitrary code.
 
 ### Scope Enforcement
 
-Every MCP call is validated against `agent_id`, `role_id`, and `run_id`. Agents only see
-data inside their scope chain unless the system explicitly hands them work that broadens
-that scope.
+Every MCP call is validated against `agent_id`, `role_id`, `run_id`, and the explicit
+`task_id` carried in the runtime JWT. Agents only see data inside that task's scope chain
+unless the system explicitly hands them work that broadens that scope.
 
 ### System Modification Routes Through the Architect
 
@@ -583,7 +605,7 @@ Agent autonomy depends on container isolation and allowlisted tool paths:
 
 - agents run inside Docker, not on the bare host
 - workspaces are scoped
-- the database is reached through MCP, not raw credentials
+- the database is reached through MCP with a scoped runtime JWT, not a service-role key
 - service restarts and reloads should go through `service_control` when supported
 - high-impact host operations must stay within explicit task scope and role ownership
 

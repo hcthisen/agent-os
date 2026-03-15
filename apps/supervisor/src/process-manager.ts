@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import {
   access,
   chown,
@@ -263,6 +263,11 @@ export async function launchAgent(
     activeProvider === "openai" ? join(workDir, "codex-last-message.txt") : null;
   const mcpServerEnv = buildPerTaskMcpEnv({
     agentId,
+    isSystemTask:
+      Boolean(
+        (contextPack.task as Record<string, unknown> | undefined)?.is_system_modification
+      ) || roleId === "architect",
+    maxRunDurationMs,
     roleId,
     runId,
     taskId,
@@ -950,16 +955,27 @@ function buildChildProcessEnv(
 
 function buildPerTaskMcpEnv(input: {
   agentId: string;
+  isSystemTask: boolean;
   roleId: string;
   runId: string;
   taskId: string;
   traceId: string;
   workDir: string;
+  maxRunDurationMs: number;
 }): Record<string, string> {
   const composeRuntimeEnv = getComposeRuntimeEnv();
+  const runtimeJwt = buildAgentRuntimeJwt({
+    agentId: input.agentId,
+    isSystemTask: input.isSystemTask,
+    roleId: input.roleId,
+    runId: input.runId,
+    taskId: input.taskId,
+    maxRunDurationMs: input.maxRunDurationMs,
+  });
   return {
     POSTGREST_URL: process.env.POSTGREST_URL || process.env.SUPABASE_URL || "",
-    SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || "",
+    SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || "",
+    AGENT_RUNTIME_JWT: runtimeJwt,
     AGENT_ID: input.agentId,
     CADDY_SITE_SNIPPETS_DIR: config.caddySiteSnippetsDir,
     COMPOSE_CURRENT_CONTAINER_ID:
@@ -975,6 +991,54 @@ function buildPerTaskMcpEnv(input: {
     TASK_ID: input.taskId,
     TRACE_ID: input.traceId,
   };
+}
+
+function buildAgentRuntimeJwt(input: {
+  agentId: string;
+  isSystemTask: boolean;
+  roleId: string;
+  runId: string;
+  taskId: string;
+  maxRunDurationMs: number;
+}): string {
+  const secret = String(process.env.JWT_SECRET || "").trim();
+  if (!secret) {
+    throw new Error("Missing JWT_SECRET required to sign per-run MCP tokens");
+  }
+
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const expiresAt =
+    issuedAt + Math.max(2 * 60 * 60, Math.ceil(input.maxRunDurationMs / 1000) + 60 * 60);
+  const header = base64UrlEncodeJson({ alg: "HS256", typ: "JWT" });
+  const payload = base64UrlEncodeJson({
+    role: "authenticated",
+    iss: "supabase",
+    iat: issuedAt,
+    exp: expiresAt,
+    sub: input.agentId,
+    agent_id: input.agentId,
+    role_id: input.roleId,
+    run_id: input.runId,
+    task_id: input.taskId,
+    system_task: input.isSystemTask,
+  });
+  const unsignedToken = `${header}.${payload}`;
+  const signature = createHmac("sha256", secret)
+    .update(unsignedToken)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+
+  return `${unsignedToken}.${signature}`;
+}
+
+function base64UrlEncodeJson(value: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(value), "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function buildProviderAuthEnv(
@@ -1441,9 +1505,11 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
   fresh app unless the task explicitly calls for greenfield work.
 - Use the MCP tools (task_update, memory_write, event_log, etc.) to interact with the system.
 - When done, update the task state and write a handoff note.
+- If the task produces findings, recommendations, a review, a plan, or research, make the handoff include a concise operator-ready summary of the actual result, not just artifact or workspace paths.
 - Log all side effects via event_log.
 - Write durable facts to memory via memory_write.
 - If you use a shared skill from TASK_BRIEFING.md, call skill_log_use before completion so the system can track reuse and improve ranking over time.
+- If you discover a reusable procedure or materially improve an old one, create or update a shared skill before you finish. If you cannot do that cleanly inside this task, include a "Reusable procedure:" block in the handoff note with Name, Scope, Trigger, optional Tags, and ordered Steps so the supervisor can persist it automatically.
 - Use task_create with depends_on when the work benefits from a staged task graph. You can start implementation now and queue follow-up review or remediation tasks that wait on prerequisite tasks automatically.
 - For visual QA, screenshots, layout review, login flows, or browser interaction, use the preinstalled agent-browser workflow. Do not try to install Chromium, Playwright, or other browser runtimes inside the task workspace.
 - Use service_require before credentialed third-party integrations and block if the service is not active yet.

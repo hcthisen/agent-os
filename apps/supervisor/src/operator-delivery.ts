@@ -25,6 +25,44 @@ interface OperatorRelayQueueResult {
   queued: boolean;
 }
 
+export async function sendAdminOnlyMessage(args: {
+  content: string;
+  metadata?: Record<string, unknown>;
+  sender?: string;
+  taskId?: string | null;
+}): Promise<{ messageId: string | null; sent: boolean }> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("messages")
+    .insert({
+      channel: "admin_chat",
+      content: args.content,
+      direction: "outbound",
+      metadata: {
+        operator_visible: true,
+        ...(args.metadata || {}),
+      },
+      processed: true,
+      sender: args.sender || "system",
+      task_id: args.taskId || null,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("Failed to insert admin-only message:", error);
+    return {
+      messageId: null,
+      sent: false,
+    };
+  }
+
+  return {
+    messageId: data?.id || null,
+    sent: true,
+  };
+}
+
 export async function sendOperatorMessage(args: {
   content: string;
   metadata?: Record<string, unknown>;

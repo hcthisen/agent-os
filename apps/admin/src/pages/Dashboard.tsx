@@ -26,7 +26,7 @@ const NAV_ITEMS: Array<{ id: Page; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "chat", label: "Chat" },
   { id: "tasks", label: "Tasks" },
-  { id: "projects", label: "Projects" },
+  { id: "projects", label: "Initiatives" },
   { id: "agents", label: "Agents" },
   { id: "memory", label: "Memory" },
   { id: "skills", label: "Skills" },
@@ -62,7 +62,7 @@ export function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         <div style={styles.logo}>
           <div style={{ fontSize: 18, fontWeight: 700 }}>Agent-OS</div>
           <div style={{ color: "#7c89a6", fontSize: 11, marginTop: 6 }}>
-            Admin control plane
+            Observe and override when needed
           </div>
         </div>
         <div style={styles.livePanel}>

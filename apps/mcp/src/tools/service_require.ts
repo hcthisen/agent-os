@@ -1,14 +1,12 @@
 import { getAgentContext } from "../context.js";
 import { getDb } from "../db.js";
 import { requireCurrentTaskContext } from "../scope.js";
-import { withDecryptedCredential } from "../service-registry.js";
 import { assertTaskMutationAllowed } from "../simulation.js";
 import { upsertTaskRequirement } from "../task_requirements.js";
 
 interface ServiceRow {
   auth_type: string;
   base_url: string | null;
-  credential: string | null;
   description: string;
   display_name: string;
   error_message: string | null;
@@ -75,7 +73,7 @@ export async function serviceRequire(args: {
         status: "key_needed",
       })
       .select(
-        "id,service_name,display_name,description,base_url,auth_type,credential,status,error_message,updated_at"
+        "id,service_name,display_name,description,base_url,auth_type,status,error_message,updated_at"
       )
       .single<ServiceRow>();
 
@@ -83,40 +81,14 @@ export async function serviceRequire(args: {
       throw new Error(`Failed to register required service '${serviceName}': ${error.message}`);
     }
 
-    service = await withDecryptedCredential(data);
-  } else {
-    const patch = buildServicePatch(service, {
-      baseUrl: args.base_url,
-      description,
-      displayName,
-    });
-
-    if (patch) {
-      const { data, error } = await db
-        .from("service_registry")
-        .update({
-          ...patch,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", service.id)
-        .select(
-          "id,service_name,display_name,description,base_url,auth_type,credential,status,error_message,updated_at"
-        )
-        .single<ServiceRow>();
-
-      if (error) {
-        throw new Error(`Failed to update service '${serviceName}': ${error.message}`);
-      }
-
-      service = await withDecryptedCredential(data);
-    }
+    service = data;
   }
 
   if (!service) {
     throw new Error(`Service '${serviceName}' could not be loaded after registration.`);
   }
 
-  const ready = service.status === "active" && Boolean(service.credential);
+  const ready = service.status === "active";
   const requirement = await upsertTaskRequirement({
     expected: {
       allow_statuses: ["active"],
@@ -171,40 +143,12 @@ function normalizeOptionalUrl(value: string | undefined): string | null {
   return normalized || null;
 }
 
-function buildServicePatch(
-  service: ServiceRow,
-  args: {
-    baseUrl?: string;
-    description: string;
-    displayName: string;
-  }
-): Record<string, unknown> | null {
-  const patch: Record<string, unknown> = {};
-  const nextBaseUrl = normalizeOptionalUrl(args.baseUrl);
-
-  if (!service.display_name && args.displayName) {
-    patch.display_name = args.displayName;
-  } else if (service.display_name !== args.displayName && service.display_name === service.service_name) {
-    patch.display_name = args.displayName;
-  }
-
-  if ((!service.description || !service.description.trim()) && args.description) {
-    patch.description = args.description;
-  }
-
-  if (!service.base_url && nextBaseUrl) {
-    patch.base_url = nextBaseUrl;
-  }
-
-  return Object.keys(patch).length ? patch : null;
-}
-
 async function loadService(serviceName: string): Promise<ServiceRow | null> {
   const db = getDb();
-  const { data: rawData, error } = await db
+  const { data, error } = await db
     .from("service_registry")
     .select(
-      "id,service_name,display_name,description,base_url,auth_type,credential,status,error_message,updated_at"
+      "id,service_name,display_name,description,base_url,auth_type,status,error_message,updated_at"
     )
     .eq("service_name", serviceName)
     .maybeSingle<ServiceRow>();
@@ -213,7 +157,7 @@ async function loadService(serviceName: string): Promise<ServiceRow | null> {
     throw new Error(`Failed to load service '${serviceName}': ${error.message}`);
   }
 
-  return await withDecryptedCredential(rawData);
+  return data;
 }
 
 async function logServiceRequirementEvent(args: {

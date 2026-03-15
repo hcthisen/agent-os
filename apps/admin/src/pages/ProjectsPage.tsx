@@ -43,6 +43,7 @@ export function ProjectsPage({
   const [projectTasks, setProjectTasks] = useState<TaskRecord[]>([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [showManualForm, setShowManualForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const agentMap = useMemo(
@@ -106,10 +107,12 @@ export function ProjectsPage({
   function startCreate() {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setShowManualForm(true);
   }
 
   function startEdit(project: ProjectRecord) {
     setEditingId(project.id);
+    setShowManualForm(true);
     setForm({
       description: project.description || "",
       display_name: project.display_name || "",
@@ -130,6 +133,7 @@ export function ProjectsPage({
 
       await loadProjects(editingId || selectedProjectId);
       startCreate();
+      setShowManualForm(false);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to save project.");
     } finally {
@@ -141,17 +145,24 @@ export function ProjectsPage({
     <div>
       <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
         <div>
-          <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Projects</h2>
+          <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Initiatives</h2>
           <p style={{ ...shellStyles.muted, margin: 0 }}>
-            Project registry plus task counts and direct task drill-down.
+            Auto-managed persistent work containers. The system should usually create and reuse these on its own.
           </p>
         </div>
         <button
-          onClick={startCreate}
-          style={shellStyles.button}
+          onClick={() => {
+            if (showManualForm && !editingId) {
+              setShowManualForm(false);
+              return;
+            }
+
+            startCreate();
+          }}
+          style={{ ...shellStyles.button, ...shellStyles.buttonSecondary }}
           type="button"
         >
-          Create Project
+          {showManualForm && !editingId ? "Hide Manual Override" : "Manual Override"}
         </button>
       </div>
 
@@ -159,7 +170,7 @@ export function ProjectsPage({
 
       <div style={{ display: "grid", gap: 16, gridTemplateColumns: "minmax(280px, 0.9fr) minmax(0, 1.1fr)" }}>
         <div style={shellStyles.card}>
-          <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Project List</h3>
+          <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Initiative List</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {projects.map((project) => (
               <button
@@ -191,7 +202,7 @@ export function ProjectsPage({
                 </div>
               </button>
             ))}
-            {projects.length === 0 && <div style={shellStyles.muted}>No projects available.</div>}
+            {projects.length === 0 && <div style={shellStyles.muted}>No initiatives available.</div>}
           </div>
         </div>
 
@@ -199,7 +210,7 @@ export function ProjectsPage({
           <div style={shellStyles.card}>
             <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
               <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
-                {editingId ? "Edit Project" : "Project Form"}
+                {editingId ? "Edit Initiative" : "Manual Initiative Override"}
               </h3>
               {selectedProject && !editingId && (
                 <button
@@ -211,73 +222,82 @@ export function ProjectsPage({
                 </button>
               )}
             </div>
-            <div style={{ display: "grid", gap: 12 }}>
-              <div>
-                <label style={shellStyles.label}>Slug</label>
-                <input
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, slug: event.target.value }))
-                  }
-                  style={{ ...shellStyles.input, width: "100%" }}
-                  value={form.slug}
-                />
+            {!showManualForm ? (
+              <div style={shellStyles.muted}>
+                Use this only to correct or seed initiative state when automatic project reuse or
+                creation needs an operator override.
               </div>
-              <div>
-                <label style={shellStyles.label}>Display Name</label>
-                <input
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      display_name: event.target.value,
-                    }))
-                  }
-                  style={{ ...shellStyles.input, width: "100%" }}
-                  value={form.display_name}
-                />
-              </div>
-              <div>
-                <label style={shellStyles.label}>Repository URL</label>
-                <input
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, repo_url: event.target.value }))
-                  }
-                  style={{ ...shellStyles.input, width: "100%" }}
-                  value={form.repo_url}
-                />
-              </div>
-              <div>
-                <label style={shellStyles.label}>Description</label>
-                <textarea
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      description: event.target.value,
-                    }))
-                  }
-                  style={{ ...shellStyles.textarea, width: "100%" }}
-                  value={form.description}
-                />
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  disabled={saving}
-                  onClick={() => void saveProject()}
-                  style={{ ...shellStyles.button, opacity: saving ? 0.7 : 1 }}
-                  type="button"
-                >
-                  {saving ? "Saving..." : editingId ? "Save Changes" : "Create Project"}
-                </button>
-                {editingId && (
+            ) : (
+              <div style={{ display: "grid", gap: 12 }}>
+                <div>
+                  <label style={shellStyles.label}>Slug</label>
+                  <input
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, slug: event.target.value }))
+                    }
+                    style={{ ...shellStyles.input, width: "100%" }}
+                    value={form.slug}
+                  />
+                </div>
+                <div>
+                  <label style={shellStyles.label}>Display Name</label>
+                  <input
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        display_name: event.target.value,
+                      }))
+                    }
+                    style={{ ...shellStyles.input, width: "100%" }}
+                    value={form.display_name}
+                  />
+                </div>
+                <div>
+                  <label style={shellStyles.label}>Repository URL</label>
+                  <input
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, repo_url: event.target.value }))
+                    }
+                    style={{ ...shellStyles.input, width: "100%" }}
+                    value={form.repo_url}
+                  />
+                </div>
+                <div>
+                  <label style={shellStyles.label}>Description</label>
+                  <textarea
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        description: event.target.value,
+                      }))
+                    }
+                    style={{ ...shellStyles.textarea, width: "100%" }}
+                    value={form.description}
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
                   <button
-                    onClick={startCreate}
+                    disabled={saving}
+                    onClick={() => void saveProject()}
+                    style={{ ...shellStyles.button, opacity: saving ? 0.7 : 1 }}
+                    type="button"
+                  >
+                      {saving ? "Saving..." : editingId ? "Save Changes" : "Create Initiative"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditingId(null);
+                      setShowManualForm(false);
+                      setForm(EMPTY_FORM);
+                    }}
                     style={{ ...shellStyles.button, ...shellStyles.buttonGhost }}
                     type="button"
                   >
                     Cancel
                   </button>
-                )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           <div style={shellStyles.card}>

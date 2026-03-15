@@ -1,13 +1,26 @@
+import { readFile } from "node:fs/promises";
+import { extname, join, resolve, sep } from "node:path";
 import { getDb } from "./db.js";
 import { config } from "./config.js";
-import { queueOperatorRelayMessage } from "./operator-delivery.js";
+import { sendAdminOnlyMessage, sendManagedMessage } from "./operator-delivery.js";
+import { maybeAutocaptureReusableSkill } from "./skill-autocapture.js";
+
+const TASK_SELECT_FIELDS =
+  "id,title,objective,state,assigned_role,parent_task_id,last_handoff_note,completed_at,updated_at,project_id,attempt_count,claimed_by,customer_id,department_id,simulation_only";
 
 interface CompletedTask {
   assigned_role: string;
+  attempt_count: number;
+  claimed_by: string | null;
   completed_at: string | null;
+  customer_id: string | null;
+  department_id: string | null;
   id: string;
   last_handoff_note: string | null;
+  objective: string | null;
   parent_task_id: string | null;
+  project_id: string | null;
+  simulation_only?: boolean | null;
   state: string;
   title: string;
   updated_at: string;
@@ -20,6 +33,38 @@ interface RootTask {
   title: string;
 }
 
+interface TaskArtifactSummaryRow {
+  artifact_type: string;
+  created_at: string;
+  external_url: string | null;
+  metadata: Record<string, unknown> | null;
+  mime_type: string | null;
+  name: string;
+  storage_path: string | null;
+  task_id: string | null;
+}
+
+interface TaskMessageRow {
+  channel: string;
+  created_at: string;
+  direction: string;
+  id: string;
+  metadata: Record<string, unknown> | null;
+  sender: string;
+}
+
+interface CompletionCandidate {
+  artifactSummary: string | null;
+  score: number;
+  task: CompletedTask;
+}
+
+interface DeliveryTarget {
+  channel: "admin_chat" | "telegram";
+  chatId: number | string | null;
+  sourceMessageId: string | null;
+}
+
 export async function monitorTaskOutcomes(): Promise<void> {
   const db = getDb();
   const cutoff = new Date(
@@ -28,11 +73,8 @@ export async function monitorTaskOutcomes(): Promise<void> {
 
   const { data: tasks, error } = await db
     .from("tasks")
-    .select(
-      "id,title,state,assigned_role,parent_task_id,last_handoff_note,completed_at,updated_at"
-    )
+    .select(TASK_SELECT_FIELDS)
     .eq("state", "completed")
-    .not("parent_task_id", "is", null)
     .gte("updated_at", cutoff);
 
   if (error) {
@@ -41,6 +83,12 @@ export async function monitorTaskOutcomes(): Promise<void> {
   }
 
   for (const task of (tasks || []) as CompletedTask[]) {
+    await maybeAutocaptureReusableSkill(task);
+
+    if (!task.parent_task_id) {
+      continue;
+    }
+
     if (!(await isLeafTask(task.id))) {
       continue;
     }
@@ -57,13 +105,31 @@ export async function monitorTaskOutcomes(): Promise<void> {
       continue;
     }
 
-    const notificationKey = `completion:${task.updated_at}`;
-    if (await notificationAlreadySent(task.id, notificationKey)) {
+    const requestTasks = await loadRelayRequestTreeTasks(rootTask.id);
+    if (
+      !requestTasks.length ||
+      requestTasks.some((requestTask) => requestTask.state !== "completed")
+    ) {
       continue;
     }
 
-    const content = formatCompletionMessage(task, rootTask);
-    await sendOperatorCompletion(task.id, notificationKey, content);
+    const notificationKey = `request-completion:${rootTask.id}`;
+    if (await notificationAlreadySent(rootTask.id, notificationKey)) {
+      continue;
+    }
+
+    const completionCandidate = await selectCompletionCandidate(
+      requestTasks,
+      task.id
+    );
+    const content = formatCompletionMessage(
+      completionCandidate.task,
+      rootTask,
+      true,
+      completionCandidate.artifactSummary
+    );
+    const deliveryTarget = await resolveRootRequestDeliveryTarget(rootTask.id);
+    await sendOperatorCompletion(rootTask.id, notificationKey, content, deliveryTarget);
   }
 }
 
@@ -115,6 +181,58 @@ async function findRootTask(task: CompletedTask): Promise<RootTask | null> {
   return current;
 }
 
+async function loadRelayRequestTreeTasks(rootTaskId: string): Promise<CompletedTask[]> {
+  const db = getDb();
+  const tasks = new Map<string, CompletedTask>();
+  const { data: rootTask, error: rootError } = await db
+    .from("tasks")
+    .select(TASK_SELECT_FIELDS)
+    .eq("id", rootTaskId)
+    .maybeSingle<CompletedTask>();
+
+  if (rootError || !rootTask) {
+    console.error(`Failed to load root task ${rootTaskId} for completion aggregation:`, rootError);
+    return [];
+  }
+
+  tasks.set(rootTask.id, rootTask);
+  const queue = [rootTaskId];
+  const visited = new Set<string>();
+
+  while (queue.length) {
+    const parentIds = queue.splice(0, 50).filter((parentId) => {
+      if (visited.has(parentId)) {
+        return false;
+      }
+
+      visited.add(parentId);
+      return true;
+    });
+
+    if (!parentIds.length) {
+      continue;
+    }
+
+    const { data, error } = await db
+      .from("tasks")
+      .select(TASK_SELECT_FIELDS)
+      .in("parent_task_id", parentIds)
+      .returns<CompletedTask[]>();
+
+    if (error) {
+      console.error(`Failed to load relay request tree tasks for ${rootTaskId}:`, error);
+      return [...tasks.values()];
+    }
+
+    for (const childTask of data || []) {
+      tasks.set(childTask.id, childTask);
+      queue.push(childTask.id);
+    }
+  }
+
+  return [...tasks.values()];
+}
+
 async function notificationAlreadySent(
   taskId: string,
   notificationKey: string
@@ -139,10 +257,47 @@ async function notificationAlreadySent(
   return Boolean(count && count > 0);
 }
 
-function formatCompletionMessage(task: CompletedTask, rootTask: RootTask): string {
-  const outcome = summarizeOutcome(task.last_handoff_note);
-  const prefix =
-    task.assigned_role === "builder"
+async function selectCompletionCandidate(
+  requestTasks: CompletedTask[],
+  preferredTaskId: string
+): Promise<CompletionCandidate> {
+  const artifactSummaries = await loadTaskArtifactSummaries(
+    requestTasks.map((task) => task.id)
+  );
+  const candidate = pickBestCompletionCandidate(
+    requestTasks,
+    artifactSummaries,
+    preferredTaskId
+  );
+
+  if (candidate) {
+    return candidate;
+  }
+
+  const fallbackTask =
+    requestTasks.find((task) => task.id === preferredTaskId) || requestTasks[0];
+  return {
+    artifactSummary: artifactSummaries.get(fallbackTask.id) || null,
+    score: 0,
+    task: fallbackTask,
+  };
+}
+
+function formatCompletionMessage(
+  task: CompletedTask,
+  rootTask: RootTask,
+  rootRequestComplete = false,
+  artifactSummary: string | null = null
+): string {
+  const outcome = summarizeOutcome(
+    task,
+    task.last_handoff_note,
+    task.assigned_role,
+    artifactSummary
+  );
+  const prefix = rootRequestComplete
+    ? "Done."
+    : task.assigned_role === "builder"
       ? "Done."
       : `${capitalize(task.assigned_role)} finished.`;
 
@@ -155,9 +310,14 @@ function formatCompletionMessage(task: CompletedTask, rootTask: RootTask): strin
   return `${prefix} ${simplifyTitle(task.title)} is complete.${rootSuffix}`;
 }
 
-function summarizeOutcome(note: string | null): string | null {
+function summarizeOutcome(
+  task: Pick<CompletedTask, "objective" | "title">,
+  note: string | null,
+  role?: string,
+  artifactSummary?: string | null
+): string | null {
   if (!note) {
-    return null;
+    return artifactSummary ? normalizeArtifactSummary(artifactSummary, task) : null;
   }
 
   const compact = note.replace(/\s+/g, " ").trim();
@@ -173,12 +333,23 @@ function summarizeOutcome(note: string | null): string | null {
   }
 
   if (changed) {
-    const cleaned = toSingleSentence(changed);
+    if (shouldPreferArtifactSummary(changed, task, artifactSummary)) {
+      return normalizeArtifactSummary(artifactSummary || "", task);
+    }
+
+    const cleaned = normalizeRoleSpecificOutcome(
+      toSingleSentence(changed),
+      role || ""
+    );
     if (liveUrlMatch && !cleaned.includes(liveUrlMatch[0])) {
       return trimSentence(`${cleaned} Live at ${liveUrlMatch[0]}.`);
     }
 
     return trimSentence(cleaned);
+  }
+
+  if (artifactSummary && looksLikeReportTask(task)) {
+    return normalizeArtifactSummary(artifactSummary, task);
   }
 
   if (blocked && !/^nothing blocked/i.test(blocked)) {
@@ -190,6 +361,383 @@ function summarizeOutcome(note: string | null): string | null {
   }
 
   return trimSentence(toSingleSentence(compact));
+}
+
+async function loadTaskArtifactSummaries(
+  taskIds: string[]
+): Promise<Map<string, string>> {
+  const summaries = new Map<string, string>();
+  const filteredTaskIds = [...new Set(taskIds.filter(Boolean))];
+  if (!filteredTaskIds.length) {
+    return summaries;
+  }
+
+  const db = getDb();
+  const { data, error } = await db
+    .from("artifacts")
+    .select(
+      "task_id,artifact_type,name,metadata,created_at,storage_path,external_url,mime_type"
+    )
+    .in("task_id", filteredTaskIds)
+    .in("artifact_type", ["report", "doc"])
+    .order("created_at", { ascending: false })
+    .returns<TaskArtifactSummaryRow[]>();
+
+  if (error) {
+    console.error("Failed to load artifacts for completion summaries:", error);
+    return summaries;
+  }
+
+  for (const artifact of data || []) {
+    if (!artifact.task_id || summaries.has(artifact.task_id)) {
+      continue;
+    }
+
+    const summary = await deriveArtifactSummary(artifact);
+    if (summary) {
+      summaries.set(artifact.task_id, summary);
+    }
+  }
+
+  return summaries;
+}
+
+async function deriveArtifactSummary(
+  artifact: TaskArtifactSummaryRow
+): Promise<string | null> {
+  const metadataSummary =
+    artifact.metadata && typeof artifact.metadata.indexable_content === "string"
+      ? artifact.metadata.indexable_content.trim()
+      : "";
+  const fileSummary = await readArtifactDocumentSummary(artifact);
+
+  if (fileSummary && fileSummary.length >= 80) {
+    return fileSummary;
+  }
+
+  if (metadataSummary) {
+    return metadataSummary;
+  }
+
+  return fileSummary || null;
+}
+
+async function readArtifactDocumentSummary(
+  artifact: TaskArtifactSummaryRow
+): Promise<string | null> {
+  if (!artifact.task_id || !artifact.storage_path) {
+    return null;
+  }
+
+  const extension = extname(artifact.storage_path).toLowerCase();
+  if (![".html", ".markdown", ".md", ".txt"].includes(extension)) {
+    return null;
+  }
+
+  const workspaceRoot = resolve(config.workspacesDir, artifact.task_id);
+  const absolutePath = resolve(workspaceRoot, artifact.storage_path);
+  if (!isPathInsideRoot(absolutePath, workspaceRoot)) {
+    return null;
+  }
+
+  try {
+    const content = await readFile(absolutePath, "utf8");
+    return summarizeArtifactDocument(content, artifact.name);
+  } catch {
+    return null;
+  }
+}
+
+function summarizeArtifactDocument(content: string, artifactName: string): string | null {
+  const cleaned = cleanMarkdownText(content);
+  if (!cleaned) {
+    return null;
+  }
+
+  const sections = parseMarkdownSections(content);
+  const summaryText =
+    findSectionParagraph(sections, [
+      "executive summary",
+      "summary",
+      "overview",
+      "assessment",
+    ]) || extractFirstParagraph(cleaned);
+  const findings = findSectionBullets(sections, [
+    "key findings",
+    "findings",
+    "recommendations",
+    "top recommendations",
+    "prioritized recommendations",
+    "priority actions",
+    "next steps",
+  ]);
+
+  if (summaryText && findings.length > 0) {
+    return trimSentence(
+      `${summaryText} Top actions: ${findings.slice(0, 3).join("; ")}.`,
+      420
+    );
+  }
+
+  if (summaryText) {
+    return trimSentence(summaryText, 360);
+  }
+
+  if (findings.length > 0) {
+    return trimSentence(
+      `${artifactName || "Report"} highlights: ${findings.slice(0, 3).join("; ")}.`,
+      360
+    );
+  }
+
+  return trimSentence(cleaned, 320);
+}
+
+function parseMarkdownSections(content: string): Array<{ heading: string; lines: string[] }> {
+  const sections: Array<{ heading: string; lines: string[] }> = [
+    { heading: "", lines: [] },
+  ];
+
+  for (const line of String(content || "").replace(/\r/g, "").split("\n")) {
+    const headingMatch = line.match(/^#{1,6}\s+(.+?)\s*$/);
+    if (headingMatch) {
+      sections.push({
+        heading: cleanMarkdownText(headingMatch[1] || ""),
+        lines: [],
+      });
+      continue;
+    }
+
+    sections[sections.length - 1].lines.push(line);
+  }
+
+  return sections;
+}
+
+function findSectionParagraph(
+  sections: Array<{ heading: string; lines: string[] }>,
+  headings: string[]
+): string | null {
+  const targetSet = new Set(headings.map((heading) => heading.toLowerCase()));
+
+  for (const section of sections) {
+    if (!targetSet.has(section.heading.toLowerCase())) {
+      continue;
+    }
+
+    const paragraph = extractFirstParagraph(cleanMarkdownText(section.lines.join("\n")));
+    if (paragraph) {
+      return paragraph;
+    }
+  }
+
+  return null;
+}
+
+function findSectionBullets(
+  sections: Array<{ heading: string; lines: string[] }>,
+  headings: string[]
+): string[] {
+  const targetSet = new Set(headings.map((heading) => heading.toLowerCase()));
+
+  for (const section of sections) {
+    if (!targetSet.has(section.heading.toLowerCase())) {
+      continue;
+    }
+
+    const bullets = section.lines
+      .map((line) => {
+        const match = line.match(/^\s*(?:[-*]|\d+[.)])\s+(.+)$/);
+        return match ? cleanMarkdownText(match[1] || "") : "";
+      })
+      .filter(Boolean);
+
+    if (bullets.length > 0) {
+      return bullets;
+    }
+  }
+
+  return [];
+}
+
+function extractFirstParagraph(content: string): string | null {
+  const paragraphs = String(content || "")
+    .split(/\n\s*\n+/)
+    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  return paragraphs[0] || null;
+}
+
+function cleanMarkdownText(content: string): string {
+  return String(content || "")
+    .replace(/\r/g, "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/[*_~>#]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
+  const normalizedRoot = ensureTrailingSeparator(resolve(rootPath));
+  const normalizedTarget = resolve(targetPath);
+  return normalizedTarget === resolve(rootPath) || normalizedTarget.startsWith(normalizedRoot);
+}
+
+function ensureTrailingSeparator(value: string): string {
+  return value.endsWith(sep) ? value : `${value}${sep}`;
+}
+
+function shouldPreferArtifactSummary(
+  changed: string,
+  task: Pick<CompletedTask, "objective" | "title">,
+  artifactSummary?: string | null
+): boolean {
+  if (!artifactSummary) {
+    return false;
+  }
+
+  const genericChanged =
+    /\bworkspace now contains\b/i.test(changed) ||
+    /\bartifacts?\b/i.test(changed) ||
+    /\breport and screenshot evidence\b/i.test(changed) ||
+    /\bregistered artifacts\b/i.test(changed) ||
+    /\bmcp now has\b/i.test(changed);
+
+  return genericChanged || looksLikeReportTask(task);
+}
+
+function looksLikeReportTask(
+  task: Pick<CompletedTask, "objective" | "title">
+): boolean {
+  const haystack = `${task.title || ""} ${task.objective || ""}`;
+  return /\b(review|audit|recommend(?:ation|ations)?|analysis|findings|report)\b/i.test(
+    haystack
+  );
+}
+
+function pickBestCompletionCandidate(
+  requestTasks: CompletedTask[],
+  artifactSummaries: Map<string, string>,
+  preferredTaskId: string
+): CompletionCandidate | null {
+  const candidates = requestTasks
+    .filter((task) => task.assigned_role !== "relay")
+    .map((task) => {
+      const artifactSummary = artifactSummaries.get(task.id) || null;
+      const outcome = summarizeOutcome(
+        task,
+        task.last_handoff_note,
+        task.assigned_role,
+        artifactSummary
+      );
+      const score = scoreCompletionCandidate(
+        task,
+        outcome,
+        artifactSummary,
+        preferredTaskId
+      );
+      return {
+        artifactSummary,
+        score,
+        task,
+      };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      return (
+        new Date(right.task.updated_at).getTime() -
+        new Date(left.task.updated_at).getTime()
+      );
+    });
+
+  return candidates[0] || null;
+}
+
+function scoreCompletionCandidate(
+  task: CompletedTask,
+  outcome: string | null,
+  artifactSummary: string | null,
+  preferredTaskId: string
+): number {
+  let score = 0;
+
+  if (task.id === preferredTaskId) {
+    score += 1;
+  }
+
+  if (artifactSummary) {
+    score += 12;
+  }
+
+  if (looksLikeReportTask(task)) {
+    score += 8;
+  }
+
+  if (task.assigned_role === "builder") {
+    score += 4;
+  } else if (task.assigned_role === "reviewer") {
+    score += 2;
+  }
+
+  if (task.last_handoff_note) {
+    score += Math.min(4, Math.floor(task.last_handoff_note.length / 180));
+  }
+
+  if (outcome) {
+    score += 4;
+    if (!/\bworkspace now contains\b|\bartifacts?\b/i.test(outcome)) {
+      score += 2;
+    }
+  }
+
+  return score;
+}
+
+function normalizeArtifactSummary(
+  value: string,
+  task: Pick<CompletedTask, "objective" | "title">
+): string {
+  const compact = String(value || "").replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "";
+  }
+
+  const normalized = compact
+    .replace(/^Evidence-backed review of /i, "Review complete for ")
+    .replace(/^Evidence-backed audit of /i, "Audit complete for ");
+
+  if (
+    /^Review complete\b/i.test(normalized) ||
+    /^Audit complete\b/i.test(normalized)
+  ) {
+    return trimSentence(normalized);
+  }
+
+  if (looksLikeReportTask(task)) {
+    return trimSentence(`Review complete. ${normalized}`);
+  }
+
+  return trimSentence(normalized);
+}
+
+function normalizeRoleSpecificOutcome(value: string, role: string): string {
+  if (
+    role === "reviewer" &&
+    /^No site changes were made[.!?]?$/i.test(value.trim())
+  ) {
+    return "Review passed with no additional site changes needed.";
+  }
+
+  return value;
 }
 
 function extractSection(note: string, label: string): string | null {
@@ -226,23 +774,136 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+async function resolveRootRequestDeliveryTarget(
+  rootTaskId: string
+): Promise<DeliveryTarget> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("messages")
+    .select("id,channel,metadata,created_at,direction,sender")
+    .eq("task_id", rootTaskId)
+    .eq("direction", "inbound")
+    .order("created_at", { ascending: true })
+    .returns<TaskMessageRow[]>();
+
+  if (error) {
+    console.error(`Failed to resolve delivery target for root task ${rootTaskId}:`, error);
+    return {
+      channel: "admin_chat",
+      chatId: null,
+      sourceMessageId: null,
+    };
+  }
+
+  return chooseOperatorDeliveryTarget(data || []);
+}
+
+function chooseOperatorDeliveryTarget(messages: TaskMessageRow[]): DeliveryTarget {
+  for (const message of messages) {
+    const chatId = readDeliveryChatId(message.metadata);
+    if (message.channel === "telegram" && chatId !== null) {
+      return {
+        channel: "telegram",
+        chatId,
+        sourceMessageId: message.id,
+      };
+    }
+  }
+
+  for (const message of messages) {
+    const sourceChannel = readSourceChannel(message);
+    const chatId = readDeliveryChatId(message.metadata);
+    if (sourceChannel === "telegram" && chatId !== null) {
+      return {
+        channel: "telegram",
+        chatId,
+        sourceMessageId:
+          typeof message.metadata?.source_message_id === "string"
+            ? message.metadata.source_message_id
+            : message.id,
+      };
+    }
+  }
+
+  const adminMessage = messages.find((message) => message.channel === "admin_chat");
+  return {
+    channel: "admin_chat",
+    chatId: null,
+    sourceMessageId: adminMessage?.id || messages[0]?.id || null,
+  };
+}
+
+function readSourceChannel(message: TaskMessageRow): string | null {
+  if (message.channel === "telegram") {
+    return "telegram";
+  }
+
+  if (typeof message.metadata?.source_channel === "string") {
+    return message.metadata.source_channel;
+  }
+
+  if (message.metadata?.mirrored_from === "telegram") {
+    return "telegram";
+  }
+
+  return message.channel === "admin_chat" ? "admin_chat" : null;
+}
+
+function readDeliveryChatId(
+  metadata: Record<string, unknown> | null | undefined
+): number | string | null {
+  if (typeof metadata?.chat_id === "number" || typeof metadata?.chat_id === "string") {
+    return metadata.chat_id;
+  }
+
+  if (
+    typeof metadata?.telegram_chat_id === "number" ||
+    typeof metadata?.telegram_chat_id === "string"
+  ) {
+    return metadata.telegram_chat_id;
+  }
+
+  return null;
+}
+
 async function sendOperatorCompletion(
   taskId: string,
   notificationKey: string,
-  content: string
+  content: string,
+  deliveryTarget: DeliveryTarget
 ): Promise<void> {
   const db = getDb();
-  const delivery = await queueOperatorRelayMessage({
-    content,
-    metadata: {
-      notification_key: notificationKey,
-      notification_type: "task_completion",
-    },
-    sender: "system",
-    taskId,
-  });
+  const baseMetadata = {
+    notification_key: notificationKey,
+    notification_type: "task_completion",
+    operator_visible: true,
+    root_request_channel: deliveryTarget.channel,
+    ...(deliveryTarget.sourceMessageId
+      ? { source_message_id: deliveryTarget.sourceMessageId }
+      : {}),
+  };
+  const delivery =
+    deliveryTarget.channel === "telegram" && deliveryTarget.chatId !== null
+      ? await sendManagedMessage({
+          channel: "telegram",
+          content,
+          metadata: {
+            ...baseMetadata,
+            chat_id: deliveryTarget.chatId,
+          },
+          sender: "system",
+          taskId,
+        })
+      : await sendAdminOnlyMessage({
+          content,
+          metadata: baseMetadata,
+          sender: "system",
+          taskId,
+        });
 
-  if (!delivery.queued) {
+  const sent =
+    "sent" in delivery ? delivery.sent : Boolean(delivery.success);
+  if (!sent) {
     return;
   }
 
@@ -255,7 +916,10 @@ async function sendOperatorCompletion(
     scope_id: taskId,
     summary: content.slice(0, 500),
     detail: {
-      delivery: "relay_queue",
+      delivery:
+        deliveryTarget.channel === "telegram"
+          ? "telegram"
+          : "admin_outbound",
       notification_key: notificationKey,
       notification_type: "task_completion",
     },
@@ -268,3 +932,12 @@ async function sendOperatorCompletion(
     );
   }
 }
+
+export const taskOutcomeTestHooks = {
+  chooseOperatorDeliveryTarget,
+  normalizeArtifactSummary,
+  pickBestCompletionCandidate,
+  summarizeArtifactDocument,
+  shouldPreferArtifactSummary,
+  summarizeOutcome,
+};

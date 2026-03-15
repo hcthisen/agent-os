@@ -416,6 +416,6 @@ END;
 $$;
 
 UPDATE roles
-SET policy_doc = policy_doc || E'\n\nTraining guidance:\n- If the operator begins a message with "Remember:", "Always:", "Rule:", or gives a "When...do..." procedure, treat it as explicit training.\n- Store durable factual instructions as semantic memory.\n- Store repeatable procedures as shared skills at company scope.\n- Confirm back to the operator exactly what was stored.'
+SET policy_doc = policy_doc || E'\n\nTraining guidance:\n- If the operator begins a message with "Remember:", "Always:", "Rule:", or gives a "When...do..." procedure, treat it as explicit training.\n- Also treat recurring scheduled work, repeated operator requests, and proven multi-step workflows as candidates for shared skills.\n- Store durable factual instructions as semantic memory.\n- Store repeatable procedures as shared skills at company scope.\n- Confirm back to the operator exactly what was stored.'
 WHERE id = 'relay'
   AND policy_doc NOT LIKE '%Training guidance:%';

@@ -49,6 +49,35 @@ interface LaunchAgentCandidate {
   role_id: string;
 }
 
+interface QueueTaskRow {
+  assigned_role: string;
+  attempt_count: number;
+  customer_id: string | null;
+  department_id: string | null;
+  depends_on: string[] | null;
+  id: string;
+  last_handoff_note: string | null;
+  objective: string;
+  priority: string;
+  project_id: string | null;
+  state: string;
+  title: string;
+}
+
+interface SimilarTaskRow {
+  attempt_count: number;
+  completed_at: string | null;
+  customer_id: string | null;
+  department_id: string | null;
+  id: string;
+  last_handoff_note: string | null;
+  objective: string;
+  project_id: string | null;
+  state: string;
+  title: string;
+  updated_at: string;
+}
+
 /**
  * Poll for ready tasks and launch agents when capacity is available.
  */
@@ -61,12 +90,13 @@ export async function pollForTasks(): Promise<void> {
   const { data: tasks, error } = await db
     .from("tasks")
     .select(
-      "id, assigned_role, depends_on, last_handoff_note, priority, project_id, state, title"
+      "id,assigned_role,attempt_count,customer_id,department_id,depends_on,last_handoff_note,objective,priority,project_id,state,title"
     )
     .in("state", ["ready", "in_review"])
     .order("priority")
     .order("created_at")
-    .limit(20);
+    .limit(20)
+    .returns<QueueTaskRow[]>();
 
   if (error || !tasks?.length) return;
 
@@ -291,6 +321,11 @@ export async function pollForTasks(): Promise<void> {
         await loadRelevantSkills(task.project_id || null, launchRole);
     }
 
+    Object.assign(
+      contextPack as Record<string, unknown>,
+      await loadTaskContinuationSignals(task)
+    );
+
     // Launch the agent
     try {
       const runId = await launchAgent(
@@ -355,6 +390,190 @@ async function countActiveTasksForAgent(agentId: string): Promise<number> {
   }
 
   return count || 0;
+}
+
+async function loadTaskContinuationSignals(
+  task: QueueTaskRow
+): Promise<Record<string, unknown>> {
+  const db = getDb();
+  let query = db
+    .from("tasks")
+    .select(
+      "id,title,objective,state,last_handoff_note,updated_at,completed_at,attempt_count,project_id,customer_id,department_id"
+    )
+    .neq("id", task.id)
+    .eq("assigned_role", task.assigned_role)
+    .in("state", ["completed", "failed", "dead_letter", "blocked_on_agent"])
+    .order("updated_at", { ascending: false })
+    .limit(80);
+
+  if (task.project_id) {
+    query = query.eq("project_id", task.project_id);
+  } else if (task.customer_id) {
+    query = query.eq("customer_id", task.customer_id);
+  } else if (task.department_id) {
+    query = query.eq("department_id", task.department_id);
+  }
+
+  const { data, error } = await query.returns<SimilarTaskRow[]>();
+
+  if (error) {
+    console.error(`Failed to load continuation signals for task ${task.id}:`, error);
+    return {};
+  }
+
+  return buildTaskContinuationSummary(task, data || []);
+}
+
+function buildTaskContinuationSummary(
+  task: QueueTaskRow,
+  candidates: SimilarTaskRow[]
+): Record<string, unknown> {
+  const similarTasks = candidates
+    .map((candidate) => ({
+      candidate,
+      score: scoreTaskSimilarity(task, candidate),
+    }))
+    .filter((entry) => entry.score >= 2)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      return (
+        new Date(right.candidate.updated_at).getTime() -
+        new Date(left.candidate.updated_at).getTime()
+      );
+    })
+    .slice(0, 5);
+
+  const history = similarTasks.map(({ candidate, score }) => ({
+    attempt_count: candidate.attempt_count,
+    completed_at: candidate.completed_at,
+    handoff_summary: summarizeTaskHistoryNote(candidate.last_handoff_note),
+    id: candidate.id,
+    similarity_score: score,
+    state: candidate.state,
+    title: candidate.title,
+    updated_at: candidate.updated_at,
+  }));
+
+  const similarFailures = similarTasks.filter(({ candidate }) =>
+    candidate.state === "failed" ||
+    candidate.state === "dead_letter" ||
+    candidate.state === "blocked_on_agent"
+  );
+  const similarSuccesses = similarTasks.filter(
+    ({ candidate }) => candidate.state === "completed"
+  );
+
+  const guidance: string[] = [];
+  if (task.project_id) {
+    guidance.push(
+      "This task belongs to a persistent initiative. Keep follow-up tasks, memories, artifacts, and skills attached to this project unless the scope has clearly changed."
+    );
+  }
+
+  if (task.attempt_count > 0) {
+    guidance.push(
+      "This task is being retried after a failed run. Start by inspecting the last handoff and change the approach instead of repeating the same path."
+    );
+  }
+
+  if (similarFailures.length > 0) {
+    guidance.push(
+      "Similar prior tasks failed or stalled. Read their handoff notes and choose a materially different approach before you act."
+    );
+  }
+
+  if (similarSuccesses.length >= 2) {
+    guidance.push(
+      "This looks like repeat work. Reuse an existing shared skill when it fits, or update/create one before you finish so the next run starts from the proven procedure."
+    );
+  }
+
+  const continuationSummary: Record<string, unknown> = {};
+  if (history.length > 0) {
+    continuationSummary.similar_task_history = history;
+  }
+
+  if (guidance.length > 0) {
+    continuationSummary.adaptation_guidance = guidance.join(" ");
+  }
+
+  if (similarSuccesses.length >= 2 || task.attempt_count > 0 || similarFailures.length > 0) {
+    continuationSummary.skill_evolution_directive =
+      "If you discover a better repeatable procedure while completing this task, update an existing shared skill or create a new one instead of leaving the learning trapped in this run.";
+  }
+
+  return continuationSummary;
+}
+
+function scoreTaskSimilarity(task: QueueTaskRow, candidate: SimilarTaskRow): number {
+  const taskText = `${task.title} ${task.objective}`;
+  const candidateText = `${candidate.title} ${candidate.objective}`;
+  const taskTokens = new Set(tokenizeTaskSimilarityText(taskText));
+  const candidateTokens = new Set(tokenizeTaskSimilarityText(candidateText));
+  let score = 0;
+
+  for (const token of taskTokens) {
+    if (candidateTokens.has(token)) {
+      score += 1;
+    }
+  }
+
+  const taskHostnames = extractTaskHostnames(taskText);
+  const candidateHostnames = new Set(extractTaskHostnames(candidateText));
+  for (const hostname of taskHostnames) {
+    if (candidateHostnames.has(hostname)) {
+      score += 4;
+    }
+  }
+
+  if (
+    normalizeTaskSimilarityText(task.title) ===
+    normalizeTaskSimilarityText(candidate.title)
+  ) {
+    score += 4;
+  }
+
+  return score;
+}
+
+function summarizeTaskHistoryNote(note: string | null): string | null {
+  if (!note) {
+    return null;
+  }
+
+  return note.replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
+function normalizeTaskSimilarityText(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s:-]+/g, " ");
+}
+
+function tokenizeTaskSimilarityText(value: string): string[] {
+  return normalizeTaskSimilarityText(value)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4);
+}
+
+function extractTaskHostnames(value: string): string[] {
+  const matches = [
+    ...String(value || "").matchAll(
+      /\b(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi
+    ),
+  ];
+
+  return [...new Set(
+    matches
+      .map((match) => String(match[1] || "").trim().toLowerCase().replace(/^www\./, ""))
+      .filter(Boolean)
+  )];
 }
 
 async function loadRelevantSkills(
@@ -519,3 +738,10 @@ function resolveSkillScopeRank(scopeType: string): number {
 
   return 2;
 }
+
+export const taskPollerTestHooks = {
+  buildTaskContinuationSummary,
+  extractTaskHostnames,
+  scoreTaskSimilarity,
+  tokenizeTaskSimilarityText,
+};

@@ -278,9 +278,11 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
       <div style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Skills</h2>
-          <p style={{ ...shellStyles.muted, margin: 0 }}>Procedural skills stored through the admin control plane.</p>
+          <p style={{ ...shellStyles.muted, margin: 0 }}>
+            Shared procedural memory. The normal path is chat-driven teaching or agent-created skill updates; use this page for override, inspection, and cleanup.
+          </p>
         </div>
-        <button onClick={beginCreate} style={shellStyles.button} type="button">Create Skill</button>
+        <button onClick={beginCreate} style={shellStyles.button} type="button">Manual Skill Override</button>
       </div>
 
       {error && <div style={{ color: "#fca5a5", marginBottom: 12 }}>{error}</div>}
@@ -300,7 +302,7 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
         <select onChange={(event) => setScopeFilter(event.target.value)} style={{ ...shellStyles.input, minWidth: 180 }} value={scopeFilter}>
           <option value="all">All scopes</option>
           <option value="company">Company</option>
-          <option value="project">Project</option>
+          <option value="project">Initiative</option>
           <option value="customer">Customer</option>
           <option value="department">Department</option>
           <option value="role">Agent</option>
@@ -393,7 +395,7 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
                   <label style={shellStyles.label}>Scope Type</label>
                   <select onChange={(event) => setForm((current) => ({ ...current, scope_type: event.target.value }))} style={{ ...shellStyles.input, width: "100%" }} value={form.scope_type}>
                     <option value="company">company</option>
-                    <option value="project">project</option>
+                    <option value="project">initiative</option>
                     <option value="customer">customer</option>
                     <option value="department">department</option>
                     <option value="role">agent</option>
@@ -473,9 +475,9 @@ export function SkillsPage({ onOpenTask }: { onOpenTask?: (taskId: string) => vo
                 </select>
               </div>
               <div>
-                <label style={shellStyles.label}>Test Project</label>
+                <label style={shellStyles.label}>Test Initiative</label>
                 <select onChange={(event) => setTestProjectId(event.target.value)} style={{ ...shellStyles.input, width: "100%" }} value={testProjectId}>
-                  <option value="">No project</option>
+                  <option value="">No initiative</option>
                   {projects.map((project) => <option key={project.id} value={project.id}>{project.display_name}</option>)}
                 </select>
               </div>
