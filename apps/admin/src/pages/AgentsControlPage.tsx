@@ -32,6 +32,7 @@ type AnthropicSubscriptionAuthResponse = {
   apiProvider: string | null;
   authDetected: boolean;
   authMethod: string | null;
+  codeRequired: boolean;
   completedAt: string | null;
   createdAt: string | null;
   email: string | null;
@@ -118,9 +119,10 @@ export function AgentsControlPage() {
   const [agentForm, setAgentForm] = useState(EMPTY_AGENT_FORM);
   const [savingAgent, setSavingAgent] = useState(false);
   const [savingProvider, setSavingProvider] = useState(false);
-  const [anthropicAuthBusy, setAnthropicAuthBusy] = useState<"cancel" | "start" | null>(
-    null
-  );
+  const [anthropicAuthBusy, setAnthropicAuthBusy] = useState<
+    "cancel" | "start" | "submit" | null
+  >(null);
+  const [anthropicAuthCode, setAnthropicAuthCode] = useState("");
   const [openAiAuthBusy, setOpenAiAuthBusy] = useState<"cancel" | "start" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -365,6 +367,30 @@ export function AgentsControlPage() {
     }
   }
 
+  async function submitAnthropicSubscriptionAuthCode() {
+    if (!anthropicAuthCode.trim()) {
+      setError("Paste the Claude callback URL or the full code#state value.");
+      return;
+    }
+
+    setAnthropicAuthBusy("submit");
+    setError(null);
+    try {
+      const nextState = await api.submitAnthropicSubscriptionAuthCode(anthropicAuthCode);
+      setAnthropicSubscriptionAuth(nextState || null);
+      setAnthropicAuthCode("");
+      await loadPage();
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : "Failed to submit the Claude authentication code."
+      );
+    } finally {
+      setAnthropicAuthBusy(null);
+    }
+  }
+
   async function startOpenAiDeviceAuth() {
     const authWindow = window.open("", "_blank");
     setOpenAiAuthBusy("start");
@@ -495,6 +521,16 @@ export function AgentsControlPage() {
                         Open Claude sign-in
                       </a>
                     )}
+                    {anthropicSubscriptionAuth?.codeRequired && !anthropicAuthDetected && (
+                      <div style={{ marginBottom: 8 }}>
+                        <textarea
+                          onChange={(event) => setAnthropicAuthCode(event.target.value)}
+                          placeholder="Paste the Claude callback URL or the code#state value here"
+                          style={{ ...shellStyles.textarea, minHeight: 88, width: "100%" }}
+                          value={anthropicAuthCode}
+                        />
+                      </div>
+                    )}
                     {anthropicSubscriptionAuth?.error &&
                       anthropicAuthStatus === "failed" && (
                         <div style={{ color: "#fca5a5", fontSize: 12, marginBottom: 8 }}>
@@ -522,6 +558,20 @@ export function AgentsControlPage() {
                       </div>
                     )}
                     <div style={{ display: "flex", gap: 8 }}>
+                      {anthropicSubscriptionAuth?.codeRequired && !anthropicAuthDetected && (
+                        <button
+                          disabled={anthropicAuthBusy !== null || !anthropicAuthCode.trim()}
+                          onClick={() => void submitAnthropicSubscriptionAuthCode()}
+                          style={{
+                            ...shellStyles.button,
+                            opacity:
+                              anthropicAuthBusy !== null || !anthropicAuthCode.trim() ? 0.7 : 1,
+                          }}
+                          type="button"
+                        >
+                          {anthropicAuthBusy === "submit" ? "Submitting..." : "Submit Code"}
+                        </button>
+                      )}
                       {!anthropicAuthDetected && (
                         <button
                           disabled={anthropicAuthBusy !== null}

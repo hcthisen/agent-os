@@ -4337,6 +4337,19 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (
+    pathname === "/api/runtime/provider/anthropic/oauth/submit" &&
+    req.method === "POST"
+  ) {
+    const body = await readJson(req);
+    const payload = await callSupervisor("/provider-auth/anthropic/oauth/submit", {
+      body: body || {},
+      method: "POST",
+    });
+    sendJson(res, 200, payload || {});
+    return;
+  }
+
   if (pathname === "/api/runtime/provider/openai/device-auth" && req.method === "GET") {
     const payload = await callSupervisor("/provider-auth/openai/device-auth");
     sendJson(res, 200, payload || {});

@@ -327,6 +327,8 @@ export const api = {
     apiPost<any>("/runtime/provider/openai/device-auth/start"),
   startAnthropicSubscriptionAuth: (): Promise<any> =>
     apiPost<any>("/runtime/provider/anthropic/oauth/start"),
+  submitAnthropicSubscriptionAuthCode: (value: string): Promise<any> =>
+    apiPost<any>("/runtime/provider/anthropic/oauth/submit", { code: value }),
   updateAgentInstructions: (content: string) =>
     apiPatch<{ content: string; updated_at: string | null }>(
       "/settings/agent-instructions",

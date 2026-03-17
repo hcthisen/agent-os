@@ -20,6 +20,7 @@ import {
   getOpenAiDeviceAuthState,
   startAnthropicSubscriptionAuth,
   startOpenAiDeviceAuth,
+  submitAnthropicSubscriptionAuthCode,
 } from "./provider-auth.js";
 import { createRuntimeEmbedding } from "./service-registry.js";
 import http from "node:http";
@@ -163,6 +164,25 @@ async function main() {
       const state = await cancelAnthropicSubscriptionAuth();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(state));
+    } else if (
+      req.url === "/provider-auth/anthropic/oauth/submit" &&
+      req.method === "POST"
+    ) {
+      try {
+        const payload = await readJsonBody(req);
+        const state = await submitAnthropicSubscriptionAuthCode(
+          String(payload.code || payload.value || "")
+        );
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(state));
+      } catch (error) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      }
     } else if (
       req.url === "/provider-auth/openai/device-auth" &&
       req.method === "GET"
