@@ -224,7 +224,10 @@ export async function launchAgent(
   const runId = randomUUID();
   const traceId = `run-${runId.slice(0, 8)}`;
   const runtimeProviderConfig = await getRuntimeProviderConfig();
-  const activeProvider = runtimeProviderConfig.activeProvider;
+  const activeProvider = await resolveLaunchProviderForTask(
+    runtimeProviderConfig.activeProvider,
+    contextPack
+  );
   const resolvedLaunch = resolveProviderLaunch(
     activeProvider,
     roleId,
@@ -459,6 +462,35 @@ export async function launchAgent(
   return runId;
 }
 
+async function resolveLaunchProviderForTask(
+  configuredProvider: RuntimeProvider,
+  contextPack: Record<string, unknown>
+): Promise<RuntimeProvider> {
+  if (configuredProvider !== "anthropic") {
+    return configuredProvider;
+  }
+
+  const task = isRecord(contextPack.task) ? contextPack.task : null;
+  const attemptCount =
+    task && typeof task.attempt_count === "number" ? task.attempt_count : 0;
+  const lastHandoffNote =
+    task && typeof task.last_handoff_note === "string" ? task.last_handoff_note : "";
+
+  if (attemptCount < 1 || !isTransientProviderFailureDetail("anthropic", lastHandoffNote)) {
+    return configuredProvider;
+  }
+
+  try {
+    await access(join(config.agentHomeDir, ".codex", "auth.json"));
+    console.warn(
+      "Falling back to OpenAI for a task retry after transient Anthropic provider failures."
+    );
+    return "openai";
+  } catch {
+    return configuredProvider;
+  }
+}
+
 async function handleProcessExit(
   runId: string,
   code: number | null,
@@ -480,6 +512,7 @@ async function handleProcessExit(
   // Parse output for structured result
   let outcome: Record<string, unknown> = {};
   let handoffNote: string | null = null;
+  let structuredFailureDetail: string | null = null;
 
   if (active.provider === "openai" && active.responsePath) {
     try {
@@ -495,25 +528,10 @@ async function handleProcessExit(
 
   if (!Object.keys(outcome).length) {
     try {
-      // Try to find the last JSON result in stream output
-      const lines = active.output.split("\n").filter((l) => l.trim());
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const parsed = JSON.parse(lines[i]);
-          if (parsed.result || parsed.type || parsed.final_message) {
-            outcome = parsed;
-            if (
-              typeof parsed.final_message === "string" &&
-              parsed.final_message.trim()
-            ) {
-              handoffNote = parsed.final_message.trim();
-            }
-            break;
-          }
-        } catch {
-          // not JSON, skip
-        }
-      }
+      const parsedOutput = extractStructuredProcessOutput(active.output);
+      outcome = parsedOutput.outcome;
+      handoffNote = parsedOutput.handoffNote;
+      structuredFailureDetail = parsedOutput.isError ? parsedOutput.handoffNote : null;
     } catch {
       // couldn't parse output
     }
@@ -536,7 +554,7 @@ async function handleProcessExit(
       handoff_note: handoffNote,
       error_message: success
         ? null
-        : buildProcessExitMessage(active, code, signal),
+        : buildProcessExitMessage(active, code, signal, structuredFailureDetail),
       finished_at: new Date().toISOString(),
     })
     .eq("trace_id", active.traceId);
@@ -582,7 +600,7 @@ async function handleProcessExit(
       }
     }
   } else {
-    // Mark task as failed
+    // Mark task as failed, then requeue transient provider-side failures.
     const { data: task } = await db
       .from("tasks")
       .select("state")
@@ -590,13 +608,82 @@ async function handleProcessExit(
       .single();
 
     if (task?.state === "running" || task?.state === "claimed") {
-      await db
+      const failureNote = buildFailedTaskNote(
+        active,
+        code,
+        signal,
+        structuredFailureDetail
+      );
+      const shouldRetry = shouldRetryTransientProviderFailure({
+        code,
+        provider: active.provider,
+        signal,
+        structuredFailureDetail,
+        terminationReason: active.terminationReason,
+      });
+
+      const { data: failedTask } = await db
         .from("tasks")
         .update({
           state: "failed",
-          last_handoff_note: buildFailedTaskNote(active, code, signal),
+          last_handoff_note: failureNote,
         })
-        .eq("id", active.taskId);
+        .eq("id", active.taskId)
+        .select("attempt_count,max_attempts,state")
+        .maybeSingle<{
+          attempt_count: number;
+          max_attempts: number;
+          state: string;
+        }>();
+
+      if (shouldRetry && failedTask?.state === "failed") {
+        const retryNote = buildTransientRetryTaskNote(
+          failedTask.attempt_count,
+          failedTask.max_attempts,
+          failureNote
+        );
+
+        const [retryUpdate, retryEvent] = await Promise.all([
+          db
+            .from("tasks")
+            .update({
+              blocked_reason: null,
+              claimed_by: null,
+              last_handoff_note: retryNote,
+              state: "ready",
+            })
+            .eq("id", active.taskId)
+            .eq("state", "failed"),
+          db.from("events").insert({
+            trace_id: active.traceId,
+            agent_id: active.agentId,
+            event_type: "task.auto_retry_scheduled",
+            severity: "warning",
+            scope_type: "task",
+            scope_id: active.taskId,
+            summary: buildTransientRetryEventSummary(active.provider, failureNote),
+            detail: {
+              attempt_count: failedTask.attempt_count,
+              max_attempts: failedTask.max_attempts,
+              retry_reason: failureNote,
+              run_id: active.runId,
+            },
+          }),
+        ]);
+
+        if (retryUpdate.error) {
+          console.error(
+            `Failed to requeue transient provider failure for task ${active.taskId}:`,
+            retryUpdate.error
+          );
+        }
+        if (retryEvent.error) {
+          console.error(
+            `Failed to log transient retry event for task ${active.taskId}:`,
+            retryEvent.error
+          );
+        }
+      }
     }
   }
 
@@ -787,7 +874,8 @@ async function logMaxDurationTimeout(
 function buildProcessExitMessage(
   active: ActiveProcess,
   code: number | null,
-  signal: string | null
+  signal: string | null,
+  structuredFailureDetail: string | null = null
 ): string {
   if (active.terminationReason === "inactivity_timeout") {
     return `Restarted after ${Math.max(
@@ -803,13 +891,18 @@ function buildProcessExitMessage(
     )} minutes.`;
   }
 
+  if (structuredFailureDetail) {
+    return structuredFailureDetail;
+  }
+
   return `Exit code: ${code}, signal: ${signal}`;
 }
 
 function buildFailedTaskNote(
   active: ActiveProcess,
   code: number | null,
-  signal: string | null
+  signal: string | null,
+  structuredFailureDetail: string | null = null
 ): string {
   if (active.terminationReason === "inactivity_timeout") {
     const lastActivity = active.lastActivitySummary || "No activity summary recorded.";
@@ -826,7 +919,151 @@ function buildFailedTaskNote(
     )} minutes.`;
   }
 
+  if (structuredFailureDetail) {
+    return structuredFailureDetail;
+  }
+
   return `Process exited with code ${code}${signal ? `, signal ${signal}` : ""}. Output tail: ${active.output.slice(-500)}`;
+}
+
+function shouldRetryTransientProviderFailure(input: {
+  code: number | null;
+  provider: RuntimeProvider;
+  signal: string | null;
+  structuredFailureDetail: string | null;
+  terminationReason: ActiveProcess["terminationReason"];
+}): boolean {
+  if (input.provider !== "anthropic") {
+    return false;
+  }
+
+  if (input.code === 0 || input.signal || input.terminationReason) {
+    return false;
+  }
+
+  const detail = String(input.structuredFailureDetail || "").trim();
+  if (!detail) {
+    return false;
+  }
+
+  return isTransientProviderFailureDetail(input.provider, detail);
+}
+
+function isTransientProviderFailureDetail(
+  provider: RuntimeProvider,
+  detail: string
+): boolean {
+  if (provider !== "anthropic") {
+    return false;
+  }
+
+  return /(API Error:\s*(500|502|503|504|529)\b|Internal server error|overloaded_error|temporar(?:ily)? unavailable|"type":"api_error")/i.test(
+    detail
+  );
+}
+
+function buildTransientRetryTaskNote(
+  attemptCount: number,
+  maxAttempts: number,
+  failureDetail: string
+): string {
+  return `Transient provider failure detected. The task was requeued automatically after attempt ${attemptCount} of ${maxAttempts}. Last provider error: ${summarizeFailureDetail(failureDetail)} Continue from the existing workspace and avoid discarding partial progress.`;
+}
+
+function buildTransientRetryEventSummary(
+  provider: RuntimeProvider,
+  failureDetail: string
+): string {
+  return `Supervisor requeued the task after a transient ${provider} failure: ${summarizeFailureDetail(
+    failureDetail
+  )}`;
+}
+
+function summarizeFailureDetail(detail: string): string {
+  const compact = detail.replace(/\s+/g, " ").trim();
+  return compact.length > 240 ? `${compact.slice(0, 237)}...` : compact;
+}
+
+function extractStructuredProcessOutput(output: string): {
+  handoffNote: string | null;
+  isError: boolean;
+  outcome: Record<string, unknown>;
+} {
+  const lines = output.split("\n").filter((line) => line.trim());
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(lines[i]) as unknown;
+      if (!isRecord(parsed)) {
+        continue;
+      }
+
+      const message =
+        firstNonEmptyString(
+          parsed.final_message,
+          parsed.result,
+          extractAssistantText(parsed)
+        ) || null;
+
+      if (!parsed.result && !parsed.type && !parsed.final_message) {
+        continue;
+      }
+
+      return {
+        handoffNote: message,
+        isError: parsed.is_error === true || typeof parsed.error === "string",
+        outcome: parsed,
+      };
+    } catch {
+      // Ignore non-JSON lines.
+    }
+  }
+
+  return {
+    handoffNote: null,
+    isError: false,
+    outcome: {},
+  };
+}
+
+function extractAssistantText(parsed: Record<string, unknown>): string | null {
+  const message = parsed.message;
+  if (!isRecord(message)) {
+    return null;
+  }
+
+  const content = message.content;
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const text = content
+    .flatMap((entry) => {
+      if (!isRecord(entry) || typeof entry.text !== "string") {
+        return [];
+      }
+
+      const trimmed = entry.text.trim();
+      return trimmed ? [trimmed] : [];
+    })
+    .join("\n")
+    .trim();
+
+  return text || null;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function shouldAutoReviewOnSuccess(roleId: string): boolean {
@@ -1063,6 +1300,10 @@ function buildProviderAuthEnv(
 export const processManagerTestHooks = {
   buildChildProcessEnv,
   buildPerTaskMcpEnv,
+  extractStructuredProcessOutput,
+  isTransientProviderFailureDetail,
+  resolveLaunchProviderForTask,
+  shouldRetryTransientProviderFailure,
 };
 
 async function ensureProviderAuth(provider: RuntimeProvider): Promise<void> {
