@@ -15,6 +15,7 @@ import {
 import { basename, join } from "node:path";
 import { getDb } from "./db.js";
 import { config } from "./config.js";
+import { getAnthropicAuthSnapshot } from "./provider-auth.js";
 import {
   getRuntimeProviderConfig,
   resolveProviderLaunch,
@@ -1066,6 +1067,11 @@ export const processManagerTestHooks = {
 
 async function ensureProviderAuth(provider: RuntimeProvider): Promise<void> {
   if (provider === "anthropic") {
+    const snapshot = await getAnthropicAuthSnapshot(config.agentHomeDir);
+    if (snapshot.loggedIn) {
+      return;
+    }
+
     const credentialPaths = [
       join(config.agentHomeDir, ".claude", ".credentials.json"),
       join(config.agentHomeDir, ".claude.json"),

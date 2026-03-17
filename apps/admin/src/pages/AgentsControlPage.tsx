@@ -11,10 +11,38 @@ type RuntimeProviderResponse = {
   openaiRoleConfig: Record<string, { effort: string; model: string }>;
   providerStatus: Record<
     string,
-    { authDetected?: boolean; authPath?: string; cli?: string; cliInstalled?: boolean }
+    {
+      apiProvider?: string | null;
+      authDetected?: boolean;
+      authMethod?: string | null;
+      authPath?: string;
+      cli?: string;
+      cliInstalled?: boolean;
+      email?: string | null;
+      organizationId?: string | null;
+      organizationName?: string | null;
+      subscriptionType?: string | null;
+    }
   > | null;
   supervisorActiveProvider: "anthropic" | "openai";
   updatedAt: string | null;
+};
+
+type AnthropicSubscriptionAuthResponse = {
+  apiProvider: string | null;
+  authDetected: boolean;
+  authMethod: string | null;
+  completedAt: string | null;
+  createdAt: string | null;
+  email: string | null;
+  error: string | null;
+  organizationId: string | null;
+  organizationName: string | null;
+  sessionId: string | null;
+  status: "idle" | "starting" | "waiting" | "complete" | "failed" | "canceled";
+  subscriptionType: string | null;
+  updatedAt: string | null;
+  verificationUrl: string | null;
 };
 
 type OpenAiDeviceAuthResponse = {
@@ -26,6 +54,15 @@ type OpenAiDeviceAuthResponse = {
   userCode: string | null;
   verificationUrl: string | null;
 };
+
+const AUTH_STATUS_LABELS = {
+  canceled: "Canceled",
+  complete: "Connected",
+  failed: "Failed",
+  idle: "Idle",
+  starting: "Starting",
+  waiting: "Waiting",
+} as const;
 
 const EMPTY_AGENT_FORM = {
   config: "{}",
@@ -71,6 +108,8 @@ function buildAgentForm(agent: AgentRecord | null | undefined) {
 export function AgentsControlPage() {
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [runtimeProvider, setRuntimeProvider] = useState<RuntimeProviderResponse | null>(null);
+  const [anthropicSubscriptionAuth, setAnthropicSubscriptionAuth] =
+    useState<AnthropicSubscriptionAuthResponse | null>(null);
   const [openAiDeviceAuth, setOpenAiDeviceAuth] = useState<OpenAiDeviceAuthResponse | null>(
     null
   );
@@ -79,7 +118,10 @@ export function AgentsControlPage() {
   const [agentForm, setAgentForm] = useState(EMPTY_AGENT_FORM);
   const [savingAgent, setSavingAgent] = useState(false);
   const [savingProvider, setSavingProvider] = useState(false);
-  const [deviceAuthBusy, setDeviceAuthBusy] = useState<"cancel" | "start" | null>(null);
+  const [anthropicAuthBusy, setAnthropicAuthBusy] = useState<"cancel" | "start" | null>(
+    null
+  );
+  const [openAiAuthBusy, setOpenAiAuthBusy] = useState<"cancel" | "start" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedAgent = useMemo(
@@ -101,14 +143,21 @@ export function AgentsControlPage() {
   }, [agents]);
 
   async function loadPage() {
-    const [agentsData, runtimeProviderData, openAiDeviceAuthData] = await Promise.all([
+    const [
+      agentsData,
+      runtimeProviderData,
+      anthropicSubscriptionAuthData,
+      openAiDeviceAuthData,
+    ] = await Promise.all([
       api.getAgents(),
       api.getRuntimeProvider(),
+      api.getAnthropicSubscriptionAuth(),
       api.getOpenAiDeviceAuth(),
     ]);
 
     setAgents(agentsData || []);
     setRuntimeProvider(runtimeProviderData || null);
+    setAnthropicSubscriptionAuth(anthropicSubscriptionAuthData || null);
     setOpenAiDeviceAuth(openAiDeviceAuthData || null);
 
     if (!selectedAgentId && agentsData?.[0]?.id) {
@@ -144,6 +193,27 @@ export function AgentsControlPage() {
 
   useEffect(() => {
     if (
+      !anthropicSubscriptionAuth ||
+      (anthropicSubscriptionAuth.status !== "starting" &&
+        anthropicSubscriptionAuth.status !== "waiting")
+    ) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void api.getAnthropicSubscriptionAuth().then(async (nextState) => {
+        setAnthropicSubscriptionAuth(nextState || null);
+        if (nextState?.authDetected || nextState?.status === "complete") {
+          await loadPage();
+        }
+      });
+    }, 2000);
+
+    return () => window.clearInterval(interval);
+  }, [anthropicSubscriptionAuth]);
+
+  useEffect(() => {
+    if (
       !openAiDeviceAuth ||
       (openAiDeviceAuth.status !== "starting" && openAiDeviceAuth.status !== "waiting")
     ) {
@@ -151,14 +221,24 @@ export function AgentsControlPage() {
     }
 
     const interval = window.setInterval(() => {
-      void api.getOpenAiDeviceAuth().then((nextState) => {
+      void api.getOpenAiDeviceAuth().then(async (nextState) => {
         setOpenAiDeviceAuth(nextState || null);
+        if (nextState?.authDetected || nextState?.status === "complete") {
+          await loadPage();
+        }
       });
     }, 2000);
 
     return () => window.clearInterval(interval);
   }, [openAiDeviceAuth]);
 
+  const anthropicAuthStatus =
+    anthropicSubscriptionAuth?.status ||
+    (runtimeProvider?.providerStatus?.anthropic?.authDetected ? "complete" : "idle");
+  const anthropicAuthDetected =
+    anthropicSubscriptionAuth?.authDetected ||
+    runtimeProvider?.providerStatus?.anthropic?.authDetected ||
+    false;
   const openAiAuthStatus =
     openAiDeviceAuth?.status ||
     (runtimeProvider?.providerStatus?.openai?.authDetected ? "complete" : "idle");
@@ -246,9 +326,49 @@ export function AgentsControlPage() {
     }
   }
 
+  async function startAnthropicSubscriptionAuth() {
+    const authWindow = window.open("", "_blank");
+    setAnthropicAuthBusy("start");
+    setError(null);
+    try {
+      const nextState = await api.startAnthropicSubscriptionAuth();
+      setAnthropicSubscriptionAuth(nextState || null);
+      if (nextState?.verificationUrl) {
+        authWindow?.location.replace(nextState.verificationUrl);
+      } else {
+        authWindow?.close();
+      }
+      await loadPage();
+    } catch (nextError) {
+      authWindow?.close();
+      setError(
+        nextError instanceof Error ? nextError.message : "Failed to start Claude sign-in."
+      );
+    } finally {
+      setAnthropicAuthBusy(null);
+    }
+  }
+
+  async function cancelAnthropicSubscriptionAuth() {
+    setAnthropicAuthBusy("cancel");
+    setError(null);
+    try {
+      const nextState = await api.cancelAnthropicSubscriptionAuth();
+      setAnthropicSubscriptionAuth(nextState || null);
+      await loadPage();
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error ? nextError.message : "Failed to cancel Claude sign-in."
+      );
+    } finally {
+      setAnthropicAuthBusy(null);
+    }
+  }
+
   async function startOpenAiDeviceAuth() {
     const authWindow = window.open("", "_blank");
-    setDeviceAuthBusy("start");
+    setOpenAiAuthBusy("start");
+    setError(null);
     try {
       const nextState = await api.startOpenAiDeviceAuth();
       setOpenAiDeviceAuth(nextState || null);
@@ -263,12 +383,13 @@ export function AgentsControlPage() {
         nextError instanceof Error ? nextError.message : "Failed to start OpenAI device auth."
       );
     } finally {
-      setDeviceAuthBusy(null);
+      setOpenAiAuthBusy(null);
     }
   }
 
   async function cancelOpenAiDeviceAuth() {
-    setDeviceAuthBusy("cancel");
+    setOpenAiAuthBusy("cancel");
+    setError(null);
     try {
       const nextState = await api.cancelOpenAiDeviceAuth();
       setOpenAiDeviceAuth(nextState || null);
@@ -278,7 +399,7 @@ export function AgentsControlPage() {
         nextError instanceof Error ? nextError.message : "Failed to cancel OpenAI device auth."
       );
     } finally {
-      setDeviceAuthBusy(null);
+      setOpenAiAuthBusy(null);
     }
   }
 
@@ -321,6 +442,9 @@ export function AgentsControlPage() {
           {(["anthropic", "openai"] as const).map((provider) => {
             const status = runtimeProvider?.providerStatus?.[provider];
             const active = runtimeProvider?.activeProvider === provider;
+            const anthropicDetails = anthropicSubscriptionAuth?.authDetected
+              ? anthropicSubscriptionAuth
+              : status;
             return (
               <div
                 key={provider}
@@ -351,8 +475,85 @@ export function AgentsControlPage() {
                 <div style={shellStyles.muted}>
                   Login {status?.authDetected ? "detected" : "not detected"}
                 </div>
+                {status?.authPath && (
+                  <div style={{ ...shellStyles.muted, fontSize: 11, marginTop: 4 }}>
+                    Auth path {status.authPath}
+                  </div>
+                )}
+                {provider === "anthropic" && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ ...shellStyles.muted, marginBottom: 8 }}>
+                      OAuth {AUTH_STATUS_LABELS[anthropicAuthStatus]}
+                    </div>
+                    {anthropicSubscriptionAuth?.verificationUrl && !anthropicAuthDetected && (
+                      <a
+                        href={anthropicSubscriptionAuth.verificationUrl}
+                        rel="noreferrer"
+                        style={{ color: "#93c5fd", display: "inline-block", marginBottom: 8 }}
+                        target="_blank"
+                      >
+                        Open Claude sign-in
+                      </a>
+                    )}
+                    {anthropicSubscriptionAuth?.error &&
+                      anthropicAuthStatus === "failed" && (
+                        <div style={{ color: "#fca5a5", fontSize: 12, marginBottom: 8 }}>
+                          {anthropicSubscriptionAuth.error}
+                        </div>
+                      )}
+                    {anthropicDetails?.email && (
+                      <div style={{ ...shellStyles.muted, marginBottom: 4 }}>
+                        {anthropicDetails.email}
+                      </div>
+                    )}
+                    {anthropicDetails?.organizationName && (
+                      <div style={{ ...shellStyles.muted, marginBottom: 4 }}>
+                        Org {anthropicDetails.organizationName}
+                      </div>
+                    )}
+                    {anthropicDetails?.subscriptionType && (
+                      <div style={{ ...shellStyles.muted, marginBottom: 8 }}>
+                        Plan {anthropicDetails.subscriptionType}
+                      </div>
+                    )}
+                    {anthropicAuthDetected && (
+                      <div style={{ color: "#22c55e", fontSize: 12, marginBottom: 8 }}>
+                        Claude subscription login is connected on the supervisor.
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {!anthropicAuthDetected && (
+                        <button
+                          disabled={anthropicAuthBusy !== null}
+                          onClick={() => void startAnthropicSubscriptionAuth()}
+                          style={{
+                            ...shellStyles.button,
+                            opacity: anthropicAuthBusy !== null ? 0.7 : 1,
+                          }}
+                          type="button"
+                        >
+                          {anthropicAuthBusy === "start" ? "Starting..." : "Connect Claude"}
+                        </button>
+                      )}
+                      {(anthropicAuthStatus === "starting" ||
+                        anthropicAuthStatus === "waiting") && (
+                        <button
+                          disabled={anthropicAuthBusy !== null}
+                          onClick={() => void cancelAnthropicSubscriptionAuth()}
+                          style={{ ...shellStyles.button, ...shellStyles.buttonGhost }}
+                          type="button"
+                        >
+                          {anthropicAuthBusy === "cancel" ? "Canceling..." : "Cancel"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {provider === "openai" && (
                   <div style={{ marginTop: 10 }}>
+                    <div style={{ ...shellStyles.muted, marginBottom: 8 }}>
+                      OAuth {AUTH_STATUS_LABELS[openAiAuthStatus]}
+                    </div>
                     {openAiDeviceAuth?.userCode && !openAiAuthDetected && (
                       <div style={{ ...shellStyles.muted, marginBottom: 6 }}>
                         Code: <span style={shellStyles.inlineCode}>{openAiDeviceAuth.userCode}</span>
@@ -366,22 +567,25 @@ export function AgentsControlPage() {
                     <div style={{ display: "flex", gap: 8 }}>
                       {!openAiAuthDetected && (
                         <button
-                          disabled={deviceAuthBusy !== null}
+                          disabled={openAiAuthBusy !== null}
                           onClick={() => void startOpenAiDeviceAuth()}
-                          style={{ ...shellStyles.button, opacity: deviceAuthBusy ? 0.7 : 1 }}
+                          style={{
+                            ...shellStyles.button,
+                            opacity: openAiAuthBusy !== null ? 0.7 : 1,
+                          }}
                           type="button"
                         >
-                          {deviceAuthBusy === "start" ? "Starting..." : "Connect ChatGPT"}
+                          {openAiAuthBusy === "start" ? "Starting..." : "Connect ChatGPT"}
                         </button>
                       )}
                       {(openAiAuthStatus === "starting" || openAiAuthStatus === "waiting") && (
                         <button
-                          disabled={deviceAuthBusy !== null}
+                          disabled={openAiAuthBusy !== null}
                           onClick={() => void cancelOpenAiDeviceAuth()}
                           style={{ ...shellStyles.button, ...shellStyles.buttonGhost }}
                           type="button"
                         >
-                          Cancel
+                          {openAiAuthBusy === "cancel" ? "Canceling..." : "Cancel"}
                         </button>
                       )}
                     </div>

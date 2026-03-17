@@ -4309,6 +4309,34 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/runtime/provider/anthropic/oauth" && req.method === "GET") {
+    const payload = await callSupervisor("/provider-auth/anthropic/oauth");
+    sendJson(res, 200, payload || {});
+    return;
+  }
+
+  if (
+    pathname === "/api/runtime/provider/anthropic/oauth/start" &&
+    req.method === "POST"
+  ) {
+    const payload = await callSupervisor("/provider-auth/anthropic/oauth/start", {
+      method: "POST",
+    });
+    sendJson(res, 200, payload || {});
+    return;
+  }
+
+  if (
+    pathname === "/api/runtime/provider/anthropic/oauth/cancel" &&
+    req.method === "POST"
+  ) {
+    const payload = await callSupervisor("/provider-auth/anthropic/oauth/cancel", {
+      method: "POST",
+    });
+    sendJson(res, 200, payload || {});
+    return;
+  }
+
   if (pathname === "/api/runtime/provider/openai/device-auth" && req.method === "GET") {
     const payload = await callSupervisor("/provider-auth/openai/device-auth");
     sendJson(res, 200, payload || {});

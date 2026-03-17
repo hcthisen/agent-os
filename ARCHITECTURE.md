@@ -204,7 +204,7 @@ The app provides:
 
 The admin surface handles connection of the active coding provider:
 
-- Claude provider: launch `claude login` via the browser service
+- Claude provider: launch `claude auth login` and hand the OAuth URL to the operator
 - Codex provider: start `codex login --device-auth` or an equivalent persisted Codex CLI
   login flow
 
@@ -537,7 +537,7 @@ provider API key is required for the core agent loop.
 **Claude provider**
 
 1. Operator selects Claude as the active runtime provider.
-2. The system launches `claude login` through the browser service.
+2. The system launches `claude auth login`, captures the OAuth URL, and hands it to the operator.
 3. Claude stores its own session under `~/.claude`.
 4. The system verifies the login by running a minimal `claude` command.
 

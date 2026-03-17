@@ -14,8 +14,11 @@ import {
   handleServiceControlControl,
 } from "./control-plane.js";
 import {
+  cancelAnthropicSubscriptionAuth,
   cancelOpenAiDeviceAuth,
+  getAnthropicSubscriptionAuthState,
   getOpenAiDeviceAuthState,
+  startAnthropicSubscriptionAuth,
   startOpenAiDeviceAuth,
 } from "./provider-auth.js";
 import { createRuntimeEmbedding } from "./service-registry.js";
@@ -139,6 +142,27 @@ async function main() {
           runtime_provider: runtimeProvider,
         })
       );
+    } else if (
+      req.url === "/provider-auth/anthropic/oauth" &&
+      req.method === "GET"
+    ) {
+      const state = await getAnthropicSubscriptionAuthState();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state));
+    } else if (
+      req.url === "/provider-auth/anthropic/oauth/start" &&
+      req.method === "POST"
+    ) {
+      const state = await startAnthropicSubscriptionAuth();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state));
+    } else if (
+      req.url === "/provider-auth/anthropic/oauth/cancel" &&
+      req.method === "POST"
+    ) {
+      const state = await cancelAnthropicSubscriptionAuth();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state));
     } else if (
       req.url === "/provider-auth/openai/device-auth" &&
       req.method === "GET"

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { getDb } from "./db.js";
+import { getAnthropicAuthSnapshot } from "./provider-auth.js";
 
 export type RuntimeProvider = "anthropic" | "openai";
 export type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh";
@@ -26,11 +27,17 @@ export interface RuntimeProviderStatus {
   providers: Record<
     RuntimeProvider,
     {
+      apiProvider?: string | null;
       authDetected: boolean;
+      authMethod?: string | null;
       authPath: string;
       cli: string;
       cliInstalled: boolean;
+      email?: string | null;
       label: string;
+      organizationId?: string | null;
+      organizationName?: string | null;
+      subscriptionType?: string | null;
     }
   >;
 }
@@ -146,6 +153,7 @@ export async function getRuntimeProviderStatus(
   agentHomeDir: string
 ): Promise<RuntimeProviderStatus> {
   const config = await getRuntimeProviderConfig();
+  const anthropicSnapshot = await getAnthropicAuthSnapshot(agentHomeDir);
   const anthropicAuthPath = join(agentHomeDir, ".claude", ".credentials.json");
   const openAiAuthPath = join(agentHomeDir, ".codex", "auth.json");
 
@@ -156,13 +164,20 @@ export async function getRuntimeProviderStatus(
     openaiRoleConfig: config.openaiRoleConfig,
     providers: {
       anthropic: {
+        apiProvider: anthropicSnapshot.apiProvider,
         authDetected:
+          anthropicSnapshot.loggedIn ||
           (await pathExists(anthropicAuthPath)) ||
           (await pathExists(join(agentHomeDir, ".claude.json"))),
+        authMethod: anthropicSnapshot.authMethod,
         authPath: anthropicAuthPath,
         cli: "claude",
         cliInstalled: commandAvailable("claude"),
+        email: anthropicSnapshot.email,
         label: "Claude (Anthropic)",
+        organizationId: anthropicSnapshot.organizationId,
+        organizationName: anthropicSnapshot.organizationName,
+        subscriptionType: anthropicSnapshot.subscriptionType,
       },
       openai: {
         authDetected: await pathExists(openAiAuthPath),

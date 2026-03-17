@@ -133,7 +133,7 @@ in the same volume. Services source generated config via `scripts/entrypoint.sh`
 
 Agent auth is managed through the admin panel for the active provider:
 
-- Claude provider: `claude login`
+- Claude provider: `claude auth login`
 - Codex provider: `codex login --device-auth` or equivalent persisted Codex login
 
 External API keys are stored encrypted in `service_registry`.

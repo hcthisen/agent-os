@@ -98,6 +98,8 @@ function buildQueryString(
 }
 
 export const api = {
+  cancelAnthropicSubscriptionAuth: (): Promise<any> =>
+    apiPost<any>("/runtime/provider/anthropic/oauth/cancel"),
   cancelOpenAiDeviceAuth: (): Promise<any> =>
     apiPost<any>("/runtime/provider/openai/device-auth/cancel"),
   createAgent: (
@@ -251,6 +253,8 @@ export const api = {
   getSession: (): Promise<any> => apiGet<any>("/auth/session"),
   getAgentInstructions: (): Promise<{ content: string; updated_at: string | null }> =>
     apiGet<{ content: string; updated_at: string | null }>("/settings/agent-instructions"),
+  getAnthropicSubscriptionAuth: (): Promise<any> =>
+    apiGet<any>("/runtime/provider/anthropic/oauth"),
   getSkill: (skillId: string) => apiGet<SkillDetailRecord>(`/skills/${skillId}`),
   getSkills: (options?: {
     limit?: number;
@@ -321,6 +325,8 @@ export const api = {
     apiPost<void>(`/schedules/${scheduleId}/toggle`, { enabled }),
   startOpenAiDeviceAuth: (): Promise<any> =>
     apiPost<any>("/runtime/provider/openai/device-auth/start"),
+  startAnthropicSubscriptionAuth: (): Promise<any> =>
+    apiPost<any>("/runtime/provider/anthropic/oauth/start"),
   updateAgentInstructions: (content: string) =>
     apiPatch<{ content: string; updated_at: string | null }>(
       "/settings/agent-instructions",
