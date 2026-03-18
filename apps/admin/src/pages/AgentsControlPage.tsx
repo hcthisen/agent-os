@@ -65,6 +65,18 @@ const AUTH_STATUS_LABELS = {
   waiting: "Waiting",
 } as const;
 
+const ANTHROPIC_MODEL_OPTIONS = ["haiku", "sonnet", "opus"];
+const OPENAI_MODEL_OPTIONS = [
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5-codex",
+  "gpt-5.3-codex",
+  "gpt-5.2-codex",
+  "gpt-5.1-codex",
+  "gpt-5.1-codex-max",
+  "gpt-5.1-codex-mini",
+];
+
 const EMPTY_AGENT_FORM = {
   config: "{}",
   description: "",
@@ -77,6 +89,22 @@ const EMPTY_AGENT_FORM = {
   status: "active",
   usage_summary: "",
 };
+
+function defaultBaseModelForProvider(provider: "anthropic" | "openai" | null | undefined) {
+  return provider === "openai" ? "gpt-5.4" : "sonnet";
+}
+
+function modelOptionsForProvider(
+  provider: "anthropic" | "openai" | null | undefined,
+  currentValue: string
+): string[] {
+  const baseOptions =
+    provider === "openai" ? OPENAI_MODEL_OPTIONS : ANTHROPIC_MODEL_OPTIONS;
+  const current = String(currentValue || "").trim();
+  return current && !baseOptions.includes(current)
+    ? [current, ...baseOptions]
+    : baseOptions;
+}
 
 function getAgentLabel(agent: AgentRecord | null | undefined): string {
   if (!agent) {
@@ -432,7 +460,10 @@ export function AgentsControlPage() {
   function beginCreateAgent() {
     setSelectedAgentId(null);
     setAgentActivity(null);
-    setAgentForm(EMPTY_AGENT_FORM);
+    setAgentForm({
+      ...EMPTY_AGENT_FORM,
+      model: defaultBaseModelForProvider(runtimeProvider?.activeProvider),
+    });
   }
 
   return (
@@ -910,9 +941,14 @@ export function AgentsControlPage() {
                   style={{ ...shellStyles.input, width: "100%" }}
                   value={agentForm.model}
                 >
-                  <option value="haiku">haiku</option>
-                  <option value="sonnet">sonnet</option>
-                  <option value="opus">opus</option>
+                  {modelOptionsForProvider(
+                    runtimeProvider?.activeProvider,
+                    agentForm.model
+                  ).map((modelOption) => (
+                    <option key={modelOption} value={modelOption}>
+                      {modelOption}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>

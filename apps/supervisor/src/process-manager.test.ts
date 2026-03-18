@@ -92,3 +92,25 @@ test("does not retry non-transient provider failures", () => {
 
   assert.equal(shouldRetry, false);
 });
+
+test("prefers the richer final message over a generic handoff note", () => {
+  const preferred = processManagerTestHooks.choosePreferredTaskNote(
+    "What I did: Classified the request and created a downstream planning task.",
+    [
+      "I’ve classified this as a reusable website-demo workflow, not a one-off build.",
+      "",
+      "What I still need now:",
+      "- The client URL",
+      "- GitHub token or repo access",
+      "- Vercel token",
+    ].join("\n")
+  );
+
+  assert.match(String(preferred), /What I still need now:/);
+  assert.ok(
+    processManagerTestHooks.scoreTaskOperatorNote(String(preferred)) >
+      processManagerTestHooks.scoreTaskOperatorNote(
+        "What I did: Classified the request and created a downstream planning task."
+      )
+  );
+});

@@ -127,6 +127,22 @@ export async function taskCreate(args: {
     await enforceScope("department", departmentId);
   }
 
+  if (parentTaskId) {
+    const rootTask = await loadRootTaskContext(parentTaskId);
+    if (
+      shouldBlockRequirementsWalkthroughDelegation(
+        rootTask,
+        args.assigned_role
+      )
+    ) {
+      return {
+        success: false,
+        error:
+          "This request explicitly asked what the system still needs. Finish the requirements walkthrough and send the operator a concrete checklist before creating implementation tasks.",
+      };
+    }
+  }
+
   if (dependencyIds.length) {
     for (const dependencyId of dependencyIds) {
       await enforceScope("task", dependencyId);
@@ -249,3 +265,69 @@ export async function taskCreate(args: {
 
   return { success: true, task: insertPayload };
 }
+
+interface RootTaskContext {
+  assigned_role: string;
+  id: string;
+  objective: string | null;
+  parent_task_id: string | null;
+  title: string;
+}
+
+async function loadRootTaskContext(taskId: string): Promise<RootTaskContext | null> {
+  const db = getDb();
+  let currentTaskId: string | null = taskId;
+  const visited = new Set<string>();
+  let currentTask: RootTaskContext | null = null;
+
+  while (currentTaskId) {
+    if (visited.has(currentTaskId)) {
+      break;
+    }
+
+    visited.add(currentTaskId);
+    const response = await db
+      .from("tasks")
+      .select("id,title,objective,parent_task_id,assigned_role")
+      .eq("id", currentTaskId)
+      .maybeSingle<RootTaskContext>();
+    const data = response.data as RootTaskContext | null;
+    const error = response.error;
+
+    if (error || !data) {
+      return currentTask;
+    }
+
+    currentTask = data;
+    currentTaskId = data.parent_task_id;
+  }
+
+  return currentTask;
+}
+
+function shouldBlockRequirementsWalkthroughDelegation(
+  rootTask: RootTaskContext | null,
+  assignedRole: string
+): boolean {
+  if (!rootTask) {
+    return false;
+  }
+
+  const rootLooksLikeRelayRequest =
+    rootTask.assigned_role === "relay" ||
+    /^Process message:/i.test(rootTask.title);
+  if (!rootLooksLikeRelayRequest) {
+    return false;
+  }
+
+  const objective = String(rootTask.objective || "");
+  if (!/Requirements walkthrough requested:\s*yes/i.test(objective)) {
+    return false;
+  }
+
+  return !["relay", "sage"].includes(assignedRole);
+}
+
+export const taskCreateTestHooks = {
+  shouldBlockRequirementsWalkthroughDelegation,
+};

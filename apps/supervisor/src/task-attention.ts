@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { config } from "./config.js";
-import { sendAdminOnlyMessage } from "./operator-delivery.js";
+import { sendOperatorMessage } from "./operator-delivery.js";
 import {
   buildDependencyWaitNote,
   getUnsatisfiedDependencies,
@@ -360,7 +360,7 @@ async function sendOperatorNotification(
 ): Promise<void> {
   const db = getDb();
   const notificationType = "task_attention";
-  const delivery = await sendAdminOnlyMessage({
+  const delivery = await sendOperatorMessage({
     content,
     metadata: {
       notification_key: notificationKey,
@@ -389,10 +389,14 @@ async function sendOperatorNotification(
     scope_id: task.id,
     summary: content.slice(0, 500),
     detail: {
-      delivery: "admin_outbound",
+      delivery:
+        delivery.telegramDelivery === "telegram_sent"
+          ? "admin_and_telegram"
+          : "admin_outbound",
       notification_key: notificationKey,
       notification_type: notificationType,
       task_state: task.state,
+      telegram_delivery: delivery.telegramDelivery,
     },
   });
 

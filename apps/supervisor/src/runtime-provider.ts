@@ -43,9 +43,9 @@ export interface RuntimeProviderStatus {
 }
 
 export const DEFAULT_OPENAI_MODEL_MAP = {
-  haiku: "gpt-5.4",
+  haiku: "gpt-5.4-mini",
   opus: "gpt-5.4",
-  sonnet: "gpt-5.4",
+  sonnet: "gpt-5.4-mini",
 } as const;
 
 export const DEFAULT_ANTHROPIC_ROLE_CONFIG = {
@@ -86,11 +86,11 @@ export const DEFAULT_OPENAI_ROLE_CONFIG = {
   },
   relay: {
     effort: "low",
-    model: "gpt-5.4",
+    model: "gpt-5.4-mini",
   },
   reviewer: {
     effort: "high",
-    model: "gpt-5.4",
+    model: "gpt-5.4-mini",
   },
   sage: {
     effort: "xhigh",
@@ -98,9 +98,15 @@ export const DEFAULT_OPENAI_ROLE_CONFIG = {
   },
   sentinel: {
     effort: "medium",
-    model: "gpt-5.3-codex",
+    model: "gpt-5.4-mini",
   },
 } as const;
+
+function normalizeOpenAiModelName(model: string): string {
+  return model.trim().toLowerCase() === "gpt-5.4-nano"
+    ? "gpt-5.4-mini"
+    : model.trim();
+}
 
 const RUNTIME_PROVIDER_SETTING_KEY = "runtime_provider";
 
@@ -200,6 +206,10 @@ export function resolveProviderModel(
   }
 
   const normalized = requestedModel.trim().toLowerCase();
+  if (normalized === "gpt-5.4-nano") {
+    return "gpt-5.4-mini";
+  }
+
   return config.openaiModelMap[normalized] || requestedModel || null;
 }
 
@@ -245,7 +255,7 @@ function normalizeModelMap(
 
   for (const [key, value] of Object.entries(modelMap)) {
     if (typeof value === "string" && value.trim()) {
-      normalized[key.trim().toLowerCase()] = value.trim();
+      normalized[key.trim().toLowerCase()] = normalizeOpenAiModelName(value);
     }
   }
 
@@ -264,7 +274,8 @@ function normalizeRoleConfig(
 
     const entry = value as Record<string, unknown>;
     const modelValue = entry.model;
-    const model = typeof modelValue === "string" ? modelValue.trim() : "";
+    const model =
+      typeof modelValue === "string" ? normalizeOpenAiModelName(modelValue) : "";
     const effort = normalizeReasoningEffort(
       entry.effort
     );

@@ -138,3 +138,180 @@ test("delivered completion message appends a full result link and keeps a compac
   assert.match(delivered, /Full result: https:\/\/admin\.example\.com\/deliveries\/task-123\/token-456/);
   assert.match(delivered, /^Done\. Review complete\./);
 });
+
+test("interim progress notifications are sent for completed planning tasks with handoff notes", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    id: "relay-root",
+    parent_task_id: null,
+    title: "Process message: Website skill planning...",
+  };
+  const sageTask = {
+    assigned_role: "sage",
+    attempt_count: 0,
+    claimed_by: "sage-1",
+    completed_at: "2026-03-18T13:07:00.000Z",
+    customer_id: null,
+    department_id: null,
+    id: "sage-task",
+    last_handoff_note:
+      "What changed: Reviewed the repository, drafted the reusable workflow, and listed the credentials still needed.",
+    objective: "Plan the reusable website-demo workflow and gather requirements.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "completed",
+    title: "Plan the website-demo workflow",
+    updated_at: "2026-03-18T13:07:10.000Z",
+  };
+  const builderTask = {
+    assigned_role: "builder",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "builder-task",
+    last_handoff_note: null,
+    objective: "Implement the generated workflow.",
+    parent_task_id: "sage-task",
+    project_id: null,
+    simulation_only: false,
+    state: "ready",
+    title: "Implement the website-demo workflow",
+    updated_at: "2026-03-18T13:07:11.000Z",
+  };
+
+  assert.equal(
+    taskOutcomeTestHooks.shouldSendInterimProgressUpdate(
+      sageTask,
+      rootTask,
+      [sageTask, builderTask]
+    ),
+    true
+  );
+});
+
+test("relay root progress is suppressed when downstream planning work already exists", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    attempt_count: 0,
+    claimed_by: "relay-1",
+    completed_at: "2026-03-18T13:42:00.000Z",
+    customer_id: null,
+    department_id: null,
+    id: "relay-root",
+    last_handoff_note:
+      "Classified the inbound message and routed it to planning.",
+    objective: "Process inbound message.\nRequirements walkthrough requested: yes.",
+    parent_task_id: null,
+    project_id: null,
+    simulation_only: false,
+    state: "completed",
+    title: "Process message: Website skill planning...",
+    updated_at: "2026-03-18T13:42:01.000Z",
+  };
+  const sageTask = {
+    assigned_role: "sage",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "sage-task",
+    last_handoff_note: null,
+    objective: "Plan the workflow.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "running",
+    title: "Plan the workflow",
+    updated_at: "2026-03-18T13:42:02.000Z",
+  };
+
+  assert.equal(
+    taskOutcomeTestHooks.shouldSendInterimProgressUpdate(
+      rootTask,
+      {
+        assigned_role: "relay",
+        id: "relay-root",
+        parent_task_id: null,
+        title: "Process message: Website skill planning...",
+      },
+      [rootTask, sageTask]
+    ),
+    false
+  );
+});
+
+test("relay root progress is allowed when the relay note already contains a requirements checklist", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    attempt_count: 0,
+    claimed_by: "relay-1",
+    completed_at: "2026-03-18T13:42:00.000Z",
+    customer_id: null,
+    department_id: null,
+    id: "relay-root",
+    last_handoff_note:
+      "Required now: GitHub token, Vercel token, image API docs. Needed later: prospect URL and brand assets. Optional but helpful: example sites.",
+    objective: "Process inbound message.\nRequirements walkthrough requested: yes.",
+    parent_task_id: null,
+    project_id: null,
+    simulation_only: false,
+    state: "completed",
+    title: "Process message: Website skill planning...",
+    updated_at: "2026-03-18T13:42:01.000Z",
+  };
+  const sageTask = {
+    assigned_role: "sage",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "sage-task",
+    last_handoff_note: null,
+    objective: "Plan the workflow.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "running",
+    title: "Plan the workflow",
+    updated_at: "2026-03-18T13:42:02.000Z",
+  };
+
+  assert.equal(
+    taskOutcomeTestHooks.shouldSendInterimProgressUpdate(
+      rootTask,
+      {
+        assigned_role: "relay",
+        id: "relay-root",
+        parent_task_id: null,
+        title: "Process message: Website skill planning...",
+      },
+      [rootTask, sageTask]
+    ),
+    true
+  );
+  assert.equal(
+    taskOutcomeTestHooks.looksLikeRequirementsChecklist(
+      rootTask.last_handoff_note
+    ),
+    true
+  );
+  assert.match(
+    taskOutcomeTestHooks.formatCompletionMessage(
+      rootTask,
+      {
+        assigned_role: "relay",
+        id: "relay-root",
+        parent_task_id: null,
+        title: "Process message: Website skill planning...",
+      },
+      false,
+      null
+    ),
+    /Required now:|What I still need now:/i
+  );
+});

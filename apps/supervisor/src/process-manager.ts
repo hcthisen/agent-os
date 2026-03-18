@@ -561,14 +561,29 @@ async function handleProcessExit(
 
   // Update task state
   if (success) {
-    // The agent should have already updated state via MCP tools.
-    // If task is still in 'running', move to 'in_review' as a fallback.
+    const finalMessage =
+      typeof outcome.final_message === "string" ? outcome.final_message.trim() : "";
     const { data: task } = await db
       .from("tasks")
-      .select("state")
+      .select("state,last_handoff_note")
       .eq("id", active.taskId)
       .single();
+    const preferredTaskNote = choosePreferredTaskNote(
+      task?.last_handoff_note || handoffNote || null,
+      finalMessage || null
+    );
 
+    if (preferredTaskNote && preferredTaskNote !== task?.last_handoff_note) {
+      await db
+        .from("tasks")
+        .update({
+          last_handoff_note: preferredTaskNote,
+        })
+        .eq("id", active.taskId);
+    }
+
+    // The agent should have already updated state via MCP tools.
+    // If task is still in 'running', move to 'in_review' as a fallback.
     if (task?.state === "running") {
       const fallbackState = shouldAutoReviewOnSuccess(active.roleId)
         ? "in_review"
@@ -578,7 +593,9 @@ async function handleProcessExit(
         .update({
           state: fallbackState,
           last_handoff_note:
-            handoffNote || buildFallbackHandoffNote(active.roleId, fallbackState),
+            preferredTaskNote ||
+            handoffNote ||
+            buildFallbackHandoffNote(active.roleId, fallbackState),
         })
         .eq("id", active.taskId);
 
@@ -591,6 +608,7 @@ async function handleProcessExit(
           .update({
             blocked_reason: `Automatic completion blocked: ${fallbackError.message}`,
             last_handoff_note:
+              preferredTaskNote ||
               handoffNote ||
               `Automatic completion was blocked. Resolve the outstanding task requirements and continue from review.`,
             state: "blocked_on_agent",
@@ -1297,12 +1315,72 @@ function buildProviderAuthEnv(
   };
 }
 
+function choosePreferredTaskNote(
+  existingNote: string | null,
+  finalMessage: string | null
+): string | null {
+  const existing = String(existingNote || "").trim();
+  const finalText = String(finalMessage || "").trim();
+
+  if (!existing) {
+    return finalText || null;
+  }
+
+  if (!finalText) {
+    return existing;
+  }
+
+  const existingScore = scoreTaskOperatorNote(existing);
+  const finalScore = scoreTaskOperatorNote(finalText);
+
+  if (finalScore > existingScore) {
+    return finalText;
+  }
+
+  if (finalScore === existingScore && finalText.length > existing.length + 40) {
+    return finalText;
+  }
+
+  return existing;
+}
+
+function scoreTaskOperatorNote(note: string): number {
+  const normalized = String(note || "").trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  let score = Math.min(8, Math.floor(normalized.length / 80));
+
+  if (/\n[-*]\s/m.test(normalized)) {
+    score += 6;
+  }
+
+  if (/\b(what I still need|required now|needed now|needed later|optional but helpful)\b/i.test(
+    normalized
+  )) {
+    score += 8;
+  }
+
+  if (/\b(live at|https?:\/\/|github|vercel|token|credential|account)\b/i.test(normalized)) {
+    score += 3;
+  }
+
+  if (/^What I did:/i.test(normalized)) {
+    score -= 2;
+  }
+
+  return score;
+}
+
 export const processManagerTestHooks = {
   buildChildProcessEnv,
   buildPerTaskMcpEnv,
+  choosePreferredTaskNote,
   extractStructuredProcessOutput,
   isTransientProviderFailureDetail,
   resolveLaunchProviderForTask,
+  scoreTaskOperatorNote,
   shouldRetryTransientProviderFailure,
 };
 

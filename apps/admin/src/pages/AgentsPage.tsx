@@ -76,12 +76,14 @@ const PROVIDER_LABELS: Record<
     },
 };
 
-const MODEL_OPTIONS = [
+const OPENAI_MODEL_OPTIONS = [
   "gpt-5.4",
+  "gpt-5.4-mini",
   "gpt-5-codex",
-  "gpt-5-codex-mini",
   "gpt-5.3-codex",
+  "gpt-5.2-codex",
   "gpt-5.1-codex",
+  "gpt-5.1-codex-max",
   "gpt-5.1-codex-mini",
 ];
 const ANTHROPIC_MODEL_OPTIONS = ["haiku", "sonnet", "opus"];
@@ -126,6 +128,11 @@ const OPENAI_AUTH_STATUS_COLORS: Record<OpenAiDeviceAuthResponse["status"], stri
   starting: "#93c5fd",
   waiting: "#f59e0b",
 };
+
+function withCurrentModelOption(options: string[], currentValue: string): string[] {
+  const current = String(currentValue || "").trim();
+  return current && !options.includes(current) ? [current, ...options] : options;
+}
 
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -649,8 +656,8 @@ export function AgentsPage() {
                   : resolveAnthropicRole(role.id, role.model, role.effort);
               const modelOptions =
                 runtimeProvider?.activeProvider === "openai"
-                  ? MODEL_OPTIONS
-                  : ANTHROPIC_MODEL_OPTIONS;
+                  ? withCurrentModelOption(OPENAI_MODEL_OPTIONS, roleConfig.model)
+                  : withCurrentModelOption(ANTHROPIC_MODEL_OPTIONS, roleConfig.model);
 
               return (
                 <div
@@ -772,7 +779,10 @@ export function AgentsPage() {
                       }))
                     }
                   >
-                    {MODEL_OPTIONS.map((modelOption) => (
+                    {withCurrentModelOption(
+                      OPENAI_MODEL_OPTIONS,
+                      openaiModelMap[tier] || ""
+                    ).map((modelOption) => (
                       <option key={modelOption} value={modelOption}>
                         {modelOption}
                       </option>

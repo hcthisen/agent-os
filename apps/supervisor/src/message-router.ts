@@ -138,9 +138,23 @@ interface RelayRoutingDecision {
   objective: string;
   project: RelayProjectDecision | null;
   recommended_role: string | null;
+  requirements_walkthrough: boolean;
   requires_execution: boolean;
   teach_mode: boolean;
 }
+
+const REFERENCE_HOSTNAMES = new Set([
+  "bitbucket.org",
+  "developers.openai.com",
+  "docs.anthropic.com",
+  "docs.github.com",
+  "docs.n8n.io",
+  "github.com",
+  "gitlab.com",
+  "npmjs.com",
+  "openai.com",
+  "vercel.com",
+]);
 
 async function prepareRelayTaskRouting(
   message: InboundMessage,
@@ -154,6 +168,8 @@ async function prepareRelayTaskRouting(
     matchedSkills,
     teachMode
   );
+  const requirementsWalkthrough =
+    !teachMode && looksLikeRequirementsWalkthroughRequest(content);
   const project = await resolveRelayProject(
     message,
     history,
@@ -185,7 +201,8 @@ Routing reminders:
 - If the message begins with "Remember:", "Always:", "Rule:", or a "When...do..." procedure, treat it as explicit training. Also treat repeated requests, recurring scheduled work, and proven multi-step workflows as candidates for shared skills. Create a semantic memory for durable facts and constraints, or a shared skill for repeatable procedures, then confirm back to the operator what was stored.
 - If the message repeats work that previously failed or stalled, do not route it as a blind retry. Tell the next role to inspect prior handoff notes and choose a materially different approach.
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can reuse the existing procedure instead of recreating it.
-- When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role, reference the matched skill by name, and keep any operator reply to a brief acknowledgement instead of a false completion claim.
+- When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role and reference the matched skill by name when applicable.
+- If the operator explicitly asks what inputs, access, credentials, tools, accounts, or decisions you still need, answer that directly in the next operator-facing reply with a concrete checklist. Do not respond only with a vague planning acknowledgement.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
@@ -195,11 +212,23 @@ ${formatRelayProjectDecision(project)}
 
 Teach mode detected: ${teachMode ? "yes" : "no"}.
 Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
+Requirements walkthrough requested: ${requirementsWalkthrough ? "yes" : "no"}.
 Recommended downstream role: ${executionDecision.recommendedRole || "none"}.
 Routing requirement: ${
   executionDecision.requiresExecution
     ? "Create at least one downstream child task before completing this relay task."
     : "Direct answer is allowed when confidence is high."
+}
+
+Requirements-walkthrough handling:
+${
+  requirementsWalkthrough
+    ? `- The operator explicitly asked what else the system needs.
+- Your next operator-facing reply must list the missing inputs, credentials, tools, accounts, decisions, or repo checks concretely.
+- Group the list into what is required now, what will be needed later, and what is optional but helpful when possible.
+- If nothing else is needed, say that plainly instead of deferring.
+- You may still create downstream planning work if helpful, but do not hide behind "I'll make a plan and get back to you."`
+    : "- No explicit requirements walkthrough was requested."
 }`;
 
   return {
@@ -208,6 +237,7 @@ Routing requirement: ${
     objective,
     project,
     recommended_role: executionDecision.recommendedRole,
+    requirements_walkthrough: requirementsWalkthrough,
     requires_execution: executionDecision.requiresExecution,
     teach_mode: teachMode,
   };
@@ -215,11 +245,29 @@ Routing requirement: ${
 
 function buildRelayAcceptanceCriteria(relayRouting: RelayRoutingDecision): string[] {
   if (relayRouting.requires_execution) {
-    return [
+    const criteria = [
       "Message classified",
       "Durable initiative continued or attached when appropriate",
       "Appropriate downstream child task created",
       "Operator kept informed without falsely claiming the work is already complete",
+    ];
+
+    if (relayRouting.requirements_walkthrough) {
+      criteria.splice(
+        3,
+        0,
+        "Operator received a concrete checklist of missing inputs, tools, credentials, or decisions"
+      );
+    }
+
+    return criteria;
+  }
+
+  if (relayRouting.requirements_walkthrough) {
+    return [
+      "Message classified",
+      "Concrete requirements checklist sent to the operator",
+      "Response sent",
     ];
   }
 
@@ -295,14 +343,6 @@ function classifyRelayExecutionRequest(
     };
   }
 
-  if (!matchedSkills.length) {
-    return {
-      reason: "no_matched_skill",
-      recommendedRole: null,
-      requiresExecution: false,
-    };
-  }
-
   const imperativeLead =
     /^(please\s+)?(do|run|handle|follow|use|apply|execute|perform|send|deploy|fix|update|create|remove|delete|verify|check|review|build|make|treat)\b/i.test(
       content
@@ -317,9 +357,15 @@ function classifyRelayExecutionRequest(
   return {
     reason: requiresExecution
       ? imperativeLead || actionPhrase
-        ? "matched_skill_action_request"
-        : "matched_skill_non_question"
-      : "matched_skill_information_request",
+        ? matchedSkills.length
+          ? "matched_skill_action_request"
+          : "general_action_request"
+        : matchedSkills.length
+          ? "matched_skill_non_question"
+          : "general_non_question_request"
+      : matchedSkills.length
+        ? "matched_skill_information_request"
+        : "general_information_request",
     recommendedRole: requiresExecution
       ? determineRelayRecommendedRole(matchedSkills, content)
       : null,
@@ -365,13 +411,35 @@ function looksLikeInformationalRelayQuestion(content: string): boolean {
   );
 }
 
+function looksLikeRequirementsWalkthroughRequest(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (
+    /\b(what (?:other )?(?:information|info|details|inputs?|tools|access|accounts?|credentials?|tokens|services) do you (?:think you )?need|what else do you need(?: from me)?|what do you need from me|anything else you need|which (?:tools|accounts?|credentials?|tokens|access) do you need|list (?:what|everything) you need|tell me what you need|go through everything else you need|let'?s go through everything else you need)\b/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    /\b(before (?:you )?(?:start|begin|implement|build|ship)|to get started|to move forward)\b/i.test(
+      normalized
+    ) &&
+    /\b(what|which|list|tell me|do you need)\b/i.test(normalized)
+  );
+}
+
 function determineRelayRecommendedRole(
   matchedSkills: RelevantSkill[],
   content: string
 ): string {
   const requiresService =
     matchedSkills.some((skill) => skill.required_services.length > 0) ||
-    /\b(api key|credential|login|service connection|service slot|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain)\b/i.test(
+    /\b(api key|api keys|credential|credentials|login|oauth|token|tokens|service connection|service slot|github|gitlab|bitbucket|vercel|netlify|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain|account access|deployment account|repo access)\b/i.test(
       content
     );
 
@@ -798,7 +866,7 @@ function extractRelayProjectSignals(content: string): {
   hostnames: string[];
   slug: string | null;
 } {
-  const hostnames = extractHostnames(content);
+  const hostnames = extractInitiativeHostnames(content);
   const quotedLabels = [...String(content || "").matchAll(/["“]([^"\n]{3,60})["”]/g)]
     .map((match) => String(match[1] || "").trim())
     .filter(Boolean);
@@ -1091,17 +1159,99 @@ function levenshteinDistance(left: string, right: string): number {
 }
 
 function extractHostnames(value: string): string[] {
-  const matches = [
-    ...String(value || "").matchAll(
-      /\b(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi
-    ),
+  const hostnames = new Set<string>();
+  for (const hostname of extractUrlHostnames(value)) {
+    hostnames.add(hostname);
+  }
+
+  for (const match of String(value || "").matchAll(
+    /(?:^|[\s(])(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)(?=$|[\s),.:;!?])/gi
+  )) {
+    const rawHostname = String(match[1] || "").trim();
+    if (!rawHostname || /[A-Z]/.test(rawHostname)) {
+      continue;
+    }
+
+    const hostname = rawHostname.toLowerCase().replace(/^www\./, "");
+    if (hostname) {
+      hostnames.add(hostname);
+    }
+  }
+
+  return [...hostnames];
+}
+
+function extractInitiativeHostnames(value: string): string[] {
+  const hostnames = new Set<string>();
+
+  for (const hostname of extractUrlHostnames(value)) {
+    if (!isReferenceHostname(hostname)) {
+      hostnames.add(hostname);
+    }
+  }
+
+  for (const hostname of extractContextualBareHostnames(value)) {
+    if (!isReferenceHostname(hostname)) {
+      hostnames.add(hostname);
+    }
+  }
+
+  return [...hostnames];
+}
+
+function extractUrlHostnames(value: string): string[] {
+  const hostnames = new Set<string>();
+
+  for (const match of String(value || "").matchAll(/https?:\/\/[^\s)]+/gi)) {
+    try {
+      const hostname = new URL(match[0]).hostname.trim().toLowerCase().replace(/^www\./, "");
+      if (hostname) {
+        hostnames.add(hostname);
+      }
+    } catch {
+      // Ignore malformed URLs.
+    }
+  }
+
+  return [...hostnames];
+}
+
+function extractContextualBareHostnames(value: string): string[] {
+  const hostnames = new Set<string>();
+  const content = String(value || "").replace(/\s+/g, " ");
+  const patterns = [
+    /\b(?:site|website|domain|hostname|homepage|landing page|public site|live site|client site|store|portal|blog)\b[^.\n]{0,80}?\b(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi,
+    /\b(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b[^.\n]{0,80}?\b(?:site|website|domain|hostname|homepage|landing page|public site|live site|client site|store|portal|blog)\b/gi,
+    /\b(?:live at|hosted at|published at|available at|reachable at)\s+(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi,
   ];
 
-  return [...new Set(
-    matches
-      .map((match) => String(match[1] || "").trim().toLowerCase().replace(/^www\./, ""))
-      .filter(Boolean)
-  )];
+  for (const pattern of patterns) {
+    for (const match of content.matchAll(pattern)) {
+      const rawHostname = String(match[1] || "").trim();
+      if (!rawHostname || /[A-Z]/.test(rawHostname)) {
+        continue;
+      }
+
+      hostnames.add(rawHostname.toLowerCase().replace(/^www\./, ""));
+    }
+  }
+
+  return [...hostnames];
+}
+
+function isReferenceHostname(hostname: string): boolean {
+  const normalized = String(hostname || "").trim().toLowerCase().replace(/^www\./, "");
+  if (!normalized) {
+    return false;
+  }
+
+  if (REFERENCE_HOSTNAMES.has(normalized)) {
+    return true;
+  }
+
+  return Array.from(REFERENCE_HOSTNAMES).some(
+    (referenceHost) => normalized === referenceHost || normalized.endsWith(`.${referenceHost}`)
+  );
 }
 
 function readProjectMetadataStringArray(value: unknown): string[] {
@@ -1113,8 +1263,12 @@ function readProjectMetadataStringArray(value: unknown): string[] {
 }
 
 export const messageRouterTestHooks = {
+  classifyRelayExecutionRequest,
   extractHostnames,
+  extractInitiativeHostnames,
   extractRelayProjectSignals,
+  isReferenceHostname,
+  looksLikeRequirementsWalkthroughRequest,
   scoreRelayProjectMatch,
   normalizeRelayProjectSlug,
   shouldAutoCreateRelayProject,

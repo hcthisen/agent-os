@@ -60,6 +60,60 @@ test("relay project matching tolerates a probable hostname typo for the same ini
   assert.ok(score >= 6);
 });
 
+test("relay detects explicit requirements-walkthrough requests", () => {
+  assert.equal(
+    messageRouterTestHooks.looksLikeRequirementsWalkthroughRequest(
+      "What other information or tools do you think you need? Let's go through everything else you need."
+    ),
+    true
+  );
+
+  assert.equal(
+    messageRouterTestHooks.looksLikeRequirementsWalkthroughRequest(
+      "Please build a landing page and deploy it once the copy is ready."
+    ),
+    false
+  );
+});
+
+test("general execution requests still require action even without matched skills", () => {
+  const decision = messageRouterTestHooks.classifyRelayExecutionRequest(
+    "Please inspect this repository, identify what is missing, and tell me what credentials you still need.",
+    [],
+    false
+  );
+
+  assert.equal(decision.requiresExecution, true);
+  assert.equal(decision.reason, "general_action_request");
+});
+
+test("reference URLs do not become durable initiative hostnames", () => {
+  const hostnames = messageRouterTestHooks.extractInitiativeHostnames(
+    "Review https://github.com/Leonxlnx/taste-skill.git and tell me whether we should use it."
+  );
+
+  assert.deepEqual(hostnames, []);
+});
+
+test("technology names are not treated as persistent initiative hostnames", () => {
+  const signals = messageRouterTestHooks.extractRelayProjectSignals(
+    "I want to create a skill that builds websites using Next.js, Tailwind CSS, ShadCN, and Vercel."
+  );
+
+  assert.deepEqual(signals.hostnames, []);
+});
+
+test("credentialed execution requests recommend sage before builder", () => {
+  const decision = messageRouterTestHooks.classifyRelayExecutionRequest(
+    "Please review the repository, tell me what GitHub token and Vercel access you still need, and stage the work.",
+    [],
+    false
+  );
+
+  assert.equal(decision.requiresExecution, true);
+  assert.equal(decision.recommendedRole, "sage");
+});
+
 test("task continuation summary pushes adaptation and skill evolution", () => {
   const summary = taskPollerTestHooks.buildTaskContinuationSummary(
     {

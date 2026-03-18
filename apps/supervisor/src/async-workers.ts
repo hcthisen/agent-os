@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import { sendAdminOnlyMessage } from "./operator-delivery.js";
+import { sendOperatorMessage } from "./operator-delivery.js";
 import { getServiceRegistryRuntime } from "./service-registry.js";
 
 const EMBEDDING_BATCH_SIZE = 10;
@@ -569,7 +569,7 @@ async function sendOpenAiServiceNotification(args: {
       ? "service_key_needed"
       : "service_error";
 
-  const delivery = await sendAdminOnlyMessage({
+  const delivery = await sendOperatorMessage({
     content: args.content,
     metadata: {
       notification_key: args.notificationKey,
@@ -586,11 +586,15 @@ async function sendOpenAiServiceNotification(args: {
   }
 
   const detail = {
-    delivery: "admin_outbound",
+    delivery:
+      delivery.telegramDelivery === "telegram_sent"
+        ? "admin_and_telegram"
+        : "admin_outbound",
     notification_key: args.notificationKey,
     notification_type: notificationType,
     service_name: OPENAI_SERVICE_NAME,
     service_status: args.service.status,
+    telegram_delivery: delivery.telegramDelivery,
   };
 
   const { error } = await db.from("events").insert([

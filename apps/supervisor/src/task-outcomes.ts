@@ -86,14 +86,6 @@ export async function monitorTaskOutcomes(): Promise<void> {
   for (const task of (tasks || []) as CompletedTask[]) {
     await maybeAutocaptureReusableSkill(task);
 
-    if (!task.parent_task_id) {
-      continue;
-    }
-
-    if (!(await isLeafTask(task.id))) {
-      continue;
-    }
-
     const rootTask = await findRootTask(task);
     if (!rootTask) {
       continue;
@@ -107,15 +99,46 @@ export async function monitorTaskOutcomes(): Promise<void> {
     }
 
     const requestTasks = await loadRelayRequestTreeTasks(rootTask.id);
-    if (
-      !requestTasks.length ||
-      requestTasks.some((requestTask) => requestTask.state !== "completed")
-    ) {
+    if (!requestTasks.length) {
+      continue;
+    }
+
+    const requestComplete = requestTasks.every(
+      (requestTask) => requestTask.state === "completed"
+    );
+    const deliveryTarget = await resolveRootRequestDeliveryTarget(rootTask.id);
+
+    if (!requestComplete) {
+      const progressNotificationKey = `request-progress:${task.id}`;
+      if (
+        shouldSendInterimProgressUpdate(task, rootTask, requestTasks) &&
+        !(await hasAgentAuthoredOutboundMessage(requestTasks.map((entry) => entry.id))) &&
+        !(await notificationAlreadySent(rootTask.id, progressNotificationKey))
+      ) {
+        const artifactSummary = (
+          await loadTaskArtifactSummaries([task.id])
+        ).get(task.id);
+        const content = formatCompletionMessage(
+          task,
+          rootTask,
+          false,
+          artifactSummary || null
+        );
+        await sendOperatorProgress(
+          rootTask.id,
+          progressNotificationKey,
+          content,
+          deliveryTarget
+        );
+      }
       continue;
     }
 
     const notificationKey = `request-completion:${rootTask.id}`;
-    if (await notificationAlreadySent(rootTask.id, notificationKey)) {
+    if (
+      (await hasAgentAuthoredOutboundMessage(requestTasks.map((entry) => entry.id))) ||
+      (await notificationAlreadySent(rootTask.id, notificationKey))
+    ) {
       continue;
     }
 
@@ -129,7 +152,6 @@ export async function monitorTaskOutcomes(): Promise<void> {
       true,
       completionCandidate.artifactSummary
     );
-    const deliveryTarget = await resolveRootRequestDeliveryTarget(rootTask.id);
     const resultPageUrl = await maybePublishOperatorResultPage({
       deliveryChannel: deliveryTarget.channel,
       requestTasks,
@@ -150,21 +172,6 @@ export async function monitorTaskOutcomes(): Promise<void> {
       deliveryTarget
     );
   }
-}
-
-async function isLeafTask(taskId: string): Promise<boolean> {
-  const db = getDb();
-  const { count, error } = await db
-    .from("tasks")
-    .select("id", { count: "exact", head: true })
-    .eq("parent_task_id", taskId);
-
-  if (error) {
-    console.error(`Failed to inspect child tasks for ${taskId}:`, error);
-    return false;
-  }
-
-  return !count;
 }
 
 async function findRootTask(task: CompletedTask): Promise<RootTask | null> {
@@ -198,6 +205,60 @@ async function findRootTask(task: CompletedTask): Promise<RootTask | null> {
   }
 
   return current;
+}
+
+function shouldSendInterimProgressUpdate(
+  task: CompletedTask,
+  rootTask: RootTask,
+  requestTasks: CompletedTask[]
+): boolean {
+  if (task.state !== "completed") {
+    return false;
+  }
+
+  if (!String(task.last_handoff_note || "").trim()) {
+    return false;
+  }
+
+  if (task.id === rootTask.id) {
+    return (
+      countRequestTreeChildren(rootTask.id, requestTasks) === 0 ||
+      looksLikeRequirementsChecklist(task.last_handoff_note || "")
+    );
+  }
+
+  if (["relay", "sage"].includes(task.assigned_role)) {
+    return true;
+  }
+
+  return countRequestTreeChildren(task.id, requestTasks) > 0;
+}
+
+function countRequestTreeChildren(
+  taskId: string,
+  requestTasks: CompletedTask[]
+): number {
+  return requestTasks.filter((task) => task.parent_task_id === taskId).length;
+}
+
+function looksLikeRequirementsChecklist(note: string): boolean {
+  const normalized = String(note || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return /\b(required now|needed now|need from you|what I still need|credentials|tokens|accounts|optional but helpful|needed later|required later)\b/i.test(
+    normalized
+  );
+}
+
+function trimChecklistMessage(value: string, maxLength = 900): string {
+  const normalized = String(value || "").replace(/\r/g, "").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 3).trim()}...`;
 }
 
 async function loadRelayRequestTreeTasks(rootTaskId: string): Promise<CompletedTask[]> {
@@ -260,7 +321,6 @@ async function notificationAlreadySent(
   const { count, error } = await db
     .from("events")
     .select("id", { count: "exact", head: true })
-    .eq("event_type", "operator.completion.sent")
     .eq("scope_type", "task")
     .eq("scope_id", taskId)
     .contains("detail", { notification_key: notificationKey });
@@ -270,6 +330,28 @@ async function notificationAlreadySent(
       `Failed to check completion notification status for task ${taskId}:`,
       error
     );
+    return false;
+  }
+
+  return Boolean(count && count > 0);
+}
+
+async function hasAgentAuthoredOutboundMessage(taskIds: string[]): Promise<boolean> {
+  const filteredTaskIds = [...new Set(taskIds.filter(Boolean))];
+  if (!filteredTaskIds.length) {
+    return false;
+  }
+
+  const db = getDb();
+  const { count, error } = await db
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("direction", "outbound")
+    .neq("sender", "system")
+    .in("task_id", filteredTaskIds);
+
+  if (error) {
+    console.error("Failed to inspect prior outbound operator replies:", error);
     return false;
   }
 
@@ -308,6 +390,10 @@ function formatCompletionMessage(
   rootRequestComplete = false,
   artifactSummary: string | null = null
 ): string {
+  if (looksLikeRequirementsChecklist(task.last_handoff_note || "")) {
+    return trimChecklistMessage(task.last_handoff_note || "");
+  }
+
   const outcome = summarizeOutcome(
     task,
     task.last_handoff_note,
@@ -905,10 +991,44 @@ async function sendOperatorCompletion(
   content: string,
   deliveryTarget: DeliveryTarget
 ): Promise<void> {
+  await sendOperatorNotification(
+    taskId,
+    notificationKey,
+    content,
+    deliveryTarget,
+    "task_completion",
+    "operator.completion.sent"
+  );
+}
+
+async function sendOperatorProgress(
+  taskId: string,
+  notificationKey: string,
+  content: string,
+  deliveryTarget: DeliveryTarget
+): Promise<void> {
+  await sendOperatorNotification(
+    taskId,
+    notificationKey,
+    content,
+    deliveryTarget,
+    "task_progress",
+    "operator.progress.sent"
+  );
+}
+
+async function sendOperatorNotification(
+  taskId: string,
+  notificationKey: string,
+  content: string,
+  deliveryTarget: DeliveryTarget,
+  notificationType: "task_completion" | "task_progress",
+  eventType: "operator.completion.sent" | "operator.progress.sent"
+): Promise<void> {
   const db = getDb();
   const baseMetadata = {
     notification_key: notificationKey,
-    notification_type: "task_completion",
+    notification_type: notificationType,
     operator_visible: true,
     root_request_channel: deliveryTarget.channel,
     ...(deliveryTarget.sourceMessageId
@@ -943,7 +1063,7 @@ async function sendOperatorCompletion(
   const { error: eventError } = await db.from("events").insert({
     trace_id: null,
     agent_id: null,
-    event_type: "operator.completion.sent",
+    event_type: eventType,
     severity: "info",
     scope_type: "task",
     scope_id: taskId,
@@ -954,7 +1074,7 @@ async function sendOperatorCompletion(
           ? "telegram"
           : "admin_outbound",
       notification_key: notificationKey,
-      notification_type: "task_completion",
+      notification_type: notificationType,
     },
   });
 
@@ -968,9 +1088,12 @@ async function sendOperatorCompletion(
 
 export const taskOutcomeTestHooks = {
   chooseOperatorDeliveryTarget,
+  formatCompletionMessage,
   formatDeliveredCompletionMessage,
+  looksLikeRequirementsChecklist,
   normalizeArtifactSummary,
   pickBestCompletionCandidate,
+  shouldSendInterimProgressUpdate,
   summarizeArtifactDocument,
   shouldPreferArtifactSummary,
   summarizeOutcome,
