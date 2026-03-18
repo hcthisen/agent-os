@@ -252,7 +252,7 @@ function looksLikeRequirementsChecklist(note: string): boolean {
   );
 }
 
-function trimChecklistMessage(value: string, maxLength = 900): string {
+function trimChecklistMessage(value: string, maxLength = 3500): string {
   const normalized = String(value || "").replace(/\r/g, "").trim();
   if (normalized.length <= maxLength) {
     return normalized;
