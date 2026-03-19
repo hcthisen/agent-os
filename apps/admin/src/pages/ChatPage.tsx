@@ -81,6 +81,27 @@ function readSkillDraft(message: MessageRecord): {
   };
 }
 
+function readDeliveryPageLink(message: MessageRecord): { href: string; title: string } | null {
+  const href =
+    (typeof message.metadata?.delivery_page_url === "string" &&
+      message.metadata.delivery_page_url) ||
+    (typeof message.metadata?.delivery_page_path === "string" &&
+      message.metadata.delivery_page_path) ||
+    "";
+
+  if (!href) {
+    return null;
+  }
+
+  return {
+    href,
+    title:
+      (typeof message.metadata?.delivery_page_title === "string" &&
+        message.metadata.delivery_page_title) ||
+      "Open full result",
+  };
+}
+
 export function ChatPage({
   onOpenTask,
 }: {
@@ -310,6 +331,7 @@ export function ChatPage({
         </div>
         {messages.map((message) => {
           const linkedTaskId = resolveLinkedTaskId(message);
+          const deliveryPageLink = readDeliveryPageLink(message);
           const isTeachMode = message.metadata?.teach_mode === true;
           const skillDraft = readSkillDraft(message);
           const skillDraftId = readSkillDraftId(message);
@@ -367,6 +389,24 @@ export function ChatPage({
               <div style={{ color: "#e5e7eb", fontSize: 14 }}>
                 {renderMarkdown(message.content)}
               </div>
+              {deliveryPageLink && (
+                <div style={{ marginTop: 12 }}>
+                  <a
+                    href={deliveryPageLink.href}
+                    rel="noreferrer"
+                    style={{
+                      ...shellStyles.button,
+                      display: "inline-flex",
+                      fontSize: 12,
+                      padding: "6px 10px",
+                      textDecoration: "none",
+                    }}
+                    target="_blank"
+                  >
+                    {deliveryPageLink.title}
+                  </a>
+                </div>
+              )}
               {skillDraft && (
                 <div
                   style={{

@@ -46,6 +46,10 @@ import {
   serviceRequire,
 } from "./tools/service_require.js";
 import {
+  serviceRequestDef,
+  serviceRequest,
+} from "./tools/service_request.js";
+import {
   scheduleUpdateDef,
   scheduleUpdate,
 } from "./tools/schedule_update.js";
@@ -77,6 +81,7 @@ const tools = [
   observabilitySnapshotDef,
   serviceControlDef,
   serviceRequireDef,
+  serviceRequestDef,
   contextRefreshDef,
   messageSendDef,
   scheduleUpdateDef,
@@ -106,6 +111,7 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   observability_snapshot: observabilitySnapshot,
   service_control: serviceControl,
   service_require: serviceRequire,
+  service_request: serviceRequest,
   context_refresh: contextRefresh,
   message_send: messageSend,
   schedule_update: scheduleUpdate,

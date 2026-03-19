@@ -1,7 +1,7 @@
 FROM node:20-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates chromium docker.io && \
+    apt-get install -y --no-install-recommends ca-certificates chromium docker.io git ripgrep && \
     rm -rf /var/lib/apt/lists/*
 
 # Install both supported coding CLIs.

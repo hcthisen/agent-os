@@ -39,6 +39,26 @@ test("generic completions still use handoff text when no report artifact summary
   assert.match(String(outcome), /live at https:\/\/dploy\.cc\//i);
 });
 
+test("dry-run handoffs mention that the example is included", () => {
+  const task = {
+    objective: "Set up recurring owner brief schedule and dry-run format.",
+    title: "Set up recurring owner brief schedule and dry-run format",
+  };
+  const note = [
+    "Stored the shared skill and configured the recurring schedule.",
+    "",
+    "Dry-run example:",
+    "```text",
+    "What changed last week",
+    "- The recurring schedule is enabled.",
+    "```",
+  ].join("\n");
+
+  const outcome = taskOutcomeTestHooks.summarizeOutcome(task, note, "architect", null);
+
+  assert.match(String(outcome), /dry-run example is included/i);
+});
+
 test("request completion prefers the richer report-producing task over a generic reviewer leaf", () => {
   const builderTask = {
     assigned_role: "builder",
@@ -131,7 +151,10 @@ test("delivered completion message appends a full result link and keeps a compac
     "Done. Review complete. This is a long result summary that should still keep the main point visible in chat while moving the full report into a richer result page for the operator.";
   const delivered = taskOutcomeTestHooks.formatDeliveredCompletionMessage(
     content,
-    "https://admin.example.com/deliveries/task-123/token-456",
+    {
+      path: "/deliveries/task-123/token-456",
+      url: "https://admin.example.com/deliveries/task-123/token-456",
+    },
     "telegram"
   );
 
@@ -139,7 +162,23 @@ test("delivered completion message appends a full result link and keeps a compac
   assert.match(delivered, /^Done\. Review complete\./);
 });
 
-test("interim progress notifications are sent for completed planning tasks with handoff notes", () => {
+test("admin completion messages stay concise and rely on metadata-driven result links", () => {
+  const content =
+    "Done. Review complete. This is a long result summary that should stay readable in chat while the full report is opened from the admin result page.";
+  const delivered = taskOutcomeTestHooks.formatDeliveredCompletionMessage(
+    content,
+    {
+      path: "/deliveries/task-123/token-456",
+      url: null,
+    },
+    "admin_chat"
+  );
+
+  assert.doesNotMatch(delivered, /Full result:/);
+  assert.match(delivered, /^Done\. Review complete\./);
+});
+
+test("completed planning tasks with downstream execution do not emit synthesized interim progress", () => {
   const rootTask = {
     assigned_role: "relay",
     id: "relay-root",
@@ -188,8 +227,263 @@ test("interim progress notifications are sent for completed planning tasks with 
       rootTask,
       [sageTask, builderTask]
     ),
+    false
+  );
+});
+
+test("blocked relay updates prefer the freshest actionable blocked note over a stale root checklist", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    id: "relay-root",
+    parent_task_id: null,
+    title: "Process message: Set up a missed-call workflow...",
+  };
+  const rootBlockedTask = {
+    assigned_role: "relay",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "relay-root",
+    last_handoff_note: [
+      "Required now:",
+      "1. GoHighLevel API key or private integration token.",
+      "2. Exact pipeline name and stage for missed-call leads.",
+      "Optional but helpful:",
+      "- Final SMS wording approval if they want to review the copy.",
+    ].join("\n"),
+    objective: "Process inbound message and coordinate the missed-call workflow setup.",
+    parent_task_id: null,
+    project_id: null,
+    simulation_only: false,
+    state: "blocked_on_agent",
+    title: "Process message: Set up a missed-call workflow...",
+    updated_at: "2026-03-19T10:16:00.000Z",
+  };
+  const childBlockedTask = {
+    assigned_role: "sage",
+    attempt_count: 0,
+    claimed_by: "sage-1",
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "sage-task",
+    last_handoff_note: [
+      "Need from you:",
+      "- GoHighLevel account details.",
+      "- The desired after-hours behavior.",
+    ].join("\n"),
+    objective: "Plan the GoHighLevel missed-call workflow.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "blocked_on_agent",
+    title: "Plan the GoHighLevel missed-call workflow",
+    updated_at: "2026-03-19T10:16:10.000Z",
+  };
+
+  const candidate = taskOutcomeTestHooks.chooseBlockedRequestUpdateCandidate(
+    rootTask,
+    [rootBlockedTask, childBlockedTask]
+  );
+
+  assert.equal(candidate?.id, "sage-task");
+});
+
+test("blocked relay updates still prefer the root checklist when it is the newest blocker", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    id: "relay-root",
+    parent_task_id: null,
+    title: "Process message: Set up a missed-call workflow...",
+  };
+  const rootBlockedTask = {
+    assigned_role: "relay",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "relay-root",
+    last_handoff_note: [
+      "Required now:",
+      "- GoHighLevel API key or private integration token.",
+      "- Exact pipeline name and stage for missed-call leads.",
+      "Optional but helpful:",
+      "- Final SMS wording approval if they want to review the copy.",
+    ].join("\n"),
+    objective: "Process inbound message and coordinate the missed-call workflow setup.",
+    parent_task_id: null,
+    project_id: null,
+    simulation_only: false,
+    state: "blocked_on_agent",
+    title: "Process message: Set up a missed-call workflow...",
+    updated_at: "2026-03-19T10:16:30.000Z",
+  };
+  const childBlockedTask = {
+    assigned_role: "sage",
+    attempt_count: 0,
+    claimed_by: "sage-1",
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "sage-task",
+    last_handoff_note: [
+      "Need from you:",
+      "- GoHighLevel account details.",
+      "- The desired after-hours behavior.",
+    ].join("\n"),
+    objective: "Plan the GoHighLevel missed-call workflow.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "blocked_on_agent",
+    title: "Plan the GoHighLevel missed-call workflow",
+    updated_at: "2026-03-19T10:16:10.000Z",
+  };
+
+  const candidate = taskOutcomeTestHooks.chooseBlockedRequestUpdateCandidate(
+    rootTask,
+    [rootBlockedTask, childBlockedTask]
+  );
+
+  assert.equal(candidate?.id, "relay-root");
+});
+
+test("blocked relay updates also recognize blocked_on_human requirement notes", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    id: "relay-root",
+    parent_task_id: null,
+    title: "Process message: Set up a missed-call workflow...",
+  };
+  const rootBlockedTask = {
+    assigned_role: "relay",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "relay-root",
+    last_handoff_note: [
+      "What I need now:",
+      "- Add the GoHighLevel API key in Service Connections.",
+      "- Confirm the connected account is the right one.",
+      "",
+      "What I'll need later:",
+      "- The exact pipeline and stage.",
+    ].join("\n"),
+    objective: "Process inbound message and coordinate the missed-call workflow setup.",
+    parent_task_id: null,
+    project_id: null,
+    simulation_only: false,
+    state: "blocked_on_human",
+    title: "Process message: Set up a missed-call workflow...",
+    updated_at: "2026-03-19T10:16:00.000Z",
+  };
+
+  const candidate = taskOutcomeTestHooks.chooseBlockedRequestUpdateCandidate(
+    rootTask,
+    [rootBlockedTask]
+  );
+
+  assert.equal(candidate?.id, "relay-root");
+  assert.equal(
+    taskOutcomeTestHooks.looksLikeRequirementsChecklist(
+      rootBlockedTask.last_handoff_note
+    ),
     true
   );
+});
+
+test("blocked checklist formatting strips internal relay preambles before explicit headings", () => {
+  const formatted = taskOutcomeTestHooks.formatBlockedChecklistMessage(
+    [
+      "Classified the inbound admin_chat message as a new execution request for a 2-page prospect demo site.",
+      "Created downstream planning task for sage.",
+      "Required now:",
+      "- Add GitHub access.",
+      "- Add Vercel access.",
+      "- Allow the downstream planning task to define the implementation approach.",
+      "",
+      "Optional but helpful:",
+      "- Add Gemini if replacement visuals should be generated.",
+    ].join("\n")
+  );
+
+  assert.doesNotMatch(formatted, /Classified the inbound admin_chat message/i);
+  assert.match(formatted, /^Required now:/i);
+  assert.match(formatted, /Add GitHub access/i);
+  assert.doesNotMatch(formatted, /Allow the downstream planning task/i);
+  assert.match(formatted, /Optional but helpful:/i);
+});
+
+test("blocked checklist formatting converts internal relay checklist guidance into clean sections", () => {
+  const formatted = taskOutcomeTestHooks.formatBlockedChecklistMessage(
+    "Classified the inbound admin_chat message as a new execution request for a 2-page prospect demo site. Attached to existing project aalborg-elservice.dk. Created downstream planning task db3048ba-c1d4-4c9b-8d1a-53d09d1dc166 for sage to produce a staged implementation plan. Confirmed missing required service connection Gemini is blocked on API key setup. Operator-facing checklist should ask for GitHub access/repo target and Vercel access later, while noting Gemini is required now for any replacement visuals."
+  );
+
+  assert.doesNotMatch(formatted, /Classified the inbound admin_chat message/i);
+  assert.doesNotMatch(formatted, /Operator-facing checklist should ask/i);
+  assert.match(formatted, /^Required now:/i);
+  assert.match(formatted, /Add Gemini in Service Connections \(API key setup\)/i);
+  assert.match(formatted, /Needed later:/i);
+  assert.match(formatted, /GitHub access\/repo target/i);
+  assert.match(formatted, /Vercel access/i);
+});
+
+test("blocked request updates mention when downstream execution is already underway", () => {
+  const rootTask = {
+    assigned_role: "relay",
+    attempt_count: 0,
+    claimed_by: "relay-1",
+    completed_at: "2026-03-19T18:40:00.000Z",
+    customer_id: null,
+    department_id: null,
+    id: "relay-root",
+    last_handoff_note: [
+      "Required now:",
+      "- Nothing else from you to start.",
+      "",
+      "Needed later:",
+      "- Brand assets.",
+    ].join("\n"),
+    objective: "Process inbound message.",
+    parent_task_id: null,
+    project_id: null,
+    simulation_only: false,
+    state: "blocked_on_agent",
+    title: "Process message: Build the prospect demo...",
+    updated_at: "2026-03-19T18:40:00.000Z",
+  };
+  const builderTask = {
+    assigned_role: "builder",
+    attempt_count: 0,
+    claimed_by: "builder-1",
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "builder-task",
+    last_handoff_note: null,
+    objective: "Build the demo.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "running",
+    title: "Build Aalborg El-service demo site",
+    updated_at: "2026-03-19T18:40:05.000Z",
+  };
+
+  const formatted = taskOutcomeTestHooks.formatBlockedRequestUpdateMessage(
+    rootTask,
+    [rootTask, builderTask]
+  );
+
+  assert.match(formatted, /^Execution status:/);
+  assert.match(formatted, /Builder work has already started/i);
+  assert.match(formatted, /Build Aalborg El-service demo site/i);
+  assert.match(formatted, /Required now:/i);
 });
 
 test("relay root progress is suppressed when downstream planning work already exists", () => {
@@ -313,5 +607,57 @@ test("relay root progress is allowed when the relay note already contains a requ
       null
     ),
     /Required now:|What I still need now:/i
+  );
+});
+
+test("completed sage tasks do not emit synthesized interim progress updates", () => {
+  const sageTask = {
+    assigned_role: "sage",
+    attempt_count: 0,
+    claimed_by: "sage-1",
+    completed_at: "2026-03-19T13:40:36.000Z",
+    customer_id: null,
+    department_id: null,
+    id: "sage-task",
+    last_handoff_note:
+      "Planning is complete. See https://marketplace.gohighlevel.com/docs/Authorization/PrivateIntegrationsToken/index.html for the auth reference.",
+    objective: "Plan the GoHighLevel workflow.",
+    parent_task_id: "relay-root",
+    project_id: null,
+    simulation_only: false,
+    state: "completed",
+    title: "Plan workflow",
+    updated_at: "2026-03-19T13:40:36.000Z",
+  };
+  const builderTask = {
+    assigned_role: "builder",
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: "builder-task",
+    last_handoff_note: null,
+    objective: "Implement the workflow.",
+    parent_task_id: "sage-task",
+    project_id: null,
+    simulation_only: false,
+    state: "running",
+    title: "Implement workflow",
+    updated_at: "2026-03-19T13:40:37.000Z",
+  };
+
+  assert.equal(
+    taskOutcomeTestHooks.shouldSendInterimProgressUpdate(
+      sageTask,
+      {
+        assigned_role: "relay",
+        id: "relay-root",
+        parent_task_id: null,
+        title: "Process message: GoHighLevel workflow...",
+      },
+      [sageTask, builderTask]
+    ),
+    false
   );
 });

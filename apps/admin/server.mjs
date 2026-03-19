@@ -2,10 +2,11 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access } from "node:fs/promises";
 import http from "node:http";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, resolve } from "node:path";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const DIST_DIR = "/app/dist";
+const WORKSPACES_DIR = "/app/workspaces";
 const POSTGREST_URL = (process.env.POSTGREST_URL || "http://rest:3000").replace(
   /\/+$/,
   ""
@@ -152,13 +153,17 @@ function chunkArray(values, chunkSize) {
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
+  ".webp": "image/webp",
 };
 
 const TRANSIENT_FETCH_ERROR_CODES = new Set([
@@ -195,7 +200,7 @@ function sendHtml(res, status, html, headers = {}) {
   res.end(html);
 }
 
-function calculateNextRun(cronExpr) {
+function calculateNextRun(cronExpr, timezone) {
   const parts = String(cronExpr || "").trim().split(/\s+/);
   if (parts.length !== 5) {
     return new Date(Date.now() + 5 * 60 * 1000).toISOString();
@@ -207,6 +212,10 @@ function calculateNextRun(cronExpr) {
     if (!Number.isNaN(interval) && interval > 0) {
       return new Date(Date.now() + interval * 60 * 1000).toISOString();
     }
+  }
+
+  if (typeof timezone === "string" && timezone.trim()) {
+    return new Date(Date.now() + 60 * 60 * 1000).toISOString();
   }
 
   return new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -616,7 +625,38 @@ async function loadMessagesFeed(options = {}) {
       ? data.filter((message) => !shouldHideAdminMessage(message))
       : data || [];
 
-  return Array.isArray(visibleData) ? [...visibleData].reverse() : visibleData;
+  return Array.isArray(visibleData)
+    ? [...visibleData].reverse().map(normalizeOperatorVisibleMessage)
+    : visibleData;
+}
+
+function normalizeOperatorVisibleMessage(message) {
+  if (!message || typeof message !== "object") {
+    return message;
+  }
+
+  const sender = normalizeOperatorVisibleSender(message.sender);
+  if (sender === message.sender) {
+    return message;
+  }
+
+  return {
+    ...message,
+    sender,
+  };
+}
+
+function normalizeOperatorVisibleSender(sender) {
+  const normalized = normalizeString(sender);
+  if (!normalized) {
+    return sender;
+  }
+
+  if (/^relay(?:[-_ ].+)?$/i.test(normalized)) {
+    return "relay";
+  }
+
+  return sender;
 }
 
 async function loadResultDeliveryArtifact(taskId) {
@@ -631,6 +671,25 @@ async function loadResultDeliveryArtifact(taskId) {
   }).catch(() => []);
 
   return rows?.[0] || null;
+}
+
+function isAllowedDeliveryTask(metadata, taskId) {
+  const allowedTaskIds = Array.isArray(metadata?.allowed_task_ids)
+    ? metadata.allowed_task_ids
+    : [];
+  return allowedTaskIds.some((value) => String(value || "") === String(taskId || ""));
+}
+
+function resolveWorkspaceFilePath(taskId, relativePath) {
+  const workspaceRoot = resolve(WORKSPACES_DIR, String(taskId || ""));
+  const absolutePath = resolve(workspaceRoot, String(relativePath || ""));
+  const normalizedRoot = workspaceRoot.endsWith("\\") || workspaceRoot.endsWith("/")
+    ? workspaceRoot
+    : `${workspaceRoot}/`;
+  if (absolutePath !== workspaceRoot && !absolutePath.startsWith(normalizedRoot)) {
+    return null;
+  }
+  return absolutePath;
 }
 
 function buildFallbackResultDeliveryHtml(taskId, artifact) {
@@ -1454,6 +1513,30 @@ async function createRelayTaskForInboundMessage(message) {
   const relayTask = rows?.[0] || null;
   if (relayTask && relayRouting.requires_execution) {
     await createRelayExecutionRequirement(relayTask.id, relayRouting);
+    if ((relayRouting.missing_requested_services || []).length > 0) {
+      await createRelayRequestedServiceRequirements(
+        relayTask.id,
+        relayRouting.missing_requested_services
+      );
+    }
+  }
+
+  if (relayTask && message.channel === "admin_chat") {
+    await postAdminRelayMessage({
+      content: relayRouting.requires_execution
+        ? "I’ve got this. I’m routing the work now and I’ll keep you posted as it moves."
+        : "I’ve got this and I’m handling it now.",
+      metadata: {
+        notification_key: `request-received:${relayTask.id}`,
+        notification_type: "task_progress",
+        operator_visible: true,
+        relay_task_id: relayTask.id,
+        relay_update_kind: "received",
+        root_request_channel: message.channel,
+        source_message_id: message.currentMessageId || null,
+      },
+      taskId: relayTask.id,
+    });
   }
 
   return relayTask
@@ -1467,7 +1550,11 @@ async function createRelayTaskForInboundMessage(message) {
 async function prepareRelayTaskRouting(message) {
   const content = normalizeString(message.content);
   const teachMode = detectRelayTeachMode(content);
-  const requirementsWalkthrough = looksLikeRequirementsWalkthroughRequest(content);
+  const missingRequestedServices = await loadRelayRequestedServiceNeeds(content);
+  const requirementsWalkthrough =
+    looksLikeRequirementsWalkthroughRequest(content) ||
+    missingRequestedServices.length > 0;
+  const recurringAutomationSetup = looksLikeRecurringAutomationSetup(content);
   const history = await loadRecentConversationMessages(message);
   const matchedSkills = await loadRelayMatchedSkills(content);
   const executionDecision = classifyRelayExecutionRequest(
@@ -1475,6 +1562,13 @@ async function prepareRelayTaskRouting(message) {
     matchedSkills,
     teachMode
   );
+  const mediaProductionRequest = looksLikeMediaProductionRequest(content);
+  const recommendedRole =
+    executionDecision.requiresExecution &&
+    mediaProductionRequest &&
+    missingRequestedServices.length === 0
+      ? "builder"
+      : executionDecision.recommendedRole;
   const project = await resolveRelayProject(
     message,
     history,
@@ -1507,6 +1601,9 @@ Routing reminders:
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can reuse the existing procedure instead of recreating it.
 - When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role and reference the matched skill by name when applicable.
 - If the operator explicitly asks what inputs, access, credentials, tools, accounts, or decisions you still need, answer that directly in the next operator-facing reply with a concrete checklist. Do not respond only with a vague planning acknowledgement.
+- Default operator-facing delivery back to the same channel the request came from unless the operator explicitly asked for a different destination.
+- If a recurring request says "my time" and there is no stored operator timezone, use the runtime timezone as the default assumption and say so instead of blocking just to ask.
+- If the operator explicitly asks you to set up a recurring schedule or automation, that counts as authorization to enable it once real blockers are cleared. Do not create a confirmation-only follow-up just to repeat the same source channel or timezone assumption.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
@@ -1518,6 +1615,7 @@ Teach mode detected: ${teachMode ? "yes" : "no"}.
 Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
 Requirements walkthrough requested: ${requirementsWalkthrough ? "yes" : "no"}.
 Recommended downstream role: ${executionDecision.recommendedRole || "none"}.
+Effective downstream role: ${recommendedRole || "none"}.
 Routing requirement: ${
   executionDecision.requiresExecution
     ? "Create at least one downstream child task before completing this relay task."
@@ -1533,14 +1631,48 @@ ${
 - If nothing else is needed, say that plainly instead of deferring.
 - You may still create downstream planning work if helpful, but do not hide behind "I'll make a plan and get back to you."`
     : "- No explicit requirements walkthrough was requested."
+}
+
+Requested-service preflight:
+${
+  missingRequestedServices.length > 0
+    ? `${missingRequestedServices
+        .map(
+          (service) =>
+            `- Missing required service now: ${service.display_name} (${service.service_name}) because ${service.reason}.`
+        )
+        .join("\n")}
+- Your next operator-facing reply must call these out as required now. Do not say that nothing else is required to start while these requested production services are missing.
+- Create or confirm the Service Connections placeholders for the missing services before you finish the relay task.`
+    : mediaProductionRequest
+      ? `- The requested production media services appear to be available already.
+- Route this into live asset creation, not a planning-only memo.
+- Do not create a downstream task that only drafts concepts, prompt starters, or scripts when the operator asked for generated media and the services are active.
+- The downstream task should call the active media service tools, generate the requested outputs, save the resulting files in the workspace, and register usable artifacts for operator delivery.
+- If live generation fails, report the concrete service or API blocker instead of silently downgrading the request into an ideation-only deliverable.`
+      : "- No missing requested production services were inferred from the message."
+}
+
+Recurring automation handling:
+${
+  recurringAutomationSetup
+    ? `- The operator asked for live recurring execution, not a design memo.
+- Use the relay task for intake, dry-run examples, and operator updates; put the privileged live schedule or automation mutation in the downstream execution task instead of trying to finish it inside relay.
+- Create downstream work that configures or updates the actual live schedule or automation in this run when the runtime and tools support it.
+- A dry-run example, reusable skill, or implementation note may accompany the work, but none of those replace the live enabled schedule or automation.
+- Only stop at a blocker when a real missing service, credential, policy decision, or business input remains after applying the default source-channel and timezone assumptions already described above.
+- If the recurring work is implemented as an internal platform schedule or other privileged control-plane mutation, route it through architect for live execution, not for design-only analysis.`
+    : "- No special recurring automation contract applies."
 }`;
 
   return {
     execution_reason: executionDecision.reason,
     matched_skills: matchedSkills,
+    missing_requested_services: missingRequestedServices,
     objective,
     project,
-    recommended_role: executionDecision.recommendedRole,
+    recommended_role: recommendedRole,
+    recurring_automation_setup: recurringAutomationSetup,
     requirements_walkthrough: requirementsWalkthrough,
     requires_execution: executionDecision.requiresExecution,
     teach_mode: teachMode,
@@ -1561,6 +1693,14 @@ function buildRelayAcceptanceCriteria(relayRouting) {
         3,
         0,
         "Operator received a concrete checklist of missing inputs, tools, credentials, or decisions"
+      );
+    }
+
+    if (relayRouting.recurring_automation_setup) {
+      criteria.splice(
+        criteria.length - 1,
+        0,
+        "Live recurring schedule or automation configured and enabled, or a concrete blocker recorded after applying the default channel and timezone assumptions"
       );
     }
 
@@ -1601,8 +1741,149 @@ async function createRelayExecutionRequirement(taskId, relayRouting) {
   }
 }
 
+async function createRelayRequestedServiceRequirements(taskId, requestedServices) {
+  for (const service of requestedServices) {
+    let existingService = null;
+    try {
+      const rows = await postgrest("/service_registry", {
+        query: {
+          limit: "1",
+          service_name: `eq.${service.service_name}`,
+          select: "id,status",
+        },
+      });
+      existingService = rows?.[0] || null;
+    } catch (error) {
+      console.error(
+        `[admin] Failed to inspect relay preflight service '${service.service_name}':`,
+        error
+      );
+      continue;
+    }
+
+    if (!existingService) {
+      try {
+        await postgrest("/service_registry", {
+          body: {
+            auth_type: "api_key",
+            base_url: null,
+            credential: null,
+            description: service.reason,
+            display_name: service.display_name,
+            service_name: service.service_name,
+            status: "key_needed",
+          },
+          method: "POST",
+        });
+      } catch (error) {
+        console.error(
+          `[admin] Failed to register relay preflight service '${service.service_name}':`,
+          error
+        );
+      }
+    }
+
+    try {
+      await postgrest("/task_requirements", {
+        body: {
+          expected: {
+            allow_statuses: ["active"],
+            display_name: service.display_name,
+            note: service.reason,
+          },
+          last_result: {
+            checked_at: new Date().toISOString(),
+            service_status: existingService?.status || "key_needed",
+          },
+          required_for_completion: true,
+          requirement_type: "service_active",
+          status: "blocked",
+          target: service.service_name,
+          task_id: taskId,
+        },
+        method: "POST",
+      });
+    } catch (error) {
+      console.error(
+        `[admin] Failed to register relay preflight task requirement for '${service.service_name}':`,
+        error
+      );
+    }
+  }
+}
+
 function detectRelayTeachMode(content) {
   return /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+}
+
+async function loadRelayRequestedServiceNeeds(content) {
+  const normalized = normalizeString(content);
+  if (!normalized) {
+    return [];
+  }
+
+  const requestedServices = [];
+  const activeServices = await loadActiveRelayServiceNames();
+  const requestsImageAssets = looksLikeMediaProductionRequest(normalized);
+  const requestsVoiceAssets =
+    /\b(voiceover|voice-over|voice over|audio|spoken|narration|narrator)\b/i.test(
+      normalized
+    );
+
+  if (requestsImageAssets && !activeServices.has("gemini")) {
+    requestedServices.push({
+      display_name: "Gemini",
+      reason:
+        "the request includes image or visual asset deliverables that need an image-generation service for production output",
+      service_name: "gemini",
+    });
+  }
+
+  if (requestsVoiceAssets && !activeServices.has("elevenlabs")) {
+    requestedServices.push({
+      display_name: "ElevenLabs",
+      reason:
+        "the request includes a voiceover or audio deliverable that needs a voice-generation service for production output",
+      service_name: "elevenlabs",
+    });
+  }
+
+  return requestedServices;
+}
+
+function looksLikeMediaProductionRequest(content) {
+  const normalized = normalizeString(content);
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\b(image|images|visual|visuals|graphic|graphics|creative|creatives|thumbnail|banner|illustration|ad creative)\b/i.test(
+      normalized
+    ) &&
+    /\b(asset pack|campaign|ad|promo|prepare|create|generate|need|want)\b/i.test(
+      normalized
+    )
+  );
+}
+
+async function loadActiveRelayServiceNames() {
+  try {
+    const rows = await postgrest("/service_registry", {
+      query: {
+        select: "service_name",
+        status: "eq.active",
+      },
+    });
+
+    return new Set(
+      (rows || [])
+        .map((row) => normalizeString(row.service_name).toLowerCase())
+        .filter(Boolean)
+    );
+  } catch {
+    return new Set();
+  }
 }
 
 function classifyRelayExecutionRequest(content, matchedSkills, teachMode) {
@@ -1697,7 +1978,15 @@ function looksLikeRequirementsWalkthroughRequest(content) {
   }
 
   if (
-    /\b(what (?:other )?(?:information|info|details|inputs?|tools|access|accounts?|credentials?|tokens|services) do you (?:think you )?need|what else do you need(?: from me)?|what do you need from me|anything else you need|which (?:tools|accounts?|credentials?|tokens|access) do you need|list (?:what|everything) you need|tell me what you need|go through everything else you need|let'?s go through everything else you need)\b/i.test(
+    /\b(what (?:other )?(?:information|info|details|inputs?|tools|access|accounts?|credentials?|tokens|services) do you (?:think you )?need|what else do you need(?: from me)?|what do you need from me|anything else you need|if there is anything you (?:genuinely |actually )?need(?: from me| from us| from the account| from the service)?|which (?:tools|accounts?|credentials?|tokens|access) do you need|list (?:what|everything) you need|tell me exactly what (?:you need|it is)|tell me what you need|go through everything else you need|let'?s go through everything else you need)\b/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\bif\b.{0,120}\byou need\b.{0,120}\bask\b.{0,80}\bexactly what you need\b/i.test(
       normalized
     )
   ) {
@@ -1712,17 +2001,91 @@ function looksLikeRequirementsWalkthroughRequest(content) {
   );
 }
 
+function looksLikeRecurringAutomationSetup(content) {
+  const normalized = normalizeString(content);
+  if (!normalized) {
+    return false;
+  }
+
+  const mentionsRecurringWork =
+    /\b(schedule|scheduled|recurring|automation|workflow|cron|every\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|day|week|month)|daily|weekly|monthly)\b/i.test(
+      normalized
+    );
+  const mentionsActivation =
+    /\b(set up|setup|configure|create|start|send|run|automate|enable|turn on|activate)\b/i.test(
+      normalized
+    );
+
+  return mentionsRecurringWork && mentionsActivation;
+}
+
 function determineRelayRecommendedRole(matchedSkills, content) {
+  const requiresRecurringAutomationSetup = looksLikeRecurringAutomationSetup(content);
+  const credentialedExecutionFollowUp =
+    looksLikeCredentialedExecutionFollowUp(content);
   const requiresService =
     matchedSkills.some(
       (skill) =>
         Array.isArray(skill.required_services) && skill.required_services.length > 0
     ) ||
-    /\b(api key|api keys|credential|credentials|login|oauth|token|tokens|service connection|service slot|github|gitlab|bitbucket|vercel|netlify|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain|account access|deployment account|repo access)\b/i.test(
+    /\b(api key|api keys|credential|credentials|login|oauth|token|tokens|service connection|service slot|github|gitlab|bitbucket|vercel|netlify|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain|account access|deployment account|repo access|gohighlevel|highlevel|leadconnector|elevenlabs|gemini)\b/i.test(
+      content
+    ) ||
+    /\b(image|images|voice|voiceover|voice-over|audio|video|media|generation)\b.{0,80}\b(service|services|provider|providers|tool|tools)\b/i.test(
       content
     );
 
-  return requiresService ? "sage" : "builder";
+  if (requiresService) {
+    if (credentialedExecutionFollowUp) {
+      return "builder";
+    }
+    return "sage";
+  }
+
+  if (requiresRecurringAutomationSetup) {
+    return "architect";
+  }
+
+  return "builder";
+}
+
+function looksLikeCredentialedExecutionFollowUp(content) {
+  const normalized = normalizeString(content);
+  if (!normalized) {
+    return false;
+  }
+
+  const serviceReadySignal =
+    /\b(service connection|integration|account access|account connection).*(already (?:set up|configured|connected|active|available|in the system))\b/i.test(
+      normalized
+    ) ||
+    /\byes,\s+the .*?(service connection|integration).*(already (?:set up|configured|connected|active|available|in the system))\b/i.test(
+      normalized
+    ) ||
+    /\b(?:use|apply|route|set|move|treat)\b.*\b(location|account|integration|service)\b.*\balready (?:connected|configured|active|available)\b/i.test(
+      normalized
+    ) ||
+    /\b(?:connected|configured|active|available)\b.*\b(location|account|integration|service)\b/i.test(
+      normalized
+    );
+  const detailSignals = [
+    /\b(location id|workspace id|project id|pipeline name|stage|tag|timezone|business hours|after hours|sending line|send(?:ing)? number|hostname|subdomain|repo name|branch name|voice id|campaign)\b/i,
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|weekdays?)\b/i,
+    /"(?:[^"\r\n]{2,})"/,
+    /\b(?:create|use|apply|draft|send from|follow-up|callback)\b/i,
+  ].reduce((count, pattern) => count + (pattern.test(normalized) ? 1 : 0), 0);
+  const scopedIdSignal =
+    /\b(location id|workspace id|project id|pipeline id|stage id|voice id)\b/i.test(
+      normalized
+    );
+  const executionContinuationSignal =
+    /\b(pipeline|stage|tag|business hours|after hours|timezone|voicemail|follow-up|queue|inbound numbers?)\b/i.test(
+      normalized
+    ) && /\b(use|apply|create|treat|move|route)\b/i.test(normalized);
+
+  return (
+    (serviceReadySignal || scopedIdSignal) && detailSignals >= 2
+  ) || (executionContinuationSignal && detailSignals >= 3);
 }
 
 async function loadRelayMatchedSkills(content) {
@@ -2955,6 +3318,29 @@ function formatSavedSkillMessage(draft) {
 }
 
 async function postAdminSystemMessage({ content, metadata, taskId = null }) {
+  return postAdminOutboundMessage({
+    content,
+    metadata,
+    sender: "system",
+    taskId,
+  });
+}
+
+async function postAdminRelayMessage({ content, metadata, taskId = null }) {
+  return postAdminOutboundMessage({
+    content,
+    metadata,
+    sender: "relay",
+    taskId,
+  });
+}
+
+async function postAdminOutboundMessage({
+  content,
+  metadata,
+  sender = "system",
+  taskId = null,
+}) {
   const rows = await postgrest("/messages", {
     body: {
       channel: "admin_chat",
@@ -2962,7 +3348,7 @@ async function postAdminSystemMessage({ content, metadata, taskId = null }) {
       direction: "outbound",
       metadata,
       processed: true,
-      sender: "system",
+      sender,
       task_id: taskId,
     },
     method: "POST",
@@ -3366,9 +3752,10 @@ async function handleTelegramWebhook(req, res) {
         chat_id: chatId,
         from: message.from || null,
         message_id: message.message_id || null,
+        routing: "telegram_source_only",
         telegram_update_id: update?.update_id || null,
       },
-      processed: false,
+      processed: true,
       sender,
       task_id: null,
     },
@@ -3384,12 +3771,13 @@ async function handleTelegramWebhook(req, res) {
       direction: "inbound",
       metadata: {
         chat_id: chatId,
+        direct_route_claimed: true,
         mirrored_from: "telegram",
         source_channel: "telegram",
         source_message_id: sourceMessageId,
         telegram_message_id: message.message_id || null,
       },
-      processed: false,
+      processed: true,
       sender,
       task_id: null,
     },
@@ -3448,7 +3836,7 @@ async function handleTelegramWebhook(req, res) {
     await postgrest("/messages", {
       body: {
         metadata: processedMetadata,
-        processed: routing !== "fallback_poll",
+        processed: true,
         task_id: relayTask?.id || null,
       },
       method: "PATCH",
@@ -3555,9 +3943,10 @@ async function handleApi(req, res, url) {
         content,
         direction: "inbound",
         metadata: {
+          direct_route_claimed: true,
           teach_mode: teachMode,
         },
-        processed: false,
+        processed: true,
         sender: "operator",
         task_id: null,
       },
@@ -4577,7 +4966,24 @@ async function handleApi(req, res, url) {
 
     if (typeof body.cron_expr === "string" && body.cron_expr.trim()) {
       update.cron_expr = body.cron_expr.trim();
-      update.next_run_at = calculateNextRun(body.cron_expr);
+      update.next_run_at = calculateNextRun(body.cron_expr, body.timezone);
+    }
+
+    if (typeof body.timezone === "string" && body.timezone.trim()) {
+      update.timezone = body.timezone.trim();
+      if (!update.next_run_at) {
+        const existingRows = await postgrest("/schedules", {
+          query: {
+            id: `eq.${scheduleId}`,
+            limit: "1",
+            select: "cron_expr",
+          },
+        });
+        const existingCron = existingRows?.[0]?.cron_expr;
+        if (typeof existingCron === "string" && existingCron.trim()) {
+          update.next_run_at = calculateNextRun(existingCron, update.timezone);
+        }
+      }
     }
 
     await postgrest("/schedules", {
@@ -4952,6 +5358,55 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/health") {
       sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    const deliveryFileMatch = url.pathname.match(
+      /^\/deliveries\/([0-9a-f-]{36})\/([A-Za-z0-9_-]+)\/file\/([0-9a-f-]{36})\/(.+)$/i
+    );
+    if (deliveryFileMatch && req.method === "GET") {
+      const [, rootTaskId, token, fileTaskId, encodedRelativePath] = deliveryFileMatch;
+      if (!isValidResultDeliveryToken(rootTaskId, token)) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      const artifact = await loadResultDeliveryArtifact(rootTaskId);
+      if (!artifact) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      const metadata =
+        artifact.metadata && typeof artifact.metadata === "object"
+          ? artifact.metadata
+          : {};
+      if (!isAllowedDeliveryTask(metadata, fileTaskId)) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      const relativePath = decodeURIComponent(encodedRelativePath);
+      const absolutePath = resolveWorkspaceFilePath(fileTaskId, relativePath);
+      if (!absolutePath) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      try {
+        await access(absolutePath);
+      } catch {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      const mimeType = MIME_TYPES[extname(absolutePath).toLowerCase()] || "application/octet-stream";
+      res.writeHead(200, {
+        "Cache-Control": "private, max-age=300",
+        "Content-Type": mimeType,
+        "X-Robots-Tag": "noindex, nofollow",
+      });
+      createReadStream(absolutePath).pipe(res);
       return;
     }
 

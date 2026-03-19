@@ -48,6 +48,11 @@ export const scheduleCreateDef = {
         type: "string",
         description: "Optional project for generated tasks",
       },
+      timezone: {
+        type: "string",
+        description:
+          "IANA timezone for evaluating the cron expression, for example Europe/Copenhagen.",
+      },
     },
     required: ["name", "cron_expr", "assigned_role", "title", "objective"],
   },
@@ -63,6 +68,7 @@ export async function scheduleCreate(args: {
   priority?: string;
   enabled?: boolean;
   project_id?: string;
+  timezone?: string;
 }): Promise<unknown> {
   await assertTaskMutationAllowed("schedule_create");
   await requireCurrentTaskContext();
@@ -70,15 +76,19 @@ export async function scheduleCreate(args: {
   const db = getDb();
   const cronExpr = args.cron_expr.trim();
   const scheduleName = args.name.trim();
+  const timezone =
+    String(args.timezone || process.env.AGENT_OS_TIMEZONE || process.env.TZ || "UTC").trim() ||
+    "UTC";
 
   const { data, error } = await db
     .from("schedules")
     .insert({
       name: scheduleName,
       cron_expr: cronExpr,
+      timezone,
       assigned_role: args.assigned_role,
       enabled: args.enabled ?? true,
-      next_run_at: calculateNextRun(cronExpr),
+      next_run_at: calculateNextRun(cronExpr, timezone),
       task_template: {
         title: args.title,
         objective: args.objective,
@@ -97,10 +107,13 @@ export async function scheduleCreate(args: {
   return { success: true, schedule: data };
 }
 
-function calculateNextRun(cronExpr: string): string {
+function calculateNextRun(cronExpr: string, timezone: string): string {
   try {
     return cronParser
-      .parseExpression(cronExpr.trim(), { currentDate: new Date() })
+      .parseExpression(cronExpr.trim(), {
+        currentDate: new Date(),
+        tz: timezone || undefined,
+      })
       .next()
       .toDate()
       .toISOString();

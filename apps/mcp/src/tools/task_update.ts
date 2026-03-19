@@ -1,6 +1,16 @@
 import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 
+const ACTIVE_CHILD_TASK_STATES = [
+  "backlog",
+  "ready",
+  "claimed",
+  "running",
+  "blocked_on_agent",
+  "blocked_on_human",
+  "in_review",
+] as const;
+
 export const taskUpdateDef = {
   name: "task_update",
   description:
@@ -42,11 +52,25 @@ export async function taskUpdate(args: {
 }): Promise<unknown> {
   const db = getDb();
   const ctx = getAgentContext();
+  const requestedState = String(args.state || "").trim();
+  const holdForChildren = await shouldHoldCompletionForActiveChildren(
+    db,
+    args.task_id,
+    requestedState
+  );
 
-  const updatePayload: Record<string, unknown> = { state: args.state };
+  const updatePayload: Record<string, unknown> = {
+    state: holdForChildren ? "blocked_on_agent" : requestedState,
+  };
   if (args.last_handoff_note)
     updatePayload.last_handoff_note = args.last_handoff_note;
-  if (args.blocked_reason) updatePayload.blocked_reason = args.blocked_reason;
+  if (holdForChildren) {
+    updatePayload.blocked_reason =
+      args.blocked_reason ||
+      "Waiting for downstream child tasks to finish before this task can conclude.";
+  } else if (args.blocked_reason) {
+    updatePayload.blocked_reason = args.blocked_reason;
+  }
 
   const { data, error } = await db
     .from("tasks")
@@ -62,3 +86,33 @@ export async function taskUpdate(args: {
 
   return { success: true, task: data };
 }
+
+async function shouldHoldCompletionForActiveChildren(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+  requestedState: string
+): Promise<boolean> {
+  if (!shouldBlockCompletionForActiveChildren(requestedState)) {
+    return false;
+  }
+
+  const { count, error } = await db
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("parent_task_id", taskId)
+    .in("state", [...ACTIVE_CHILD_TASK_STATES]);
+
+  if (error) {
+    return false;
+  }
+
+  return (count || 0) > 0;
+}
+
+function shouldBlockCompletionForActiveChildren(requestedState: string): boolean {
+  return String(requestedState || "").trim().toLowerCase() === "completed";
+}
+
+export const taskUpdateTestHooks = {
+  shouldBlockCompletionForActiveChildren,
+};

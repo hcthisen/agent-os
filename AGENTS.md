@@ -37,6 +37,8 @@ There is no top-level automated test runner yet. For changes, add focused tests 
 - run `npm run build` for cross-workspace changes;
 - include screenshots for UI changes in `apps/admin` or `sites/public`.
 
+When iterating on live-system prompts under `testing/`, stop the run at the first materially wrong action, inspect the full system behavior, and fix the general logic or process rather than the single prompt wording. Do not overfit prompt packs or code paths by baking the answer into the prompt, special-casing an exact business, URL, or phrasing, or making a change that only solves one saved scenario. After a generic fix, rerun the same prompt from a reset state.
+
 ## Commit & Pull Request Guidelines
 Git history uses short, imperative subjects such as `Initial monorepo scaffold and services`. Keep commits concise and scoped, for example `Add MCP task retry guard`.
 

@@ -66,6 +66,11 @@ interface DeliveryTarget {
   sourceMessageId: string | null;
 }
 
+interface DeliveryPageLink {
+  path: string;
+  url: string | null;
+}
+
 export async function monitorTaskOutcomes(): Promise<void> {
   const db = getDb();
   const cutoff = new Date(
@@ -135,8 +140,12 @@ export async function monitorTaskOutcomes(): Promise<void> {
     }
 
     const notificationKey = `request-completion:${rootTask.id}`;
+    const requestCompletionAt = resolveRequestCompletionTimestamp(requestTasks);
     if (
-      (await hasAgentAuthoredOutboundMessage(requestTasks.map((entry) => entry.id))) ||
+      (await hasRecentAgentAuthoredOutboundMessage(
+        requestTasks.map((entry) => entry.id),
+        requestCompletionAt
+      )) ||
       (await notificationAlreadySent(rootTask.id, notificationKey))
     ) {
       continue;
@@ -152,7 +161,7 @@ export async function monitorTaskOutcomes(): Promise<void> {
       true,
       completionCandidate.artifactSummary
     );
-    const resultPageUrl = await maybePublishOperatorResultPage({
+    const resultPageLink = await maybePublishOperatorResultPage({
       deliveryChannel: deliveryTarget.channel,
       requestTasks,
       rootTaskId: rootTask.id,
@@ -162,16 +171,20 @@ export async function monitorTaskOutcomes(): Promise<void> {
     });
     const deliveredContent = formatDeliveredCompletionMessage(
       content,
-      resultPageUrl,
+      resultPageLink,
       deliveryTarget.channel
     );
     await sendOperatorCompletion(
       rootTask.id,
       notificationKey,
       deliveredContent,
-      deliveryTarget
+      deliveryTarget,
+      resultPageLink,
+      completionCandidate.task
     );
   }
+
+  await monitorBlockedTaskRequirements(cutoff);
 }
 
 async function findRootTask(task: CompletedTask): Promise<RootTask | null> {
@@ -207,6 +220,41 @@ async function findRootTask(task: CompletedTask): Promise<RootTask | null> {
   return current;
 }
 
+export async function findRootTaskById(taskId: string): Promise<RootTask | null> {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!normalizedTaskId) {
+    return null;
+  }
+
+  const db = getDb();
+  const { data, error } = await db
+    .from("tasks")
+    .select("id,title,parent_task_id,assigned_role")
+    .eq("id", normalizedTaskId)
+    .maybeSingle<RootTask>();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return findRootTask({
+    assigned_role: data.assigned_role,
+    attempt_count: 0,
+    claimed_by: null,
+    completed_at: null,
+    customer_id: null,
+    department_id: null,
+    id: data.id,
+    last_handoff_note: null,
+    objective: null,
+    parent_task_id: data.parent_task_id,
+    project_id: null,
+    state: "running",
+    title: data.title,
+    updated_at: new Date().toISOString(),
+  });
+}
+
 function shouldSendInterimProgressUpdate(
   task: CompletedTask,
   rootTask: RootTask,
@@ -227,11 +275,65 @@ function shouldSendInterimProgressUpdate(
     );
   }
 
-  if (["relay", "sage"].includes(task.assigned_role)) {
+  if (task.assigned_role === "relay") {
     return true;
   }
 
+  if (task.assigned_role === "sage") {
+    return false;
+  }
+
   return countRequestTreeChildren(task.id, requestTasks) > 0;
+}
+
+function chooseBlockedRequestUpdateCandidate(
+  rootTask: RootTask,
+  requestTasks: CompletedTask[]
+): CompletedTask | null {
+  const blockedTasks = requestTasks
+    .filter(
+      (task) =>
+        (task.state === "blocked_on_agent" || task.state === "blocked_on_human") &&
+        looksLikeRequirementsChecklist(task.last_handoff_note || "")
+    )
+    .sort((left, right) => {
+      const updatedAtDelta =
+        new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+      if (updatedAtDelta !== 0) {
+        return updatedAtDelta;
+      }
+
+      const blockedStatePriority = (task: CompletedTask): number => {
+        if (task.state === "blocked_on_human") {
+          return 2;
+        }
+        if (task.state === "blocked_on_agent") {
+          return 1;
+        }
+        return 0;
+      };
+      const blockedStateDelta =
+        blockedStatePriority(right) - blockedStatePriority(left);
+      if (blockedStateDelta !== 0) {
+        return blockedStateDelta;
+      }
+
+      const leftRoot = left.id === rootTask.id ? 1 : 0;
+      const rightRoot = right.id === rootTask.id ? 1 : 0;
+      if (rightRoot !== leftRoot) {
+        return rightRoot - leftRoot;
+      }
+
+      const leftLength = String(left.last_handoff_note || "").length;
+      const rightLength = String(right.last_handoff_note || "").length;
+      if (rightLength !== leftLength) {
+        return rightLength - leftLength;
+      }
+
+      return String(left.id).localeCompare(String(right.id));
+    });
+
+  return blockedTasks[0] || null;
 }
 
 function countRequestTreeChildren(
@@ -247,7 +349,7 @@ function looksLikeRequirementsChecklist(note: string): boolean {
     return false;
   }
 
-  return /\b(required now|needed now|need from you|what I still need|credentials|tokens|accounts|optional but helpful|needed later|required later)\b/i.test(
+  return /\b(required now|need(?:ed)? now|need from you|what i (?:still )?need now|what i(?:'|’)ll need later|what i will need later|credentials?|api keys?|tokens?|accounts?|service connections?|optional but helpful|needed later|required later)\b/i.test(
     normalized
   );
 }
@@ -259,6 +361,254 @@ function trimChecklistMessage(value: string, maxLength = 3500): string {
   }
 
   return `${normalized.slice(0, maxLength - 3).trim()}...`;
+}
+
+function formatBlockedChecklistMessage(note: string): string {
+  const normalized = String(note || "").replace(/\r/g, "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const explicitChecklist = extractExplicitChecklist(normalized);
+  if (explicitChecklist) {
+    return trimChecklistMessage(sanitizeChecklistMessage(explicitChecklist));
+  }
+
+  const derivedChecklist = deriveChecklistFromInternalRelayNote(normalized);
+  if (derivedChecklist) {
+    return trimChecklistMessage(sanitizeChecklistMessage(derivedChecklist));
+  }
+
+  return trimChecklistMessage(normalized);
+}
+
+function formatBlockedRequestUpdateMessage(
+  blockedCandidate: CompletedTask,
+  requestTasks: CompletedTask[]
+): string {
+  const checklist = formatBlockedChecklistMessage(
+    blockedCandidate.last_handoff_note || ""
+  );
+  if (!checklist) {
+    return "";
+  }
+
+  const executionStatus = buildBlockedExecutionStatusSection(
+    blockedCandidate,
+    requestTasks
+  );
+  return [executionStatus, checklist].filter(Boolean).join("\n\n");
+}
+
+function buildBlockedExecutionStatusSection(
+  blockedCandidate: CompletedTask,
+  requestTasks: CompletedTask[]
+): string | null {
+  const activeExecutionTask = requestTasks
+    .filter(
+      (task) =>
+        task.id !== blockedCandidate.id &&
+        task.assigned_role !== "relay" &&
+        ["claimed", "running", "in_review"].includes(task.state)
+    )
+    .sort((left, right) => {
+      const priority = (value: string): number => {
+        if (value === "running") {
+          return 3;
+        }
+        if (value === "claimed") {
+          return 2;
+        }
+        if (value === "in_review") {
+          return 1;
+        }
+        return 0;
+      };
+
+      const priorityDelta = priority(right.state) - priority(left.state);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+
+      return (
+        new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()
+      );
+    })[0];
+
+  if (!activeExecutionTask) {
+    return null;
+  }
+
+  const roleLabel = capitalize(activeExecutionTask.assigned_role);
+  const title = simplifyTitle(activeExecutionTask.title || "");
+  const detail = title
+    ? `${roleLabel} work has already started: ${title}.`
+    : `${roleLabel} work has already started on this request.`;
+
+  return `Execution status:\n- ${detail}`;
+}
+
+function extractExplicitChecklist(note: string): string | null {
+  const headingMatch = note.match(
+    /(?:^|\n)\s*(?:Required now:|What I need now:|What I still need now:|Need from you:|Needed later:|What I'll need later:|What I will need later:|Optional but helpful:)/i
+  );
+  if (!headingMatch || typeof headingMatch.index !== "number") {
+    return null;
+  }
+
+  const prefix = note.slice(0, headingMatch.index).trim();
+  const checklist = note.slice(headingMatch.index).trim();
+  if (!checklist) {
+    return null;
+  }
+
+  if (!prefix || looksInternalRelayPreamble(prefix)) {
+    return checklist;
+  }
+
+  return `${trimSentence(toSingleSentence(prefix), 180)}\n\n${checklist}`;
+}
+
+function looksInternalRelayPreamble(value: string): boolean {
+  return /\b(Classified the inbound|Attached to existing project|Created downstream|Confirmed missing required service connection|Operator-facing checklist should ask)\b/i.test(
+    value
+  );
+}
+
+function deriveChecklistFromInternalRelayNote(note: string): string | null {
+  const requiredItems = new Map<string, string>();
+  const laterItems = new Map<string, string>();
+
+  for (const match of note.matchAll(
+    /missing required service connection\s+(.+?)\s+is blocked on\s+([^.;]+)\.?/gi
+  )) {
+    const serviceName = trimChecklistItem(match[1] || "");
+    const reason = trimChecklistItem(match[2] || "");
+    if (!serviceName) {
+      continue;
+    }
+
+    const item = reason
+      ? `Add ${serviceName} in Service Connections (${reason}).`
+      : `Add ${serviceName} in Service Connections.`;
+    requiredItems.set(normalizeChecklistIdentity(serviceName), item);
+  }
+
+  const operatorChecklistMatch = note.match(
+    /Operator-facing checklist should ask for\s+(.+?)\s+later,\s+while noting\s+(.+?)\s+(?:is|are)\s+required now\.?/i
+  );
+  if (operatorChecklistMatch) {
+    for (const item of splitChecklistPhrase(operatorChecklistMatch[1] || "")) {
+      const normalizedItem = normalizeChecklistIdentity(item);
+      if (!laterItems.has(normalizedItem)) {
+        laterItems.set(normalizedItem, item);
+      }
+    }
+
+    for (const item of splitChecklistPhrase(operatorChecklistMatch[2] || "")) {
+      const normalizedItem = normalizeChecklistIdentity(item);
+      if (!requiredItems.has(normalizedItem)) {
+        requiredItems.set(normalizedItem, item);
+      }
+    }
+  }
+
+  if (!requiredItems.size && !laterItems.size) {
+    return null;
+  }
+
+  const sections: string[] = [];
+  if (requiredItems.size) {
+    sections.push(
+      ["Required now:", ...[...requiredItems.values()].map((item) => `- ${item}`)].join("\n")
+    );
+  }
+
+  if (laterItems.size) {
+    sections.push(
+      ["Needed later:", ...[...laterItems.values()].map((item) => `- ${item}`)].join("\n")
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
+function splitChecklistPhrase(value: string): string[] {
+  return String(value || "")
+    .replace(/\s+(?:and|&)\s+/gi, "|")
+    .split(/[|,;]/)
+    .map((item) => trimChecklistItem(item))
+    .filter(Boolean);
+}
+
+function trimChecklistItem(value: string): string {
+  return String(value || "")
+    .replace(/^[-*]\s*/, "")
+    .replace(/\s+/g, " ")
+    .replace(/\.$/, "")
+    .trim();
+}
+
+function normalizeChecklistIdentity(value: string): string {
+  return trimChecklistItem(value)
+    .toLowerCase()
+    .replace(/^add\s+/, "")
+    .replace(/\s+in service connections.*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizeChecklistMessage(value: string): string {
+  const sections: Array<{ heading: string; items: string[] }> = [];
+  let currentSection: { heading: string; items: string[] } | null = null;
+
+  for (const rawLine of String(value || "").replace(/\r/g, "").split("\n")) {
+    const headingMatch = rawLine.match(
+      /^\s*(Required now:|What I need now:|What I still need now:|Need from you:|Needed later:|What I'll need later:|What I will need later:|Optional but helpful:)\s*$/i
+    );
+    if (headingMatch) {
+      if (currentSection && currentSection.items.length > 0) {
+        sections.push(currentSection);
+      }
+      currentSection = {
+        heading: headingMatch[1],
+        items: [],
+      };
+      continue;
+    }
+
+    const bulletMatch = rawLine.match(/^\s*-\s+(.+)$/);
+    if (!bulletMatch || !currentSection) {
+      continue;
+    }
+
+    const item = trimChecklistItem(bulletMatch[1] || "");
+    if (!item || !isOperatorActionableChecklistItem(item)) {
+      continue;
+    }
+
+    currentSection.items.push(item);
+  }
+
+  if (currentSection && currentSection.items.length > 0) {
+    sections.push(currentSection);
+  }
+
+  return sections
+    .map((section) => [section.heading, ...section.items.map((item) => `- ${item}`)].join("\n"))
+    .join("\n\n")
+    .trim();
+}
+
+function isOperatorActionableChecklistItem(value: string): boolean {
+  const normalized = trimChecklistItem(value).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return !/\b(?:allow|let)\s+the\s+(?:downstream|planning|builder|reviewer|child)\s+task\b|\b(?:downstream|planning|builder|reviewer|child)\s+task\b|\bimplementation approach\b/i.test(
+    normalized
+  );
 }
 
 async function loadRelayRequestTreeTasks(rootTaskId: string): Promise<CompletedTask[]> {
@@ -343,11 +693,10 @@ async function hasAgentAuthoredOutboundMessage(taskIds: string[]): Promise<boole
   }
 
   const db = getDb();
-  const { count, error } = await db
+  const { data, error } = await db
     .from("messages")
-    .select("id", { count: "exact", head: true })
+    .select("id,sender,metadata")
     .eq("direction", "outbound")
-    .neq("sender", "system")
     .in("task_id", filteredTaskIds);
 
   if (error) {
@@ -355,7 +704,154 @@ async function hasAgentAuthoredOutboundMessage(taskIds: string[]): Promise<boole
     return false;
   }
 
-  return Boolean(count && count > 0);
+  return (data || []).some((message) => !isSynthesizedOperatorNotification(message));
+}
+
+async function hasRecentAgentAuthoredOutboundMessage(
+  taskIds: string[],
+  since: string
+): Promise<boolean> {
+  const filteredTaskIds = [...new Set(taskIds.filter(Boolean))];
+  if (!filteredTaskIds.length) {
+    return false;
+  }
+
+  const db = getDb();
+  const { data, error } = await db
+    .from("messages")
+    .select("id,sender,metadata")
+    .eq("direction", "outbound")
+    .gte("created_at", since)
+    .in("task_id", filteredTaskIds);
+
+  if (error) {
+    console.error("Failed to inspect recent outbound operator replies:", error);
+    return false;
+  }
+
+  return (data || []).some((message) => !isSynthesizedOperatorNotification(message));
+}
+
+async function monitorBlockedTaskRequirements(cutoff: string): Promise<void> {
+  const db = getDb();
+  const { data: blockedTasks, error } = await db
+    .from("tasks")
+    .select(TASK_SELECT_FIELDS)
+    .in("state", ["blocked_on_agent", "blocked_on_human"])
+    .gte("updated_at", cutoff)
+    .returns<CompletedTask[]>();
+
+  if (error) {
+    console.error("Failed to query blocked tasks for operator updates:", error);
+    return;
+  }
+
+  const relayRoots = new Map<string, RootTask>();
+  for (const blockedTask of blockedTasks || []) {
+    const rootTask = await findRootTask(blockedTask);
+    if (
+      !rootTask ||
+      (rootTask.assigned_role !== "relay" &&
+        !rootTask.title.startsWith("Process message:"))
+    ) {
+      continue;
+    }
+
+    relayRoots.set(rootTask.id, rootTask);
+  }
+
+  for (const [rootTaskId, rootTask] of relayRoots.entries()) {
+    const requestTasks = await loadRelayRequestTreeTasks(rootTaskId);
+    if (!requestTasks.length) {
+      continue;
+    }
+
+    const requestComplete = requestTasks.every(
+      (requestTask) => requestTask.state === "completed"
+    );
+    if (requestComplete) {
+      continue;
+    }
+
+    const blockedCandidate = chooseBlockedRequestUpdateCandidate(
+      rootTask,
+      requestTasks
+    );
+    if (!blockedCandidate) {
+      continue;
+    }
+
+    if (
+      (await hasAgentAuthoredOutboundMessage([blockedCandidate.id])) ||
+      await hasRecentAgentAuthoredOutboundMessage(
+        requestTasks.map((task) => task.id),
+        blockedCandidate.updated_at
+      )
+    ) {
+      continue;
+    }
+
+    const content = formatBlockedRequestUpdateMessage(
+      blockedCandidate,
+      requestTasks
+    );
+    if (!content) {
+      continue;
+    }
+
+    await sendRelayLifecycleUpdate({
+      content,
+      eventType: "operator.progress.sent",
+      extraMetadata: {
+        related_task_id: blockedCandidate.id,
+        related_task_role: blockedCandidate.assigned_role,
+        relay_update_kind: "blocked",
+        task_state: blockedCandidate.state,
+      },
+      notificationKey: `request-blocked:${blockedCandidate.id}:${blockedCandidate.updated_at}`,
+      notificationType: "task_progress",
+      rootTaskId,
+    });
+  }
+}
+
+function resolveRequestCompletionTimestamp(requestTasks: CompletedTask[]): string {
+  const timestamps = requestTasks
+    .map((task) => task.completed_at || task.updated_at)
+    .map((value) => new Date(value).getTime())
+    .filter((value) => Number.isFinite(value));
+
+  if (!timestamps.length) {
+    return new Date().toISOString();
+  }
+
+  return new Date(Math.max(...timestamps)).toISOString();
+}
+
+export async function sendRelayLifecycleUpdate(args: {
+  content: string;
+  deliveryTarget?: DeliveryTarget;
+  eventType: "operator.completion.sent" | "operator.progress.sent";
+  extraMetadata?: Record<string, unknown>;
+  notificationKey: string;
+  notificationType: "task_completion" | "task_progress";
+  rootTaskId: string;
+}): Promise<void> {
+  if (await notificationAlreadySent(args.rootTaskId, args.notificationKey)) {
+    return;
+  }
+
+  const deliveryTarget =
+    args.deliveryTarget || (await resolveRootRequestDeliveryTarget(args.rootTaskId));
+  await sendOperatorNotification(
+    args.rootTaskId,
+    args.notificationKey,
+    args.content,
+    deliveryTarget,
+    args.notificationType,
+    args.eventType,
+    args.extraMetadata || {}
+  );
 }
 
 async function selectCompletionCandidate(
@@ -432,6 +928,7 @@ function summarizeOutcome(
   const publishedLiveMatch = compact.match(
     /public site .*?(rebuilt|published).*?live at (https?:\/\/[^\s)]+)/i
   );
+  const hasDryRunExample = /\bdry-?run example\b/i.test(compact);
 
   if (publishedLiveMatch) {
     return `The public site is rebuilt and live at ${publishedLiveMatch[2]}.`;
@@ -455,6 +952,11 @@ function summarizeOutcome(
 
   if (artifactSummary && looksLikeReportTask(task)) {
     return normalizeArtifactSummary(artifactSummary, task);
+  }
+
+  if (hasDryRunExample) {
+    const lead = trimSentence(toSingleSentence(compact), 180);
+    return trimSentence(`${lead} A dry-run example is included.`, 260);
   }
 
   if (blocked && !/^nothing blocked/i.test(blocked)) {
@@ -881,16 +1383,17 @@ function capitalize(value: string): string {
 
 function formatDeliveredCompletionMessage(
   content: string,
-  resultPageUrl: string | null,
+  resultPageLink: DeliveryPageLink | null,
   channel: "admin_chat" | "telegram"
 ): string {
-  if (!resultPageUrl) {
-    return content;
+  const summaryLimit = channel === "telegram" ? 320 : 520;
+  const brief = trimSentence(content, summaryLimit);
+
+  if (channel === "telegram" && resultPageLink?.url) {
+    return `${brief}\n\nFull result: ${resultPageLink.url}`;
   }
 
-  const summaryLimit = channel === "telegram" ? 280 : 360;
-  const brief = trimSentence(content, summaryLimit);
-  return `${brief}\n\nFull result: ${resultPageUrl}`;
+  return brief;
 }
 
 async function resolveRootRequestDeliveryTarget(
@@ -989,7 +1492,9 @@ async function sendOperatorCompletion(
   taskId: string,
   notificationKey: string,
   content: string,
-  deliveryTarget: DeliveryTarget
+  deliveryTarget: DeliveryTarget,
+  resultPageLink: DeliveryPageLink | null,
+  completedTask: CompletedTask
 ): Promise<void> {
   await sendOperatorNotification(
     taskId,
@@ -997,7 +1502,14 @@ async function sendOperatorCompletion(
     content,
     deliveryTarget,
     "task_completion",
-    "operator.completion.sent"
+    "operator.completion.sent",
+    {
+      delivery_page_path: resultPageLink?.path || null,
+      delivery_page_title: simplifyTitle(completedTask.title) || "Full result",
+      delivery_page_url: resultPageLink?.url || null,
+      relay_update_kind: "completed",
+      related_task_id: completedTask.id,
+    }
   );
 }
 
@@ -1013,7 +1525,10 @@ async function sendOperatorProgress(
     content,
     deliveryTarget,
     "task_progress",
-    "operator.progress.sent"
+    "operator.progress.sent",
+    {
+      relay_update_kind: "progress",
+    }
   );
 }
 
@@ -1023,7 +1538,8 @@ async function sendOperatorNotification(
   content: string,
   deliveryTarget: DeliveryTarget,
   notificationType: "task_completion" | "task_progress",
-  eventType: "operator.completion.sent" | "operator.progress.sent"
+  eventType: "operator.completion.sent" | "operator.progress.sent",
+  extraMetadata: Record<string, unknown> = {}
 ): Promise<void> {
   const db = getDb();
   const baseMetadata = {
@@ -1031,6 +1547,7 @@ async function sendOperatorNotification(
     notification_type: notificationType,
     operator_visible: true,
     root_request_channel: deliveryTarget.channel,
+    ...extraMetadata,
     ...(deliveryTarget.sourceMessageId
       ? { source_message_id: deliveryTarget.sourceMessageId }
       : {}),
@@ -1044,13 +1561,13 @@ async function sendOperatorNotification(
             ...baseMetadata,
             chat_id: deliveryTarget.chatId,
           },
-          sender: "system",
+          sender: "relay",
           taskId,
         })
       : await sendAdminOnlyMessage({
           content,
           metadata: baseMetadata,
-          sender: "system",
+          sender: "relay",
           taskId,
         });
 
@@ -1075,6 +1592,10 @@ async function sendOperatorNotification(
           : "admin_outbound",
       notification_key: notificationKey,
       notification_type: notificationType,
+      relay_update_kind:
+        typeof extraMetadata.relay_update_kind === "string"
+          ? extraMetadata.relay_update_kind
+          : null,
     },
   });
 
@@ -1086,8 +1607,23 @@ async function sendOperatorNotification(
   }
 }
 
+function isSynthesizedOperatorNotification(message: {
+  metadata?: Record<string, unknown> | null;
+  sender: string;
+}): boolean {
+  if (message.sender === "system") {
+    return true;
+  }
+
+  return typeof message.metadata?.notification_type === "string";
+}
+
 export const taskOutcomeTestHooks = {
+  buildBlockedExecutionStatusSection,
+  chooseBlockedRequestUpdateCandidate,
   chooseOperatorDeliveryTarget,
+  formatBlockedChecklistMessage,
+  formatBlockedRequestUpdateMessage,
   formatCompletionMessage,
   formatDeliveredCompletionMessage,
   looksLikeRequirementsChecklist,

@@ -90,6 +90,33 @@ export async function routeMessages(): Promise<void> {
 
     if (relayTask?.id && relayRouting.requires_execution) {
       await createRelayExecutionRequirement(relayTask.id, relayRouting);
+      if (relayRouting.missing_requested_services.length > 0) {
+        await createRelayRequestedServiceRequirements(
+          relayTask.id,
+          relayRouting.missing_requested_services
+        );
+      }
+    }
+
+    if (relayTask?.id) {
+      const relayAck = buildRelayAcknowledgementMessage(msg, relayRouting.requires_execution);
+      await sendOperatorMessage({
+        content: relayAck,
+        metadata: {
+          notification_key: `request-received:${relayTask.id}`,
+          notification_type: "task_progress",
+          operator_visible: true,
+          relay_task_id: relayTask.id,
+          relay_update_kind: "received",
+          root_request_channel: msg.channel,
+          source_message_id: msg.id,
+          ...(readDeliveryChatId(msg.metadata) !== null
+            ? { chat_id: readDeliveryChatId(msg.metadata) }
+            : {}),
+        },
+        sender: "relay",
+        taskId: relayTask.id,
+      });
     }
 
     // Mark message as processed
@@ -107,6 +134,34 @@ export async function routeMessages(): Promise<void> {
       })
       .eq("id", msg.id);
   }
+}
+
+function buildRelayAcknowledgementMessage(
+  message: InboundMessage,
+  requiresExecution: boolean
+): string {
+  if (requiresExecution) {
+    return "I’ve got this. I’m routing the work now and I’ll keep you posted as it moves.";
+  }
+
+  return `I’ve got your ${message.channel === "telegram" ? "message" : "request"} and I’m handling it now.`;
+}
+
+function readDeliveryChatId(
+  metadata: Record<string, unknown> | null | undefined
+): number | string | null {
+  if (typeof metadata?.chat_id === "number" || typeof metadata?.chat_id === "string") {
+    return metadata.chat_id;
+  }
+
+  if (
+    typeof metadata?.telegram_chat_id === "number" ||
+    typeof metadata?.telegram_chat_id === "string"
+  ) {
+    return metadata.telegram_chat_id;
+  }
+
+  return null;
 }
 
 interface RelevantSkill {
@@ -135,12 +190,20 @@ interface RelayProjectDecision {
 interface RelayRoutingDecision {
   execution_reason: string;
   matched_skills: RelevantSkill[];
+  missing_requested_services: RelayRequestedServiceNeed[];
   objective: string;
   project: RelayProjectDecision | null;
   recommended_role: string | null;
+  recurring_automation_setup: boolean;
   requirements_walkthrough: boolean;
   requires_execution: boolean;
   teach_mode: boolean;
+}
+
+interface RelayRequestedServiceNeed {
+  display_name: string;
+  reason: string;
+  service_name: string;
 }
 
 const REFERENCE_HOSTNAMES = new Set([
@@ -163,13 +226,27 @@ async function prepareRelayTaskRouting(
   const content = String(message.content || "").trim();
   const teachMode = detectRelayTeachMode(content);
   const matchedSkills = await loadRelayMatchedSkills(content);
+  const missingRequestedServices = await loadRelayRequestedServiceNeeds(content);
   const executionDecision = classifyRelayExecutionRequest(
     content,
     matchedSkills,
     teachMode
   );
   const requirementsWalkthrough =
-    !teachMode && looksLikeRequirementsWalkthroughRequest(content);
+    !teachMode &&
+    (looksLikeRequirementsWalkthroughRequest(content) ||
+      missingRequestedServices.length > 0);
+  const recurringAutomationSetup =
+    !teachMode && looksLikeRecurringAutomationSetup(content);
+  const defaultFreshRepoDeployTargets =
+    !teachMode && shouldDefaultToFreshRepoAndDeploymentTargets(content);
+  const mediaProductionRequest = looksLikeMediaProductionRequest(content);
+  const recommendedRole =
+    executionDecision.requiresExecution &&
+    mediaProductionRequest &&
+    missingRequestedServices.length === 0
+      ? "builder"
+      : executionDecision.recommendedRole;
   const project = await resolveRelayProject(
     message,
     history,
@@ -203,6 +280,9 @@ Routing reminders:
 - If matched shared skills are listed below and one clearly applies, reference it explicitly when you create downstream work so execution roles can reuse the existing procedure instead of recreating it.
 - When execution is required, direct response alone is insufficient. Create at least one downstream child task for the appropriate role and reference the matched skill by name when applicable.
 - If the operator explicitly asks what inputs, access, credentials, tools, accounts, or decisions you still need, answer that directly in the next operator-facing reply with a concrete checklist. Do not respond only with a vague planning acknowledgement.
+- Default operator-facing delivery back to the same channel the request came from unless the operator explicitly asked for a different destination.
+- If a recurring request says "my time" and there is no stored operator timezone, use the runtime timezone as the default assumption and say so instead of blocking just to ask.
+- If the operator explicitly asks you to set up a recurring schedule or automation, that counts as authorization to enable it once real blockers are cleared. Do not create a confirmation-only follow-up just to repeat the same source channel or timezone assumption.
 
 Matched shared skills for this message:
 ${formatRelayMatchedSkills(matchedSkills)}
@@ -210,10 +290,20 @@ ${formatRelayMatchedSkills(matchedSkills)}
 Project persistence:
 ${formatRelayProjectDecision(project)}
 
+Repo and deployment target defaults:
+${
+  defaultFreshRepoDeployTargets
+    ? `- The operator asked for GitHub push and Vercel deployment but did not name an existing target.
+- If active access is available, default to creating a new repo and a new Vercel project for this initiative instead of blocking only to ask which existing target to reuse.
+- Only ask the operator to choose a target when they explicitly want to reuse an existing repo/project/team or live service inspection exposes multiple plausible destinations that genuinely need operator choice.`
+    : "- No special repo/deployment-target default applies."
+}
+
 Teach mode detected: ${teachMode ? "yes" : "no"}.
 Execution request detected: ${executionDecision.requiresExecution ? "yes" : "no"}.
 Requirements walkthrough requested: ${requirementsWalkthrough ? "yes" : "no"}.
 Recommended downstream role: ${executionDecision.recommendedRole || "none"}.
+Effective downstream role: ${recommendedRole || "none"}.
 Routing requirement: ${
   executionDecision.requiresExecution
     ? "Create at least one downstream child task before completing this relay task."
@@ -229,14 +319,48 @@ ${
 - If nothing else is needed, say that plainly instead of deferring.
 - You may still create downstream planning work if helpful, but do not hide behind "I'll make a plan and get back to you."`
     : "- No explicit requirements walkthrough was requested."
+}
+
+Requested-service preflight:
+${
+  missingRequestedServices.length > 0
+    ? `${missingRequestedServices
+        .map(
+          (service) =>
+            `- Missing required service now: ${service.display_name} (${service.service_name}) because ${service.reason}.`
+        )
+        .join("\n")}
+- Your next operator-facing reply must call these out as required now. Do not say that nothing else is required to start while these requested production services are missing.
+- Create or confirm the Service Connections placeholders for the missing services before you finish the relay task.`
+    : mediaProductionRequest
+      ? `- The requested production media services appear to be available already.
+- Route this into live asset creation, not a planning-only memo.
+- Do not create a downstream task that only drafts concepts, prompt starters, or scripts when the operator asked for generated media and the services are active.
+- The downstream task should call the active media service tools, generate the requested outputs, save the resulting files in the workspace, and register usable artifacts for operator delivery.
+- If live generation fails, report the concrete service or API blocker instead of silently downgrading the request into an ideation-only deliverable.`
+      : "- No missing requested production services were inferred from the message."
+}
+
+Recurring automation handling:
+${
+  recurringAutomationSetup
+    ? `- The operator asked for live recurring execution, not a design memo.
+- Use the relay task for intake, dry-run examples, and operator updates; put the privileged live schedule or automation mutation in the downstream execution task instead of trying to finish it inside relay.
+- Create downstream work that configures or updates the actual live schedule or automation in this run when the runtime and tools support it.
+- A dry-run example, reusable skill, or implementation note may accompany the work, but none of those replace the live enabled schedule or automation.
+- Only stop at a blocker when a real missing service, credential, policy decision, or business input remains after applying the default source-channel and timezone assumptions already described above.
+- If the recurring work is implemented as an internal platform schedule or other privileged control-plane mutation, route it through architect for live execution, not for design-only analysis.`
+    : "- No special recurring automation contract applies."
 }`;
 
   return {
     execution_reason: executionDecision.reason,
     matched_skills: matchedSkills,
+    missing_requested_services: missingRequestedServices,
     objective,
     project,
-    recommended_role: executionDecision.recommendedRole,
+    recommended_role: recommendedRole,
+    recurring_automation_setup: recurringAutomationSetup,
     requirements_walkthrough: requirementsWalkthrough,
     requires_execution: executionDecision.requiresExecution,
     teach_mode: teachMode,
@@ -257,6 +381,14 @@ function buildRelayAcceptanceCriteria(relayRouting: RelayRoutingDecision): strin
         3,
         0,
         "Operator received a concrete checklist of missing inputs, tools, credentials, or decisions"
+      );
+    }
+
+    if (relayRouting.recurring_automation_setup) {
+      criteria.splice(
+        criteria.length - 1,
+        0,
+        "Live recurring schedule or automation configured and enabled, or a concrete blocker recorded after applying the default channel and timezone assumptions"
       );
     }
 
@@ -305,6 +437,72 @@ async function createRelayExecutionRequirement(
   }
 }
 
+async function createRelayRequestedServiceRequirements(
+  taskId: string,
+  requestedServices: RelayRequestedServiceNeed[]
+): Promise<void> {
+  const db = getDb();
+
+  for (const service of requestedServices) {
+    const { data: existingService, error: loadError } = await db
+      .from("service_registry")
+      .select("id,status")
+      .eq("service_name", service.service_name)
+      .maybeSingle<{ id: string; status: string }>();
+
+    if (loadError) {
+      console.error(
+        `Failed to inspect relay preflight service '${service.service_name}':`,
+        loadError
+      );
+      continue;
+    }
+
+    if (!existingService) {
+      const { error: insertServiceError } = await db.from("service_registry").insert({
+        auth_type: "api_key",
+        base_url: null,
+        credential: null,
+        description: service.reason,
+        display_name: service.display_name,
+        service_name: service.service_name,
+        status: "key_needed",
+      });
+
+      if (insertServiceError) {
+        console.error(
+          `Failed to register relay preflight service '${service.service_name}':`,
+          insertServiceError
+        );
+      }
+    }
+
+    const { error: requirementError } = await db.from("task_requirements").insert({
+      expected: {
+        allow_statuses: ["active"],
+        display_name: service.display_name,
+        note: service.reason,
+      },
+      last_result: {
+        checked_at: new Date().toISOString(),
+        service_status: existingService?.status || "key_needed",
+      },
+      required_for_completion: true,
+      requirement_type: "service_active",
+      status: "blocked",
+      target: service.service_name,
+      task_id: taskId,
+    });
+
+    if (requirementError) {
+      console.error(
+        `Failed to register relay preflight task requirement for '${service.service_name}':`,
+        requirementError
+      );
+    }
+  }
+}
+
 function shouldSkipRelayRouting(message: InboundMessage): boolean {
   return (
     message.sender === "system" ||
@@ -316,6 +514,124 @@ function shouldSkipRelayRouting(message: InboundMessage): boolean {
 
 function detectRelayTeachMode(content: string): boolean {
   return /^(remember:|always:|rule:|when\b.+\bdo\b)/i.test(content);
+}
+
+async function loadRelayRequestedServiceNeeds(
+  content: string
+): Promise<RelayRequestedServiceNeed[]> {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const requestedServices: RelayRequestedServiceNeed[] = [];
+  const activeServices = await loadActiveRelayServiceNames();
+  const requestsImageAssets = shouldRequireImageServiceNow(normalized);
+  const requestsVoiceAssets =
+    /\b(voiceover|voice-over|voice over|audio|spoken|narration|narrator)\b/i.test(
+      normalized
+    );
+
+  if (requestsImageAssets && !activeServices.has("gemini")) {
+    requestedServices.push({
+      display_name: "Gemini",
+      reason:
+        "the request includes image or visual asset deliverables that need an image-generation service for production output",
+      service_name: "gemini",
+    });
+  }
+
+  if (requestsVoiceAssets && !activeServices.has("elevenlabs")) {
+    requestedServices.push({
+      display_name: "ElevenLabs",
+      reason:
+        "the request includes a voiceover or audio deliverable that needs a voice-generation service for production output",
+      service_name: "elevenlabs",
+    });
+  }
+
+  return requestedServices;
+}
+
+function looksLikeMediaProductionRequest(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\b(image|images|visual|visuals|graphic|graphics|creative|creatives|thumbnail|banner|illustration|ad creative)\b/i.test(
+      normalized
+    ) &&
+    /\b(asset pack|campaign|ad|promo|prepare|create|generate|need|want)\b/i.test(
+      normalized
+    )
+  );
+}
+
+function shouldDefaultToFreshRepoAndDeploymentTargets(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const requestsGithub =
+    /\b(github|repo|repository)\b/i.test(normalized) &&
+    /\b(push|commit|publish|ship|create)\b/i.test(normalized);
+  const requestsVercel =
+    /\b(vercel|deploy|deployment|preview)\b/i.test(normalized);
+  const explicitlyReusesExistingTarget =
+    /\b(use|reuse|update|deploy to)\s+(?:an?\s+)?(?:existing\s+|current\s+)?(?:repo|repository|project|team)\b/i.test(
+      normalized
+    ) ||
+    /\bexisting\s+(?:repo|repository|project|team)\b/i.test(normalized);
+
+  return requestsGithub && requestsVercel && !explicitlyReusesExistingTarget;
+}
+
+function looksLikeOptionalVisualSupportRequest(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\bif (?:it )?(?:helps|helpful|useful|needed)\b[^.!?\n]{0,160}\b(?:generate|create|use)\b[^.!?\n]{0,120}\b(?:replacement\s+)?(?:visuals?|images?|graphics?)\b/i.test(
+      normalized
+    ) ||
+    /\byou (?:can|could)\s+also\b[^.!?\n]{0,160}\b(?:generate|create|use)\b[^.!?\n]{0,120}\b(?:replacement\s+)?(?:visuals?|images?|graphics?)\b/i.test(
+      normalized
+    ) ||
+    /\boptional\b[^.!?\n]{0,120}\b(?:visuals?|images?|graphics?)\b/i.test(
+      normalized
+    )
+  );
+}
+
+function shouldRequireImageServiceNow(content: string): boolean {
+  return (
+    looksLikeMediaProductionRequest(content) &&
+    !looksLikeOptionalVisualSupportRequest(content)
+  );
+}
+
+async function loadActiveRelayServiceNames(): Promise<Set<string>> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("service_registry")
+    .select("service_name")
+    .eq("status", "active")
+    .returns<Array<{ service_name: string }>>();
+
+  if (error || !data?.length) {
+    return new Set();
+  }
+
+  return new Set(
+    data
+      .map((row) => String(row.service_name || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
 }
 
 function classifyRelayExecutionRequest(
@@ -418,7 +734,15 @@ function looksLikeRequirementsWalkthroughRequest(content: string): boolean {
   }
 
   if (
-    /\b(what (?:other )?(?:information|info|details|inputs?|tools|access|accounts?|credentials?|tokens|services) do you (?:think you )?need|what else do you need(?: from me)?|what do you need from me|anything else you need|which (?:tools|accounts?|credentials?|tokens|access) do you need|list (?:what|everything) you need|tell me what you need|go through everything else you need|let'?s go through everything else you need)\b/i.test(
+    /\b(what (?:other )?(?:information|info|details|inputs?|tools|access|accounts?|credentials?|tokens|services) do you (?:think you )?need|what else do you need(?: from me)?|what do you need from me|anything else you need|if there is anything you (?:genuinely |actually )?need(?: from me| from us| from the account| from the service)?|which (?:tools|accounts?|credentials?|tokens|access) do you need|list (?:what|everything) you need|tell me exactly what (?:you need|it is)|tell me what you need|go through everything else you need|let'?s go through everything else you need)\b/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\bif\b.{0,120}\byou need\b.{0,120}\bask\b.{0,80}\bexactly what you need\b/i.test(
       normalized
     )
   ) {
@@ -433,17 +757,91 @@ function looksLikeRequirementsWalkthroughRequest(content: string): boolean {
   );
 }
 
+function looksLikeRecurringAutomationSetup(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const mentionsRecurringWork =
+    /\b(schedule|scheduled|recurring|automation|workflow|cron|every\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|day|week|month)|daily|weekly|monthly)\b/i.test(
+      normalized
+    );
+  const mentionsActivation =
+    /\b(set up|setup|configure|create|start|send|run|automate|enable|turn on|activate)\b/i.test(
+      normalized
+    );
+
+  return mentionsRecurringWork && mentionsActivation;
+}
+
 function determineRelayRecommendedRole(
   matchedSkills: RelevantSkill[],
   content: string
 ): string {
+  const requiresRecurringAutomationSetup = looksLikeRecurringAutomationSetup(content);
+  const credentialedExecutionFollowUp =
+    looksLikeCredentialedExecutionFollowUp(content);
   const requiresService =
     matchedSkills.some((skill) => skill.required_services.length > 0) ||
-    /\b(api key|api keys|credential|credentials|login|oauth|token|tokens|service connection|service slot|github|gitlab|bitbucket|vercel|netlify|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain|account access|deployment account|repo access)\b/i.test(
+    /\b(api key|api keys|credential|credentials|login|oauth|token|tokens|service connection|service slot|github|gitlab|bitbucket|vercel|netlify|cloudflare|stripe|sendgrid|resend|smtp|cdn|dns|domain|account access|deployment account|repo access|gohighlevel|highlevel|leadconnector|elevenlabs|gemini)\b/i.test(
+      content
+    ) ||
+    /\b(image|images|voice|voiceover|voice-over|audio|video|media|generation)\b.{0,80}\b(service|services|provider|providers|tool|tools)\b/i.test(
       content
     );
 
-  return requiresService ? "sage" : "builder";
+  if (requiresService) {
+    if (credentialedExecutionFollowUp) {
+      return "builder";
+    }
+    return "sage";
+  }
+
+  if (requiresRecurringAutomationSetup) {
+    return "architect";
+  }
+
+  return "builder";
+}
+
+function looksLikeCredentialedExecutionFollowUp(content: string): boolean {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const serviceReadySignal =
+    /\b(service connection|integration|account access|account connection).*(already (?:set up|configured|connected|active|available|in the system))\b/i.test(
+      normalized
+    ) ||
+    /\byes,\s+the .*?(service connection|integration).*(already (?:set up|configured|connected|active|available|in the system))\b/i.test(
+      normalized
+    ) ||
+    /\b(?:use|apply|route|set|move|treat)\b.*\b(location|account|integration|service)\b.*\balready (?:connected|configured|active|available)\b/i.test(
+      normalized
+    ) ||
+    /\b(?:connected|configured|active|available)\b.*\b(location|account|integration|service)\b/i.test(
+      normalized
+    );
+  const detailSignals = [
+    /\b(location id|workspace id|project id|pipeline name|stage|tag|timezone|business hours|after hours|sending line|send(?:ing)? number|hostname|subdomain|repo name|branch name|voice id|campaign)\b/i,
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|weekdays?)\b/i,
+    /"(?:[^"\r\n]{2,})"/,
+    /\b(?:create|use|apply|draft|send from|follow-up|callback)\b/i,
+  ].reduce((count, pattern) => count + (pattern.test(normalized) ? 1 : 0), 0);
+  const scopedIdSignal =
+    /\b(location id|workspace id|project id|pipeline id|stage id|voice id)\b/i.test(
+      normalized
+    );
+  const executionContinuationSignal =
+    /\b(pipeline|stage|tag|business hours|after hours|timezone|voicemail|follow-up|queue|inbound numbers?)\b/i.test(
+      normalized
+    ) && /\b(use|apply|create|treat|move|route)\b/i.test(normalized);
+
+  return (
+    (serviceReadySignal || scopedIdSignal) && detailSignals >= 2
+  ) || (executionContinuationSignal && detailSignals >= 3);
 }
 
 async function loadRelayMatchedSkills(content: string): Promise<RelevantSkill[]> {
@@ -1264,11 +1662,16 @@ function readProjectMetadataStringArray(value: unknown): string[] {
 
 export const messageRouterTestHooks = {
   classifyRelayExecutionRequest,
+  determineRelayRecommendedRole,
   extractHostnames,
   extractInitiativeHostnames,
   extractRelayProjectSignals,
   isReferenceHostname,
+  looksLikeCredentialedExecutionFollowUp,
+  looksLikeOptionalVisualSupportRequest,
   looksLikeRequirementsWalkthroughRequest,
+  shouldDefaultToFreshRepoAndDeploymentTargets,
+  shouldRequireImageServiceNow,
   scoreRelayProjectMatch,
   normalizeRelayProjectSlug,
   shouldAutoCreateRelayProject,

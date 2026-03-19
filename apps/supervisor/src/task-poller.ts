@@ -1,10 +1,17 @@
 import { getDb } from "./db.js";
 import { hasCapacity, launchAgent } from "./process-manager.js";
 import {
+  toSanitizedServiceConnectionHint,
+  withDecryptedCredential,
+  type SanitizedServiceConnectionHint,
+  type ServiceRegistryRuntimeRow,
+} from "./service-registry.js";
+import {
   buildDependencyWaitNote,
   isTaskLaunchable,
   loadDependencyTaskStateMap,
 } from "./task-dependencies.js";
+import { findRootTaskById, sendRelayLifecycleUpdate } from "./task-outcomes.js";
 
 interface RelevantSkill {
   description: string;
@@ -58,10 +65,33 @@ interface QueueTaskRow {
   id: string;
   last_handoff_note: string | null;
   objective: string;
+  parent_task_id?: string | null;
   priority: string;
   project_id: string | null;
   state: string;
   title: string;
+}
+
+interface BlockedTaskRow extends QueueTaskRow {
+  blocked_reason: string | null;
+  claimed_by: string | null;
+  updated_at: string;
+}
+
+interface ChildTaskStateRow {
+  completed_at: string | null;
+  id: string;
+  last_handoff_note: string | null;
+  parent_task_id: string | null;
+  state: string;
+  title: string;
+  updated_at: string;
+}
+
+interface RootLifecycleMessageRow {
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+  sender: string;
 }
 
 interface SimilarTaskRow {
@@ -78,11 +108,57 @@ interface SimilarTaskRow {
   updated_at: string;
 }
 
+async function loadFreshLaunchCandidate(taskId: string): Promise<QueueTaskRow | null> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("tasks")
+    .select(
+      "id,assigned_role,attempt_count,customer_id,department_id,depends_on,last_handoff_note,objective,parent_task_id,priority,project_id,state,title"
+    )
+    .eq("id", taskId)
+    .in("state", ["ready", "in_review"])
+    .maybeSingle<QueueTaskRow>();
+
+  if (error) {
+    console.error(`Failed to reload launch candidate ${taskId}:`, error);
+    return null;
+  }
+
+  return data || null;
+}
+
+async function enforceFreshDependencyGate(task: QueueTaskRow): Promise<QueueTaskRow | null> {
+  const freshTask = await loadFreshLaunchCandidate(task.id);
+  if (!freshTask) {
+    return null;
+  }
+
+  const dependencyStateMap = await loadDependencyTaskStateMap([freshTask]);
+  if (isTaskLaunchable(freshTask, dependencyStateMap)) {
+    return freshTask;
+  }
+
+  const note = buildDependencyWaitNote(freshTask, dependencyStateMap);
+  if (note && freshTask.last_handoff_note !== note) {
+    await getDb()
+      .from("tasks")
+      .update({
+        last_handoff_note: note,
+      })
+      .eq("id", freshTask.id)
+      .eq("state", freshTask.state);
+  }
+
+  return null;
+}
+
 /**
  * Poll for ready tasks and launch agents when capacity is available.
  */
 export async function pollForTasks(): Promise<void> {
   const db = getDb();
+
+  await reconcileBlockedOnAgentTasks();
 
   if (!hasCapacity()) return;
 
@@ -90,7 +166,7 @@ export async function pollForTasks(): Promise<void> {
   const { data: tasks, error } = await db
     .from("tasks")
     .select(
-      "id,assigned_role,attempt_count,customer_id,department_id,depends_on,last_handoff_note,objective,priority,project_id,state,title"
+      "id,assigned_role,attempt_count,customer_id,department_id,depends_on,last_handoff_note,objective,parent_task_id,priority,project_id,state,title"
     )
     .in("state", ["ready", "in_review"])
     .order("priority")
@@ -105,7 +181,7 @@ export async function pollForTasks(): Promise<void> {
   for (const task of tasks) {
     if (!hasCapacity()) break;
 
-    if (task.state === "ready" && !isTaskLaunchable(task, dependencyStateMap)) {
+    if (!isTaskLaunchable(task, dependencyStateMap)) {
       const note = buildDependencyWaitNote(task, dependencyStateMap);
       if (note && task.last_handoff_note !== note) {
         await db
@@ -119,7 +195,15 @@ export async function pollForTasks(): Promise<void> {
       continue;
     }
 
-    const launchRole = task.state === "in_review" ? "reviewer" : task.assigned_role;
+    const freshLaunchTask = await enforceFreshDependencyGate(task);
+    if (!freshLaunchTask) {
+      continue;
+    }
+
+    const launchRole =
+      freshLaunchTask.state === "in_review"
+        ? "reviewer"
+        : freshLaunchTask.assigned_role;
 
     // Find active agents for this role. The poller chooses the first agent with spare capacity.
     const { data: roleAgents, error: agentError } = await db
@@ -197,12 +281,12 @@ export async function pollForTasks(): Promise<void> {
     const effort = (agent.config as any)?.effort || role.effort;
     const maxRunDurationMs = resolveMaxRunDurationMs(role);
 
-    if (task.state === "ready") {
+    if (freshLaunchTask.state === "ready") {
       // Claim the task
       const { data: claimedTask, error: claimErr } = await db
         .from("tasks")
         .update({ state: "claimed", claimed_by: agent.id })
-        .eq("id", task.id)
+        .eq("id", freshLaunchTask.id)
         .eq("state", "ready")
         .select("id, claimed_by, state")
         .maybeSingle<{
@@ -224,7 +308,7 @@ export async function pollForTasks(): Promise<void> {
       const { data: runningTask, error: runErr } = await db
         .from("tasks")
         .update({ state: "running" })
-        .eq("id", task.id)
+        .eq("id", freshLaunchTask.id)
         .eq("state", "claimed")
         .eq("claimed_by", agent.id)
         .select("id, claimed_by, state")
@@ -240,7 +324,10 @@ export async function pollForTasks(): Promise<void> {
         runningTask.claimed_by !== agent.id ||
         runningTask.state !== "running"
       ) {
-        console.error(`Failed to move task ${task.id} to running:`, runErr);
+        console.error(
+          `Failed to move task ${freshLaunchTask.id} to running:`,
+          runErr
+        );
         const runErrorMessage = runErr?.message || "task claim was lost before launch";
         await db
           .from("tasks")
@@ -249,7 +336,7 @@ export async function pollForTasks(): Promise<void> {
             claimed_by: null,
             last_handoff_note: `Supervisor claimed this task but could not transition it to running: ${runErrorMessage}`,
           })
-          .eq("id", task.id)
+          .eq("id", freshLaunchTask.id)
           .eq("state", "claimed");
         continue;
       }
@@ -257,7 +344,7 @@ export async function pollForTasks(): Promise<void> {
       const { data: reviewerRun, error: reviewRunErr } = await db
         .from("tasks")
         .update({ state: "running", claimed_by: agent.id })
-        .eq("id", task.id)
+        .eq("id", freshLaunchTask.id)
         .eq("state", "in_review")
         .select("id, claimed_by, state")
         .maybeSingle<{
@@ -272,7 +359,10 @@ export async function pollForTasks(): Promise<void> {
         reviewerRun.claimed_by !== agent.id ||
         reviewerRun.state !== "running"
       ) {
-        console.error(`Failed to start reviewer run for task ${task.id}:`, reviewRunErr);
+        console.error(
+          `Failed to start reviewer run for task ${freshLaunchTask.id}:`,
+          reviewRunErr
+        );
         const reviewRunErrorMessage =
           reviewRunErr?.message || "reviewer launch claim was lost";
         await db
@@ -280,7 +370,7 @@ export async function pollForTasks(): Promise<void> {
           .update({
             last_handoff_note: `Supervisor could not start reviewer pass: ${reviewRunErrorMessage}`,
           })
-          .eq("id", task.id)
+          .eq("id", freshLaunchTask.id)
           .eq("state", "in_review");
         continue;
       }
@@ -289,20 +379,23 @@ export async function pollForTasks(): Promise<void> {
     // Build context pack
     const { data: rawContextPack, error: cpErr } = await db.rpc(
       "build_context_pack",
-      { p_task_id: task.id }
+      { p_task_id: freshLaunchTask.id }
     );
 
     if (cpErr || !rawContextPack) {
-      console.error(`Failed to build context pack for ${task.id}:`, cpErr);
+      console.error(
+        `Failed to build context pack for ${freshLaunchTask.id}:`,
+        cpErr
+      );
       await db.from("tasks").update({
         state: "failed",
         last_handoff_note: `Supervisor failed to build context pack: ${cpErr?.message}`,
-      }).eq("id", task.id);
+      }).eq("id", freshLaunchTask.id);
       continue;
     }
 
     const contextPack =
-      task.state === "in_review"
+      freshLaunchTask.state === "in_review"
         ? {
             ...(rawContextPack as Record<string, unknown>),
             effort,
@@ -318,19 +411,27 @@ export async function pollForTasks(): Promise<void> {
       )
     ) {
       (contextPack as Record<string, unknown>).relevant_skills =
-        await loadRelevantSkills(task.project_id || null, launchRole);
+        await loadRelevantSkills(freshLaunchTask.project_id || null, launchRole);
+    }
+
+    const serviceConnections = await loadTaskServiceConnections(
+      freshLaunchTask,
+      contextPack as Record<string, unknown>
+    );
+    if (serviceConnections.length) {
+      (contextPack as Record<string, unknown>).service_connections = serviceConnections;
     }
 
     Object.assign(
       contextPack as Record<string, unknown>,
-      await loadTaskContinuationSignals(task)
+      await loadTaskContinuationSignals(freshLaunchTask)
     );
 
     // Launch the agent
-    try {
-      const runId = await launchAgent(
-        task.id,
-        agent.id,
+      try {
+        const runId = await launchAgent(
+          freshLaunchTask.id,
+          agent.id,
         agent.name,
         launchRole,
         model,
@@ -339,16 +440,279 @@ export async function pollForTasks(): Promise<void> {
         maxRunDurationMs
       );
       console.log(
-        `Launched ${agent.name} for task ${task.id} (run: ${runId})`
+        `Launched ${agent.name} for task ${freshLaunchTask.id} (run: ${runId})`
       );
+      await maybeNotifyOperatorTaskStarted(freshLaunchTask, launchRole);
     } catch (err) {
-      console.error(`Failed to launch agent for task ${task.id}:`, err);
+      console.error(
+        `Failed to launch agent for task ${freshLaunchTask.id}:`,
+        err
+      );
       await db.from("tasks").update({
         state: "failed",
         last_handoff_note: `Supervisor failed to launch agent: ${err}`,
-      }).eq("id", task.id);
+      }).eq("id", freshLaunchTask.id);
     }
   }
+}
+
+const BLOCKED_CHILD_TERMINAL_STATES = new Set([
+  "cancelled",
+  "completed",
+  "dead_letter",
+  "failed",
+]);
+
+async function reconcileBlockedOnAgentTasks(): Promise<void> {
+  const db = getDb();
+  const { data: blockedTasks, error } = await db
+    .from("tasks")
+    .select(
+      "id,assigned_role,attempt_count,blocked_reason,claimed_by,customer_id,department_id,depends_on,last_handoff_note,objective,priority,project_id,state,title,updated_at"
+    )
+    .eq("state", "blocked_on_agent")
+    .order("updated_at")
+    .limit(50)
+    .returns<BlockedTaskRow[]>();
+
+  if (error) {
+    console.error("Failed to load blocked_on_agent tasks for reconciliation:", error);
+    return;
+  }
+
+  if (!blockedTasks?.length) {
+    return;
+  }
+
+  const dependencyStateMap = await loadDependencyTaskStateMap(blockedTasks);
+  const blockedTaskIds = blockedTasks.map((task) => task.id);
+  const { data: childTasks, error: childError } = await db
+    .from("tasks")
+    .select("id,parent_task_id,state,title,updated_at,completed_at,last_handoff_note")
+    .in("parent_task_id", blockedTaskIds)
+    .returns<ChildTaskStateRow[]>();
+
+  if (childError) {
+    console.error("Failed to load blocked_on_agent child tasks:", childError);
+    return;
+  }
+
+  const childTasksByParentId = new Map<string, ChildTaskStateRow[]>();
+  for (const childTask of childTasks || []) {
+    if (!childTask.parent_task_id) {
+      continue;
+    }
+
+    const entries = childTasksByParentId.get(childTask.parent_task_id) || [];
+    entries.push(childTask);
+    childTasksByParentId.set(childTask.parent_task_id, entries);
+  }
+
+  for (const task of blockedTasks) {
+    if (!isTaskLaunchable(task, dependencyStateMap)) {
+      continue;
+    }
+
+    const childEntries = childTasksByParentId.get(task.id) || [];
+    if (!shouldResumeBlockedTask(task, childEntries)) {
+      continue;
+    }
+
+    const resumeNote = buildBlockedTaskResumeNote(task, childEntries);
+    const { error: updateError } = await db
+      .from("tasks")
+      .update({
+        blocked_reason: null,
+        claimed_by: null,
+        last_handoff_note: resumeNote,
+        state: "ready",
+      })
+      .eq("id", task.id)
+      .eq("state", "blocked_on_agent");
+
+    if (updateError) {
+      console.error(
+        `Failed to resume blocked_on_agent task ${task.id} after child completion:`,
+        updateError
+      );
+    }
+  }
+}
+
+function shouldResumeBlockedTask(
+  task: Pick<BlockedTaskRow, "state">,
+  childTasks: ChildTaskStateRow[]
+): boolean {
+  return (
+    task.state === "blocked_on_agent" &&
+    childTasks.length > 0 &&
+    childTasks.every((childTask) => BLOCKED_CHILD_TERMINAL_STATES.has(childTask.state))
+  );
+}
+
+function buildBlockedTaskResumeNote(
+  task: Pick<BlockedTaskRow, "last_handoff_note">,
+  childTasks: ChildTaskStateRow[]
+): string {
+  const childSummary = childTasks
+    .map((childTask) => `${childTask.title} (${childTask.state})`)
+    .join("; ");
+  const priorNote = String(task.last_handoff_note || "").trim();
+  const resumeDirective =
+    "Blocked dependency work reached a terminal state. Resume this task now, inspect the child-task outcomes, and either complete the request or fail clearly based on those results.";
+
+  return [
+    resumeDirective,
+    childSummary ? `Resolved child tasks: ${childSummary}.` : null,
+    priorNote ? `Prior note:\n${priorNote}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function maybeNotifyOperatorTaskStarted(
+  task: QueueTaskRow,
+  launchRole: string
+): Promise<void> {
+  const rootTask = await findRootTaskById(task.id);
+  if (
+    !rootTask ||
+    (rootTask.assigned_role !== "relay" &&
+      !rootTask.title.startsWith("Process message:"))
+  ) {
+    return;
+  }
+
+  const relatedTaskTitle = simplifyTaskTitle(task.title);
+  if (task.id === rootTask.id) {
+    return;
+  }
+
+  const recentMessages = await loadRecentRootLifecycleMessages(rootTask.id);
+  if (
+    shouldSuppressDirectChildStartLifecycleUpdate(
+      task,
+      rootTask.id,
+      await countDirectRequestChildren(rootTask.id),
+      recentMessages
+    )
+  ) {
+    return;
+  }
+
+  if (shouldSuppressImmediateStartUpdate(recentMessages)) {
+    return;
+  }
+
+  const content = `I’ve started ${launchRole} work on this request: ${relatedTaskTitle}.`;
+
+  await sendRelayLifecycleUpdate({
+    content,
+    eventType: "operator.progress.sent",
+    extraMetadata: {
+      related_task_id: task.id,
+      related_task_role: launchRole,
+      relay_update_kind: "started",
+    },
+    notificationKey: `request-start:${task.id}`,
+    notificationType: "task_progress",
+    rootTaskId: rootTask.id,
+  });
+}
+
+async function loadRecentRootLifecycleMessages(
+  rootTaskId: string
+): Promise<RootLifecycleMessageRow[]> {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - 30_000).toISOString();
+  const { data, error } = await db
+    .from("messages")
+    .select("created_at,metadata,sender")
+    .eq("direction", "outbound")
+    .eq("task_id", rootTaskId)
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false })
+    .limit(10)
+    .returns<RootLifecycleMessageRow[]>();
+
+  if (error) {
+    console.error(
+      `Failed to load recent root lifecycle messages for ${rootTaskId}:`,
+      error
+    );
+    return [];
+  }
+
+  return data || [];
+}
+
+async function countDirectRequestChildren(rootTaskId: string): Promise<number> {
+  const db = getDb();
+  const { count, error } = await db
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("parent_task_id", rootTaskId);
+
+  if (error) {
+    console.error(
+      `Failed to count direct request children for ${rootTaskId}:`,
+      error
+    );
+    return 0;
+  }
+
+  return count || 0;
+}
+
+function shouldSuppressFirstDirectChildStartUpdate(
+  task: Pick<QueueTaskRow, "parent_task_id">,
+  rootTaskId: string
+): boolean {
+  return task.parent_task_id === rootTaskId;
+}
+
+function shouldSuppressDirectChildStartLifecycleUpdate(
+  task: Pick<QueueTaskRow, "parent_task_id">,
+  rootTaskId: string,
+  directChildCount: number,
+  messages: RootLifecycleMessageRow[]
+): boolean {
+  if (!shouldSuppressFirstDirectChildStartUpdate(task, rootTaskId)) {
+    return false;
+  }
+
+  if (directChildCount > 1) {
+    return false;
+  }
+
+  return shouldSuppressImmediateStartUpdate(messages);
+}
+
+function shouldSuppressImmediateStartUpdate(
+  messages: RootLifecycleMessageRow[]
+): boolean {
+  const relayMessages = messages.filter(
+    (message) =>
+      message.sender === "relay" &&
+      typeof message.metadata?.relay_update_kind === "string"
+  );
+
+  if (!relayMessages.length) {
+    return false;
+  }
+
+  const hasRecentReceived = relayMessages.some(
+    (message) => message.metadata?.relay_update_kind === "received"
+  );
+  const hasOtherLifecycleUpdate = relayMessages.some(
+    (message) => message.metadata?.relay_update_kind !== "received"
+  );
+
+  return hasRecentReceived && !hasOtherLifecycleUpdate;
+}
+
+function simplifyTaskTitle(title: string): string {
+  return String(title || "").replace(/^Process message:\s*/i, "").trim() || "the task";
 }
 
 function resolveMaxRunDurationMs(role: Record<string, unknown>): number | undefined {
@@ -423,6 +787,152 @@ async function loadTaskContinuationSignals(
   }
 
   return buildTaskContinuationSummary(task, data || []);
+}
+
+async function loadTaskServiceConnections(
+  task: Pick<QueueTaskRow, "id" | "objective" | "title">,
+  contextPack: Record<string, unknown>
+): Promise<SanitizedServiceConnectionHint[]> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("service_registry")
+    .select(
+      "id,credential,base_url,error_message,service_name,status,updated_at,auth_type,created_at,description,display_name,last_verified,registered_by"
+    )
+    .eq("status", "active")
+    .returns<ServiceRegistryRuntimeRow[]>();
+
+  if (error || !data?.length) {
+    return [];
+  }
+
+  const taskRequirements = Array.isArray(contextPack.task_requirements)
+    ? (contextPack.task_requirements as Array<Record<string, unknown>>)
+    : [];
+  const requiredServiceNames = new Set(
+    taskRequirements
+      .filter(
+        (entry) =>
+          String(entry.requirement_type || "").trim() === "service_active" &&
+          typeof entry.target === "string"
+      )
+      .map((entry) => String(entry.target || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const lineageTaskText = await loadTaskLineageText(task.id);
+  const combinedTaskText = [
+    task.title,
+    task.objective,
+    String(
+      ((contextPack.task as Record<string, unknown> | undefined)?.last_handoff_note as
+        | string
+        | undefined) || ""
+    ),
+    lineageTaskText,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+  const inferredRequestedServices = inferRequestedActiveServices(combinedTaskText);
+
+  const rows = await Promise.all(data.map((row) => withDecryptedCredential(row)));
+  return rows
+    .filter((row): row is ServiceRegistryRuntimeRow => Boolean(row))
+    .filter((row) => {
+      if (requiredServiceNames.has(row.service_name)) {
+        return true;
+      }
+
+      const serviceName = row.service_name.toLowerCase();
+      const displayName = String(row.display_name || "").trim().toLowerCase();
+      return (
+        inferredRequestedServices.has(serviceName) ||
+        combinedTaskText.includes(serviceName) ||
+        (displayName && combinedTaskText.includes(displayName))
+      );
+    })
+    .map((row) => toSanitizedServiceConnectionHint(row))
+    .filter((row): row is SanitizedServiceConnectionHint => Boolean(row));
+}
+
+async function loadTaskLineageText(taskId: string): Promise<string> {
+  const db = getDb();
+  const fragments: string[] = [];
+  let currentTaskId: string | null = taskId;
+  const visited = new Set<string>();
+
+  while (currentTaskId && !visited.has(currentTaskId)) {
+    visited.add(currentTaskId);
+    const response = await db
+      .from("tasks")
+      .select("id,parent_task_id,title,objective,last_handoff_note")
+      .eq("id", currentTaskId)
+      .maybeSingle<{
+        id: string;
+        last_handoff_note: string | null;
+        objective: string | null;
+        parent_task_id: string | null;
+        title: string;
+      }>();
+    const data = response.data as
+      | {
+          id: string;
+          last_handoff_note: string | null;
+          objective: string | null;
+          parent_task_id: string | null;
+          title: string;
+        }
+      | null;
+    const error = response.error;
+
+    if (error || !data) {
+      break;
+    }
+
+    fragments.push(
+      data.title || "",
+      data.objective || "",
+      data.last_handoff_note || ""
+    );
+    currentTaskId = data.parent_task_id;
+  }
+
+  return fragments.filter(Boolean).join("\n");
+}
+
+function inferRequestedActiveServices(combinedTaskText: string): Set<string> {
+  const inferred = new Set<string>();
+  const text = String(combinedTaskText || "").toLowerCase();
+
+  if (
+    /\b(image|images|visual|visuals|creative|ad creative|thumbnail|render|rendered)\b/i.test(
+      text
+    )
+  ) {
+    inferred.add("gemini");
+  }
+
+  if (
+    /\b(voiceover|voice-over|voice over|audio|spoken|speech|tts|narration|narrator)\b/i.test(
+      text
+    )
+  ) {
+    inferred.add("elevenlabs");
+  }
+
+  if (/\b(gohighlevel|highlevel|leadconnector)\b/i.test(text)) {
+    inferred.add("gohighlevel");
+  }
+
+  if (/\b(github|repository|repo)\b/i.test(text)) {
+    inferred.add("github");
+  }
+
+  if (/\b(vercel|deploy|deployment|preview url)\b/i.test(text)) {
+    inferred.add("vercel");
+  }
+
+  return inferred;
 }
 
 function buildTaskContinuationSummary(
@@ -740,8 +1250,15 @@ function resolveSkillScopeRank(scopeType: string): number {
 }
 
 export const taskPollerTestHooks = {
+  buildBlockedTaskResumeNote,
   buildTaskContinuationSummary,
   extractTaskHostnames,
+  loadTaskServiceConnections,
   scoreTaskSimilarity,
+  enforceFreshDependencyGate,
+  shouldSuppressDirectChildStartLifecycleUpdate,
+  shouldSuppressFirstDirectChildStartUpdate,
+  shouldSuppressImmediateStartUpdate,
+  shouldResumeBlockedTask,
   tokenizeTaskSimilarityText,
 };

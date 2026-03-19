@@ -18,6 +18,7 @@ interface ScheduleRow {
   name: string;
   next_run_at: string | null;
   task_template: Record<string, unknown> | null;
+  timezone?: string | null;
 }
 
 /**
@@ -46,7 +47,7 @@ export async function checkSchedules(): Promise<void> {
     if (nextRun && nextRun > now) continue;
 
     // Calculate next run from cron expression
-    const nextRunAt = calculateNextRun(schedule.cron_expr);
+    const nextRunAt = calculateNextRun(schedule.cron_expr, schedule.timezone || undefined);
     const nowIso = now.toISOString();
     const template = (schedule.task_template || {}) as ScheduleTaskTemplate;
     const title =
@@ -142,9 +143,9 @@ export async function reconcileLegacySchedules(): Promise<void> {
 
   const { data: schedule, error } = await db
     .from("schedules")
-    .select("id,name,cron_expr")
+    .select("id,name,cron_expr,timezone")
     .eq("name", "sentinel-health-check")
-    .maybeSingle<{ cron_expr: string; id: string; name: string }>();
+    .maybeSingle<{ cron_expr: string; id: string; name: string; timezone: string | null }>();
 
   if (error || !schedule || schedule.cron_expr !== legacyCron) {
     return;
@@ -154,7 +155,7 @@ export async function reconcileLegacySchedules(): Promise<void> {
     .from("schedules")
     .update({
       cron_expr: targetCron,
-      next_run_at: calculateNextRun(targetCron),
+      next_run_at: calculateNextRun(targetCron, schedule.timezone || undefined),
     })
     .eq("id", schedule.id);
 
@@ -173,10 +174,13 @@ export async function reconcileLegacySchedules(): Promise<void> {
  * Supports: minute, hour, day-of-month, month, day-of-week
  * For production, use a proper cron library.
  */
-export function calculateNextRun(cronExpr: string): string {
+export function calculateNextRun(cronExpr: string, timezone?: string): string {
   try {
     return cronParser
-      .parseExpression(cronExpr.trim(), { currentDate: new Date() })
+      .parseExpression(cronExpr.trim(), {
+        currentDate: new Date(),
+        tz: timezone || undefined,
+      })
       .next()
       .toDate()
       .toISOString();

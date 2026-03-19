@@ -195,6 +195,7 @@ export interface Schedule {
   id: string;
   name: string;
   cron_expr: string;
+  timezone: string;
   assigned_role: string;
   task_template: Record<string, unknown>;
   enabled: boolean;

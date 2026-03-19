@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { config } from "./config.js";
 import { getDb } from "./db.js";
@@ -7,6 +7,9 @@ import { getDb } from "./db.js";
 const DELIVERY_ARTIFACT_TYPE = "delivery_page";
 const DELIVERY_ARTIFACT_NAME = "operator-result-page";
 const DELIVERY_TOKEN_PURPOSE = "operator-result";
+const DELIVERY_TOKEN_SECRET_FALLBACK = "agent-os-admin";
+const IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"]);
+const REPORT_EXTENSIONS = new Set([".html", ".markdown", ".md", ".txt"]);
 const MAX_SOURCE_CHARS = 80000;
 
 interface DeliveryTask {
@@ -39,12 +42,26 @@ interface DeliveryArtifactReference {
   task_id: string | null;
 }
 
+interface DeliveryEvidenceImage {
+  caption: string;
+  externalUrl: string | null;
+  filePath: string | null;
+  name: string;
+  taskId: string | null;
+}
+
 interface DeliveryBundle {
   artifactRefs: DeliveryArtifactReference[];
+  evidenceImages: DeliveryEvidenceImage[];
   html: string;
   plainText: string;
   summary: string;
   title: string;
+}
+
+interface DeliveryLink {
+  path: string;
+  url: string | null;
 }
 
 export async function maybePublishOperatorResultPage(args: {
@@ -54,9 +71,9 @@ export async function maybePublishOperatorResultPage(args: {
   rootTaskTitle: string;
   selectedTask: DeliveryTask;
   summary: string;
-}): Promise<string | null> {
-  const shareUrl = buildOperatorResultUrl(args.rootTaskId);
-  if (!shareUrl) {
+}): Promise<DeliveryLink | null> {
+  const deliveryLink = buildOperatorResultLink(args.rootTaskId);
+  if (!deliveryLink) {
     return null;
   }
 
@@ -67,33 +84,43 @@ export async function maybePublishOperatorResultPage(args: {
 
   const bundle = await buildDeliveryBundle({
     artifacts,
+    rootTaskId: args.rootTaskId,
     requestTasks: args.requestTasks,
     rootTaskTitle: args.rootTaskTitle,
     selectedTask: args.selectedTask,
     summary: args.summary,
   });
 
-  await upsertDeliveryArtifact(args.rootTaskId, shareUrl, bundle);
-  return shareUrl;
+  await upsertDeliveryArtifact(
+    args.rootTaskId,
+    deliveryLink,
+    bundle,
+    args.requestTasks.map((task) => task.id)
+  );
+  return deliveryLink;
 }
 
-function buildOperatorResultUrl(taskId: string): string | null {
+function buildOperatorResultLink(taskId: string): DeliveryLink | null {
+  if (!taskId) {
+    return null;
+  }
+
   const baseUrl = String(
     process.env.ADMIN_PUBLIC_URL || process.env.SERVICE_URL_ADMIN || ""
   )
     .trim()
     .replace(/\/+$/, "");
-  const secret = String(process.env.JWT_SECRET || "").trim();
-
-  if (!baseUrl || !secret || !taskId) {
-    return null;
-  }
+  const secret = resolveDeliveryTokenSecret();
 
   const token = createHmac("sha256", secret)
     .update(`${DELIVERY_TOKEN_PURPOSE}:${taskId}`)
     .digest("base64url");
 
-  return `${baseUrl}/deliveries/${taskId}/${token}`;
+  const path = `/deliveries/${taskId}/${token}`;
+  return {
+    path,
+    url: baseUrl ? `${baseUrl}${path}` : null,
+  };
 }
 
 async function loadArtifactsForTasks(taskIds: string[]): Promise<DeliveryArtifactRow[]> {
@@ -126,6 +153,7 @@ function shouldPublishRichResultPage(
   artifacts: DeliveryArtifactRow[],
   deliveryChannel: "admin_chat" | "telegram"
 ): boolean {
+  const handoffNote = String(selectedTask.last_handoff_note || "").trim();
   if (
     artifacts.some((artifact) => artifact.artifact_type === "report" || artifact.artifact_type === "doc")
   ) {
@@ -137,6 +165,14 @@ function shouldPublishRichResultPage(
   }
 
   if (looksLikeRichResultTask(selectedTask)) {
+    return true;
+  }
+
+  if (
+    /\bdry-?run example\b/i.test(handoffNote) ||
+    /```/.test(handoffNote) ||
+    handoffNote.length > 500
+  ) {
     return true;
   }
 
@@ -153,13 +189,16 @@ function looksLikeRichResultTask(task: DeliveryTask): boolean {
 
 async function buildDeliveryBundle(args: {
   artifacts: DeliveryArtifactRow[];
+  rootTaskId: string;
   requestTasks: DeliveryTask[];
   rootTaskTitle: string;
   selectedTask: DeliveryTask;
   summary: string;
 }): Promise<DeliveryBundle> {
   const primaryArtifact = pickPrimaryArtifact(args.artifacts, args.selectedTask.id);
-  const sourceText = await readPrimaryArtifactText(primaryArtifact);
+  const sourceText =
+    (await readPrimaryArtifactText(primaryArtifact)) ||
+    (await readWorkspaceReportFallback(args.requestTasks));
   const derivedSummary =
     summarizeSourceText(sourceText) ||
     summarizeHandoff(args.selectedTask.last_handoff_note) ||
@@ -177,9 +216,17 @@ async function buildDeliveryBundle(args: {
       storage_path: artifact.storage_path,
       task_id: artifact.task_id,
     }));
+  const evidenceImages = await collectEvidenceImages({
+    artifacts: args.artifacts,
+    primaryArtifact,
+    rootTaskId: args.rootTaskId,
+    requestTasks: args.requestTasks,
+    sourceText,
+  });
   const title = buildDeliveryTitle(args.rootTaskTitle, args.selectedTask);
   const plainText = buildPlainTextDelivery({
     artifactRefs,
+    evidenceImages,
     selectedTask: args.selectedTask,
     sourceText,
     summary: derivedSummary,
@@ -187,8 +234,10 @@ async function buildDeliveryBundle(args: {
 
   return {
     artifactRefs,
+    evidenceImages,
     html: buildDeliveryHtmlDocument({
       artifactRefs,
+      evidenceImages,
       primaryArtifact,
       reportHtml,
       selectedTask: args.selectedTask,
@@ -228,7 +277,7 @@ async function readPrimaryArtifactText(
   }
 
   const extension = extname(artifact.storage_path).toLowerCase();
-  if (![".html", ".markdown", ".md", ".txt"].includes(extension)) {
+  if (!REPORT_EXTENSIONS.has(extension)) {
     return null;
   }
 
@@ -243,6 +292,362 @@ async function readPrimaryArtifactText(
     return content.slice(0, MAX_SOURCE_CHARS);
   } catch {
     return null;
+  }
+}
+
+async function readWorkspaceReportFallback(
+  requestTasks: DeliveryTask[]
+): Promise<string | null> {
+  for (const task of requestTasks) {
+    const reportPathCandidates = extractReferencedWorkspaceReportPaths(
+      task.last_handoff_note
+    );
+    for (const relativePath of reportPathCandidates) {
+      const content = await readWorkspaceTextFile(task.id, relativePath);
+      if (content) {
+        return content;
+      }
+    }
+
+    const discoveredReportPaths = await findWorkspaceReportFiles(task.id);
+    for (const relativePath of discoveredReportPaths) {
+      const content = await readWorkspaceTextFile(task.id, relativePath);
+      if (content) {
+        return content;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function readWorkspaceTextFile(
+  taskId: string,
+  relativePath: string
+): Promise<string | null> {
+  const extension = extname(relativePath).toLowerCase();
+  if (!REPORT_EXTENSIONS.has(extension)) {
+    return null;
+  }
+
+  const workspaceRoot = resolve(config.workspacesDir, taskId);
+  const absolutePath = resolve(workspaceRoot, relativePath);
+  if (!isPathInsideRoot(absolutePath, workspaceRoot)) {
+    return null;
+  }
+
+  try {
+    const content = await readFile(absolutePath, "utf8");
+    return content.slice(0, MAX_SOURCE_CHARS);
+  } catch {
+    return null;
+  }
+}
+
+function extractReferencedWorkspaceReportPaths(note: string | null): string[] {
+  const paths = new Set<string>();
+  const pathPattern =
+    /\b((?:artifacts|reports|evidence|task-artifacts\/review|task-artifacts\/reports)\/[^)\s]+\.(?:html|markdown|md|txt))\b/gim;
+
+  for (const match of String(note || "").matchAll(pathPattern)) {
+    const candidate = String(match[1] || "").trim();
+    if (candidate) {
+      paths.add(candidate);
+    }
+  }
+
+  return [...paths];
+}
+
+async function findWorkspaceReportFiles(taskId: string): Promise<string[]> {
+  const candidates = [
+    "artifacts",
+    "reports",
+    "evidence",
+    "task-artifacts/review",
+    "task-artifacts/reports",
+  ];
+  const matches: string[] = [];
+
+  for (const candidate of candidates) {
+    const found = await listFilesRecursively(resolve(config.workspacesDir, taskId, candidate), 2);
+    for (const absolutePath of found) {
+      const extension = extname(absolutePath).toLowerCase();
+      if (!REPORT_EXTENSIONS.has(extension)) {
+        continue;
+      }
+
+      const workspaceRoot = resolve(config.workspacesDir, taskId);
+      if (!isPathInsideRoot(absolutePath, workspaceRoot)) {
+        continue;
+      }
+
+      matches.push(absolutePath.slice(workspaceRoot.length + 1).replace(/\\/g, "/"));
+    }
+  }
+
+  return matches.sort();
+}
+
+async function collectEvidenceImages(args: {
+  artifacts: DeliveryArtifactRow[];
+  primaryArtifact: DeliveryArtifactRow | null;
+  rootTaskId: string;
+  requestTasks: DeliveryTask[];
+  sourceText: string | null;
+}): Promise<DeliveryEvidenceImage[]> {
+  const evidence = new Map<string, DeliveryEvidenceImage>();
+  const defaultTaskId = args.primaryArtifact?.task_id || null;
+
+  const addEvidence = (candidate: DeliveryEvidenceImage | null) => {
+    if (!candidate) {
+      return;
+    }
+
+    const key = `${candidate.taskId || "external"}::${
+      candidate.externalUrl || candidate.filePath || candidate.name
+    }`;
+    if (evidence.has(key)) {
+      return;
+    }
+
+    evidence.set(key, candidate);
+  };
+
+  for (const artifact of args.artifacts) {
+    if (!isImageArtifact(artifact)) {
+      continue;
+    }
+
+    addEvidence(buildArtifactEvidenceImage(args.rootTaskId, artifact));
+  }
+
+  for (const reference of extractInlineImageReferences(args.sourceText)) {
+    if (looksLikeExternalUrl(reference.path)) {
+      addEvidence({
+        caption: reference.caption || buildEvidenceCaption(reference.path),
+        externalUrl: reference.path,
+        filePath: null,
+        name: reference.caption || buildEvidenceCaption(reference.path),
+        taskId: null,
+      });
+      continue;
+    }
+
+    if (!defaultTaskId) {
+      continue;
+    }
+
+    addEvidence({
+      caption: reference.caption || buildEvidenceCaption(reference.path),
+      externalUrl: null,
+      filePath: buildDeliveryFilePath(args.rootTaskId, defaultTaskId, reference.path),
+      name: reference.caption || buildEvidenceCaption(reference.path),
+      taskId: defaultTaskId,
+    });
+  }
+
+  if (!evidence.size) {
+    for (const workspaceImage of await collectWorkspaceEvidenceImages(
+      args.requestTasks,
+      args.rootTaskId
+    )) {
+      addEvidence(workspaceImage);
+    }
+  }
+
+  return [...evidence.values()].slice(0, 8);
+}
+
+function buildArtifactEvidenceImage(
+  rootTaskId: string,
+  artifact: DeliveryArtifactRow
+): DeliveryEvidenceImage | null {
+  if (artifact.external_url) {
+    return {
+      caption: buildEvidenceCaption(artifact.name || artifact.external_url),
+      externalUrl: artifact.external_url,
+      filePath: null,
+      name: artifact.name || "Evidence image",
+      taskId: artifact.task_id,
+    };
+  }
+
+  if (!artifact.storage_path || !artifact.task_id) {
+    return null;
+  }
+
+  return {
+    caption: buildEvidenceCaption(artifact.name || artifact.storage_path),
+    externalUrl: null,
+    filePath: buildDeliveryFilePath(rootTaskId, artifact.task_id, artifact.storage_path),
+    name: artifact.name || artifact.storage_path,
+    taskId: artifact.task_id,
+  };
+}
+
+function buildDeliveryFilePath(
+  rootTaskId: string,
+  taskId: string,
+  relativePath: string
+): string {
+  return `/deliveries/${rootTaskId}/${signDeliveryToken(rootTaskId)}/file/${taskId}/${encodePathSegmentPath(
+    relativePath
+  )}`;
+}
+
+function encodePathSegmentPath(value: string): string {
+  return String(value || "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+function extractInlineImageReferences(
+  sourceText: string | null
+): Array<{ caption: string; path: string }> {
+  const matches: Array<{ caption: string; path: string }> = [];
+  const seen = new Set<string>();
+  const markdownImagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  const markdownLinkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const loosePathPattern =
+    /(?:^|[\s(])((?:artifacts|evidence|screenshots|images)\/[^)\s]+\.(?:gif|jpe?g|png|svg|webp))(?:$|[\s)])/gim;
+
+  const pushMatch = (caption: string, path: string) => {
+    const normalizedPath = String(path || "").trim();
+    if (!normalizedPath || !looksLikeImagePath(normalizedPath) || seen.has(normalizedPath)) {
+      return;
+    }
+
+    seen.add(normalizedPath);
+    matches.push({
+      caption: String(caption || "").trim(),
+      path: normalizedPath,
+    });
+  };
+
+  const source = String(sourceText || "");
+  for (const match of source.matchAll(markdownImagePattern)) {
+    pushMatch(match[1] || "", match[2] || "");
+  }
+  for (const match of source.matchAll(markdownLinkPattern)) {
+    pushMatch(match[1] || "", match[2] || "");
+  }
+  for (const match of source.matchAll(loosePathPattern)) {
+    pushMatch("", match[1] || "");
+  }
+
+  return matches;
+}
+
+function buildEvidenceCaption(value: string): string {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "Evidence image";
+  }
+
+  const withoutPath = trimmed.split(/[\\/]/).pop() || trimmed;
+  const withoutExtension = withoutPath.replace(/\.[a-z0-9]+$/i, "");
+  return withoutExtension.replace(/[-_]+/g, " ").trim() || "Evidence image";
+}
+
+function isImageArtifact(artifact: DeliveryArtifactRow): boolean {
+  if (artifact.mime_type && artifact.mime_type.toLowerCase().startsWith("image/")) {
+    return true;
+  }
+
+  if (artifact.storage_path) {
+    return IMAGE_EXTENSIONS.has(extname(artifact.storage_path).toLowerCase());
+  }
+
+  if (artifact.external_url) {
+    return looksLikeImagePath(artifact.external_url);
+  }
+
+  return false;
+}
+
+function looksLikeImagePath(value: string): boolean {
+  const pathname = String(value || "").split("?")[0].toLowerCase();
+  return [...IMAGE_EXTENSIONS].some((extension) => pathname.endsWith(extension));
+}
+
+function looksLikeExternalUrl(value: string): boolean {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+async function collectWorkspaceEvidenceImages(
+  requestTasks: DeliveryTask[],
+  rootTaskId: string
+): Promise<DeliveryEvidenceImage[]> {
+  const images: DeliveryEvidenceImage[] = [];
+  const candidateDirs = [
+    "artifacts/browser",
+    "artifacts/screenshots",
+    "artifacts/evidence",
+    "task-artifacts/screenshots",
+    "task-artifacts/browser",
+    "task-artifacts/evidence",
+    "screenshots",
+    "evidence",
+  ];
+
+  for (const task of requestTasks) {
+    for (const dir of candidateDirs) {
+      const absoluteDir = resolve(config.workspacesDir, task.id, dir);
+      const files = await listFilesRecursively(absoluteDir, 2);
+      for (const absolutePath of files) {
+        if (!looksLikeImagePath(absolutePath)) {
+          continue;
+        }
+
+        const workspaceRoot = resolve(config.workspacesDir, task.id);
+        if (!isPathInsideRoot(absolutePath, workspaceRoot)) {
+          continue;
+        }
+
+        const relativePath = absolutePath
+          .slice(workspaceRoot.length + 1)
+          .replace(/\\/g, "/");
+        images.push({
+          caption: buildEvidenceCaption(relativePath),
+          externalUrl: null,
+          filePath: buildDeliveryFilePath(rootTaskId, task.id, relativePath),
+          name: relativePath,
+          taskId: task.id,
+        });
+      }
+    }
+  }
+
+  return images;
+}
+
+async function listFilesRecursively(
+  absoluteDir: string,
+  maxDepth: number
+): Promise<string[]> {
+  if (maxDepth < 0) {
+    return [];
+  }
+
+  try {
+    const entries = await readdir(absoluteDir, { withFileTypes: true });
+    const results: string[] = [];
+    for (const entry of entries) {
+      const nextPath = resolve(absoluteDir, entry.name);
+      if (entry.isDirectory()) {
+        results.push(...(await listFilesRecursively(nextPath, maxDepth - 1)));
+        continue;
+      }
+      if (entry.isFile()) {
+        results.push(nextPath);
+      }
+    }
+    return results;
+  } catch {
+    return [];
   }
 }
 
@@ -313,6 +718,7 @@ function buildDeliveryTitle(rootTaskTitle: string, selectedTask: DeliveryTask): 
 
 function buildPlainTextDelivery(args: {
   artifactRefs: DeliveryArtifactReference[];
+  evidenceImages: DeliveryEvidenceImage[];
   selectedTask: DeliveryTask;
   sourceText: string | null;
   summary: string;
@@ -334,17 +740,48 @@ function buildPlainTextDelivery(args: {
     }
   }
 
+  if (args.evidenceImages.length) {
+    lines.push("", "Embedded screenshot evidence:");
+    for (const image of args.evidenceImages.slice(0, 6)) {
+      lines.push(`- ${image.caption || image.name}`);
+    }
+  }
+
   return trimToLength(lines.filter(Boolean).join("\n"), MAX_SOURCE_CHARS);
 }
 
 function buildDeliveryHtmlDocument(args: {
   artifactRefs: DeliveryArtifactReference[];
+  evidenceImages: DeliveryEvidenceImage[];
   primaryArtifact: DeliveryArtifactRow | null;
   reportHtml: string;
   selectedTask: DeliveryTask;
   summary: string;
   title: string;
 }): string {
+  const screenshotEvidenceHtml = args.evidenceImages.length
+    ? `<section class="card"><h2>Screenshot Evidence</h2><div class="evidence-grid">${args.evidenceImages
+        .map((image) => {
+          const imageSrc = image.externalUrl || image.filePath;
+          if (!imageSrc) {
+            return "";
+          }
+
+          const linkMarkup = image.externalUrl
+            ? `<p class="evidence-link"><a href="${escapeHtmlAttribute(image.externalUrl)}" target="_blank" rel="noreferrer">Open original</a></p>`
+            : "";
+
+          return `<figure class="evidence-card">
+            <img src="${escapeHtmlAttribute(imageSrc)}" alt="${escapeHtmlAttribute(
+              image.caption || image.name
+            )}" loading="lazy" />
+            <figcaption>${escapeHtml(image.caption || image.name)}</figcaption>
+            ${linkMarkup}
+          </figure>`;
+        })
+        .filter(Boolean)
+        .join("")}</div></section>`
+    : "";
   const evidenceHtml = args.artifactRefs.length
     ? `<section class="card"><h2>Related Evidence</h2><ul class="evidence-list">${args.artifactRefs
         .map((artifact) => {
@@ -450,6 +887,33 @@ function buildDeliveryHtmlDocument(args: {
         border: 1px solid var(--line);
         overflow-x: auto;
       }
+      .evidence-grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .evidence-card {
+        margin: 0;
+        background: #f9f3e4;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .evidence-card img {
+        display: block;
+        width: 100%;
+        height: auto;
+        background: #efe4cf;
+      }
+      .evidence-card figcaption {
+        font-size: 0.95rem;
+        font-weight: 600;
+        padding: 10px 12px 0;
+      }
+      .evidence-link {
+        margin: 6px 0 0;
+        padding: 0 12px 12px;
+      }
       .artifact-type, .source-meta {
         color: var(--muted);
       }
@@ -485,6 +949,7 @@ function buildDeliveryHtmlDocument(args: {
         <h2>Full Result</h2>
         <div class="report-body">${args.reportHtml}</div>
       </section>
+      ${screenshotEvidenceHtml}
       ${evidenceHtml}
     </main>
   </body>
@@ -710,19 +1175,34 @@ function trimToLength(value: string, maxLength: number): string {
   return `${compact.slice(0, maxLength - 3).trim()}...`;
 }
 
+function resolveDeliveryTokenSecret(): string {
+  return String(process.env.JWT_SECRET || DELIVERY_TOKEN_SECRET_FALLBACK).trim();
+}
+
+function signDeliveryToken(taskId: string): string {
+  return createHmac("sha256", resolveDeliveryTokenSecret())
+    .update(`${DELIVERY_TOKEN_PURPOSE}:${taskId}`)
+    .digest("base64url");
+}
+
 async function upsertDeliveryArtifact(
   rootTaskId: string,
-  shareUrl: string,
-  bundle: DeliveryBundle
+  deliveryLink: DeliveryLink,
+  bundle: DeliveryBundle,
+  allowedTaskIds: string[]
 ): Promise<void> {
   const db = getDb();
   const metadata = {
+    allowed_task_ids: [...new Set(allowedTaskIds.filter(Boolean))],
     artifact_refs: bundle.artifactRefs,
     delivery_type: DELIVERY_TOKEN_PURPOSE,
+    evidence_images: bundle.evidenceImages,
     html: bundle.html,
+    path: deliveryLink.path,
     plain_text: bundle.plainText,
     summary: bundle.summary,
     title: bundle.title,
+    url: deliveryLink.url,
   };
 
   const { data: existing, error: existingError } = await db
@@ -744,7 +1224,7 @@ async function upsertDeliveryArtifact(
     const { error } = await db
       .from("artifacts")
       .update({
-        external_url: shareUrl,
+        external_url: deliveryLink.url || deliveryLink.path,
         metadata,
         mime_type: "text/html",
       })
@@ -758,7 +1238,7 @@ async function upsertDeliveryArtifact(
 
   const { error } = await db.from("artifacts").insert({
     artifact_type: DELIVERY_ARTIFACT_TYPE,
-    external_url: shareUrl,
+    external_url: deliveryLink.url || deliveryLink.path,
     metadata,
     mime_type: "text/html",
     name: DELIVERY_ARTIFACT_NAME,
@@ -771,6 +1251,8 @@ async function upsertDeliveryArtifact(
 }
 
 export const resultDeliveryTestHooks = {
+  buildOperatorResultLink,
+  extractInlineImageReferences,
   renderMarkdownishToHtml,
   shouldPublishRichResultPage,
   summarizeSourceText,

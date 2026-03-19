@@ -64,7 +64,7 @@ export async function taskCreate(args: {
   await assertTaskMutationAllowed("task_create");
   const currentTask = await getCurrentTaskContext();
   const parentTaskId = args.parent_task_id || currentTask?.id || null;
-  const dependencyIds = [...new Set((args.depends_on || []).map((value) => value.trim()).filter(Boolean))];
+  let dependencyIds = normalizeDependencyIdsForParent(args.depends_on || [], parentTaskId);
   let projectId = args.project_id || null;
   let parentProjectId: string | null = null;
   let customerId = String(args.customer_id || "").trim() || currentTask?.customer_id || null;
@@ -127,12 +127,27 @@ export async function taskCreate(args: {
     await enforceScope("department", departmentId);
   }
 
+  if (currentTask?.id && parentTaskId === currentTask.id) {
+    const requiredDownstreamRole = await loadRequiredDownstreamRole(currentTask.id);
+    if (requiredDownstreamRole && args.assigned_role !== requiredDownstreamRole) {
+      return {
+        success: false,
+        error: `This task must first delegate to '${requiredDownstreamRole}' before creating '${args.assigned_role}' child tasks.`,
+      };
+    }
+  }
+
   if (parentTaskId) {
     const rootTask = await loadRootTaskContext(parentTaskId);
+    const hasRequirementsWalkthroughBlockers =
+      rootTask?.id
+        ? await hasUnresolvedRequirementsWalkthroughBlockers(rootTask.id)
+        : false;
     if (
       shouldBlockRequirementsWalkthroughDelegation(
         rootTask,
-        args.assigned_role
+        args.assigned_role,
+        hasRequirementsWalkthroughBlockers
       )
     ) {
       return {
@@ -266,6 +281,43 @@ export async function taskCreate(args: {
   return { success: true, task: insertPayload };
 }
 
+function normalizeDependencyIdsForParent(
+  dependencyIds: string[],
+  parentTaskId: string | null
+): string[] {
+  const normalized = [...new Set(dependencyIds.map((value) => value.trim()).filter(Boolean))];
+  if (!parentTaskId) {
+    return normalized;
+  }
+
+  return normalized.filter((dependencyId) => dependencyId !== parentTaskId);
+}
+
+async function loadRequiredDownstreamRole(taskId: string): Promise<string | null> {
+  const db = getDb();
+  const { data, error } = await db
+    .from("task_requirements")
+    .select("expected,status")
+    .eq("task_id", taskId)
+    .eq("requirement_type", "downstream_task")
+    .eq("required_for_completion", true)
+    .in("status", ["pending", "blocked", "failed"])
+    .order("created_at")
+    .limit(1)
+    .maybeSingle<{ expected?: Record<string, unknown> | null; status: string }>();
+
+  if (error) {
+    return null;
+  }
+
+  const recommendedRole =
+    typeof data?.expected?.recommended_role === "string"
+      ? data.expected.recommended_role.trim()
+      : "";
+
+  return recommendedRole || null;
+}
+
 interface RootTaskContext {
   assigned_role: string;
   id: string;
@@ -305,9 +357,29 @@ async function loadRootTaskContext(taskId: string): Promise<RootTaskContext | nu
   return currentTask;
 }
 
+async function hasUnresolvedRequirementsWalkthroughBlockers(
+  taskId: string
+): Promise<boolean> {
+  const db = getDb();
+  const { count, error } = await db
+    .from("task_requirements")
+    .select("id", { count: "exact", head: true })
+    .eq("task_id", taskId)
+    .eq("required_for_completion", true)
+    .in("status", ["blocked", "failed"])
+    .neq("requirement_type", "downstream_task");
+
+  if (error) {
+    return true;
+  }
+
+  return (count || 0) > 0;
+}
+
 function shouldBlockRequirementsWalkthroughDelegation(
   rootTask: RootTaskContext | null,
-  assignedRole: string
+  assignedRole: string,
+  hasRequirementsWalkthroughBlockers: boolean
 ): boolean {
   if (!rootTask) {
     return false;
@@ -325,9 +397,15 @@ function shouldBlockRequirementsWalkthroughDelegation(
     return false;
   }
 
+  if (!hasRequirementsWalkthroughBlockers) {
+    return false;
+  }
+
   return !["relay", "sage"].includes(assignedRole);
 }
 
 export const taskCreateTestHooks = {
+  hasUnresolvedRequirementsWalkthroughBlockers,
+  normalizeDependencyIdsForParent,
   shouldBlockRequirementsWalkthroughDelegation,
 };

@@ -88,6 +88,14 @@ missing or inactive, stop and ask the operator to configure it in Service Connec
 Do not proceed without it and do not ship a placeholder implementation pretending the
 real integration is complete.
 
+When a task needs an authenticated third-party API call through an active Service
+Connection, use the managed `service_request` MCP tool. Do not try to read raw
+credentials, and do not conclude that the platform lacks a mutation path if the only
+missing piece is a service-backed HTTP request the control plane can perform for you.
+If the operator already supplied scoped account identifiers such as a location ID,
+workspace ID, site hostname, or project ID, reuse those exact identifiers in your
+service-backed requests instead of trying to rediscover account scope from scratch.
+
 When the task requires inspecting, restarting, or reloading managed VPS services, use
 the `service_control` MCP tool if the target service is supported there. Do not bypass
 that control path with direct Docker commands unless your task explicitly requires lower-
@@ -98,6 +106,18 @@ interaction, login flows, research, scraping, downloads, or form submission - us
 preinstalled `agent-browser` workflow or the managed browser path already provided by
 the system. Do not waste time trying to install Chromium, Playwright, Selenium, or
 other browser runtimes inside the task workspace.
+
+When you use `agent-browser`, prefer short explicit commands that perform a concrete
+action and return, for example:
+
+- `agent-browser open <url>`
+- `agent-browser snapshot -i`
+- `agent-browser screenshot <path>`
+- `agent-browser close`
+
+Do not launch a bare `agent-browser` daemon or a session-only command without an
+immediate browser action. That can leave the task hanging with no useful output. Once
+you have the evidence you need, close the browser session.
 
 ### 4. End every session with a handoff note
 
@@ -237,6 +257,9 @@ When a task has multiple stages, prefer creating a task graph instead of relying
 manual follow-up. `task_create` supports `depends_on`, so you can queue later review,
 verification, or remediation tasks now and let the scheduler wait automatically for the
 prerequisite work to finish.
+When you create a staged task graph, make each task depend on the actual prerequisite
+task IDs in the chain. A review task should usually depend on the implementation task it
+is meant to inspect, not only on the planning task that created it.
 
 The cost of pausing is always less than the cost of a confident mistake.
 

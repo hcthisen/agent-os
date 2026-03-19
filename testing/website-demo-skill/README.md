@@ -16,7 +16,7 @@ Expected behavior:
 
 ## Loop
 
-1. Reset the live VPS runtime while preserving provider auth and service registry.
+1. Reset the live VPS runtime while preserving provider auth and only the `openai` service entry.
 2. Submit the saved prompt from `prompt.md`.
 3. Monitor `messages`, `tasks`, `events`, `handoffs`, and memory writes.
 4. Stop the run as soon as the system does something materially wrong.
@@ -34,11 +34,13 @@ Run:
 python testing/website-demo-skill/reset_live_system.py
 ```
 
-The reset script clears runtime history, projects, memories, skills, schedules, and workspaces while preserving:
+The reset script clears runtime history, projects, memories, skills, schedules, workspaces, and all non-OpenAI service connections while preserving:
 
 - provider auth volumes
-- service registry entries
+- the `openai` service registry entry only
 - stack configuration and env values
+
+Any other `service_registry` row, including active third-party credentials and `key_needed` placeholder rows created during a blocked test, is removed on reset.
 
 ## Monitoring Focus
 

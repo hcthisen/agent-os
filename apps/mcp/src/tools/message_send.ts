@@ -1,4 +1,3 @@
-import { getDb } from "../db.js";
 import { getAgentContext } from "../context.js";
 import { enforceScope, getCurrentTaskContext } from "../scope.js";
 import { assertTaskMutationAllowed } from "../simulation.js";
@@ -36,7 +35,6 @@ export async function messageSend(args: {
   task_id?: string;
   metadata?: Record<string, unknown>;
 }): Promise<unknown> {
-  const db = getDb();
   const ctx = getAgentContext();
   let taskId = args.task_id || null;
 
@@ -46,12 +44,6 @@ export async function messageSend(args: {
     taskId = (await getCurrentTaskContext())?.id || null;
   }
   await assertTaskMutationAllowed("message_send");
-
-  const { data: agent } = await db
-    .from("agents")
-    .select("name")
-    .eq("id", ctx.agent_id)
-    .single();
 
   const result = await callSupervisorControl<{
     adminMirrorMessage: Record<string, unknown> | null;
@@ -64,7 +56,7 @@ export async function messageSend(args: {
     channel: args.channel,
     content: args.content,
     metadata: args.metadata || {},
-    sender: agent?.name || ctx.role_id,
+    sender: ctx.role_id || "system",
     task_id: taskId,
   });
 

@@ -11,6 +11,7 @@ import { monitorTaskOutcomes } from "./task-outcomes.js";
 import { sendManagedMessage } from "./operator-delivery.js";
 import {
   handlePublicSiteRouteControl,
+  handleServiceRequestControl,
   handleServiceControlControl,
 } from "./control-plane.js";
 import {
@@ -222,6 +223,20 @@ async function main() {
       try {
         const payload = await readJsonBody(req);
         const result = await handleServiceControlControl(payload);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      }
+    } else if (req.url === "/control/service-request" && req.method === "POST") {
+      try {
+        const payload = await readJsonBody(req);
+        const result = await handleServiceRequestControl(payload);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (error) {

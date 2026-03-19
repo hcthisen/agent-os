@@ -17,6 +17,10 @@ import { getDb } from "./db.js";
 import { config } from "./config.js";
 import { getAnthropicAuthSnapshot } from "./provider-auth.js";
 import {
+  loadRemoteMcpConfigBundle,
+  type RemoteMcpServerConfig,
+} from "./remote-mcp.js";
+import {
   getRuntimeProviderConfig,
   resolveProviderLaunch,
   type RuntimeProvider,
@@ -35,7 +39,11 @@ interface ActiveProcess {
   responsePath: string | null;
   roleId: string;
   taskId: string;
-  terminationReason: "inactivity_timeout" | "max_duration_timeout" | null;
+  terminationReason:
+    | "inactivity_timeout"
+    | "max_duration_timeout"
+    | "missing_process"
+    | null;
   agentId: string;
   runId: string;
   traceId: string;
@@ -274,13 +282,17 @@ export async function launchAgent(
     maxRunDurationMs,
     roleId,
     runId,
-    taskId,
-    traceId,
-    workDir,
-  });
+      taskId,
+      traceId,
+      workDir,
+    });
+  const remoteMcpConfig =
+    activeProvider === "openai"
+      ? await loadRemoteMcpConfigBundle()
+      : { env: {}, servers: [] as RemoteMcpServerConfig[] };
   const providerHomeDir =
     activeProvider === "openai"
-      ? await prepareCodexHome(workDir, mcpServerEnv)
+      ? await prepareCodexHome(workDir, mcpServerEnv, remoteMcpConfig.servers)
       : config.agentHomeDir;
 
   // Write MCP config with env vars resolved
@@ -322,6 +334,7 @@ export async function launchAgent(
     effort: resolvedLaunch.effort,
     homeDir: providerHomeDir,
     mcpConfigPath,
+    mcpProcessEnv: remoteMcpConfig.env,
     model: resolvedLaunch.model,
     prompt,
     responsePath,
@@ -386,6 +399,11 @@ export async function launchAgent(
       console.error(`Error handling process exit for ${runId}:`, err)
     );
   });
+  proc.on("close", (code, signal) => {
+    handleProcessExit(runId, code, signal).catch((err) =>
+      console.error(`Error handling process close for ${runId}:`, err)
+    );
+  });
 
   active.inactivityCheck = setInterval(() => {
     const current = activeProcesses.get(runId);
@@ -393,6 +411,30 @@ export async function launchAgent(
       if (active.inactivityCheck) {
         clearInterval(active.inactivityCheck);
       }
+      return;
+    }
+
+    if (shouldReconcileMissingProcess(current)) {
+      current.terminationReason = "missing_process";
+      if (current.inactivityCheck) {
+        clearInterval(current.inactivityCheck);
+        current.inactivityCheck = null;
+      }
+      if (current.durationCheck) {
+        clearInterval(current.durationCheck);
+        current.durationCheck = null;
+      }
+      console.warn(
+        `Process ${runId} disappeared before exit handling completed for task ${current.taskId}`
+      );
+      void logMissingProcess(current);
+      void handleProcessExit(
+        runId,
+        current.proc.exitCode ?? 1,
+        current.proc.signalCode ?? null
+      ).catch((err) =>
+        console.error(`Error reconciling missing process for ${runId}:`, err)
+      );
       return;
     }
 
@@ -889,12 +931,64 @@ async function logMaxDurationTimeout(
   }
 }
 
+async function logMissingProcess(active: ActiveProcess): Promise<void> {
+  const db = getDb();
+  const { error } = await db.from("events").insert({
+    trace_id: active.traceId,
+    agent_id: active.agentId,
+    event_type: "task.process_missing",
+    severity: "warning",
+    scope_type: "task",
+    scope_id: active.taskId,
+    summary: "Agent worker process disappeared before a terminal task result was recorded.",
+    detail: {
+      last_activity_at: active.lastActivityAt.toISOString(),
+      last_activity_summary: active.lastActivitySummary,
+      pid: active.proc.pid ?? null,
+      run_id: active.runId,
+    },
+  });
+
+  if (error) {
+    console.error(
+      `Failed to log missing-process event for task ${active.taskId}:`,
+      error
+    );
+  }
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+  if (!Number.isInteger(pid) || (pid ?? 0) <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid as number, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code !== "ESRCH";
+  }
+}
+
+function shouldReconcileMissingProcess(active: ActiveProcess): boolean {
+  if (active.terminationReason) {
+    return false;
+  }
+
+  return !isProcessAlive(active.proc.pid);
+}
+
 function buildProcessExitMessage(
   active: ActiveProcess,
   code: number | null,
   signal: string | null,
   structuredFailureDetail: string | null = null
 ): string {
+  if (active.terminationReason === "missing_process") {
+    return "The agent worker process disappeared before a terminal task result was recorded. The task was failed so it can be retried cleanly.";
+  }
+
   if (active.terminationReason === "inactivity_timeout") {
     return `Restarted after ${Math.max(
       1,
@@ -922,6 +1016,11 @@ function buildFailedTaskNote(
   signal: string | null,
   structuredFailureDetail: string | null = null
 ): string {
+  if (active.terminationReason === "missing_process") {
+    const lastActivity = active.lastActivitySummary || "No activity summary recorded.";
+    return `The agent worker process disappeared before it reported a terminal result. Last observed activity: ${lastActivity}`;
+  }
+
   if (active.terminationReason === "inactivity_timeout") {
     const lastActivity = active.lastActivitySummary || "No activity summary recorded.";
     return `Agent restarted after ${Math.max(
@@ -1105,6 +1204,7 @@ interface BuildLaunchSpecInput {
   effort: string;
   homeDir: string;
   mcpConfigPath: string;
+  mcpProcessEnv: Record<string, string>;
   model: string | null;
   prompt: string;
   responsePath: string | null;
@@ -1125,6 +1225,7 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
   const commonEnv = buildChildProcessEnv({
     AGENT_ID: input.agentId,
     ...buildProviderAuthEnv(input.activeProvider, input.homeDir),
+    ...input.mcpProcessEnv,
     MCP_CONFIG_PATH: input.mcpConfigPath,
     HOME: input.homeDir,
     PUBLIC_LIVE_DIR: config.publicLiveDir,
@@ -1375,12 +1476,16 @@ function scoreTaskOperatorNote(note: string): number {
 
 export const processManagerTestHooks = {
   buildChildProcessEnv,
+  buildCodexConfigToml,
+  buildPrompt,
   buildPerTaskMcpEnv,
   choosePreferredTaskNote,
   extractStructuredProcessOutput,
+  isProcessAlive,
   isTransientProviderFailureDetail,
   resolveLaunchProviderForTask,
   scoreTaskOperatorNote,
+  shouldReconcileMissingProcess,
   shouldRetryTransientProviderFailure,
 };
 
@@ -1421,7 +1526,8 @@ async function ensureProviderAuth(provider: RuntimeProvider): Promise<void> {
 
 async function prepareCodexHome(
   workDir: string,
-  mcpServerEnv: Record<string, string>
+  mcpServerEnv: Record<string, string>,
+  remoteServers: RemoteMcpServerConfig[]
 ): Promise<string> {
   const homeDir = join(workDir, ".provider-home");
   const codexDir = join(homeDir, ".codex");
@@ -1442,7 +1548,7 @@ async function prepareCodexHome(
 
   await writeFile(
     join(codexDir, "config.toml"),
-    buildCodexConfigToml(mcpServerEnv)
+    buildCodexConfigToml(mcpServerEnv, remoteServers)
   );
 
   await Promise.all([
@@ -1471,10 +1577,16 @@ async function copyOptionalFile(source: string, destination: string): Promise<vo
   }
 }
 
-function buildCodexConfigToml(mcpServerEnv: Record<string, string>): string {
+function buildCodexConfigToml(
+  mcpServerEnv: Record<string, string>,
+  remoteServers: RemoteMcpServerConfig[] = []
+): string {
   const mcpEnvLines = Object.entries(mcpServerEnv)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `"${key}" = ${tomlString(value)}`);
+  const remoteServerSections = remoteServers.flatMap((server) =>
+    buildCodexRemoteServerSection(server)
+  );
 
   return [
     'model = "gpt-5.4"',
@@ -1482,6 +1594,7 @@ function buildCodexConfigToml(mcpServerEnv: Record<string, string>): string {
     "",
     "[features]",
     "apps = false",
+    ...(remoteServers.length ? ["rmcp_client = true"] : []),
     "",
     "[mcp_servers.agent_os]",
     `command = ${tomlString("node")}`,
@@ -1491,8 +1604,41 @@ function buildCodexConfigToml(mcpServerEnv: Record<string, string>): string {
     "",
     "[mcp_servers.agent_os.env]",
     ...mcpEnvLines,
+    ...(remoteServerSections.length ? ["", ...remoteServerSections] : []),
     "",
   ].join("\n");
+}
+
+function buildCodexRemoteServerSection(server: RemoteMcpServerConfig): string[] {
+  const lines = [
+    `[mcp_servers.${server.name}]`,
+    `url = ${tomlString(server.url)}`,
+    "enabled = true",
+  ];
+
+  if (server.bearerTokenEnvVar) {
+    lines.push(`bearer_token_env_var = ${tomlString(server.bearerTokenEnvVar)}`);
+  }
+
+  if (typeof server.startupTimeoutSec === "number") {
+    lines.push(`startup_timeout_sec = ${server.startupTimeoutSec}`);
+  }
+
+  if (typeof server.toolTimeoutSec === "number") {
+    lines.push(`tool_timeout_sec = ${server.toolTimeoutSec}`);
+  }
+
+  if (server.envHttpHeaders && Object.keys(server.envHttpHeaders).length) {
+    lines.push("");
+    lines.push(`[mcp_servers.${server.name}.env_http_headers]`);
+    for (const [key, value] of Object.entries(server.envHttpHeaders).sort(([left], [right]) =>
+      left.localeCompare(right)
+    )) {
+      lines.push(`${tomlString(key)} = ${tomlString(value)}`);
+    }
+  }
+
+  return [...lines, ""];
 }
 
 async function seedWorkspaceFromTemplate(workDir: string): Promise<void> {
@@ -1808,6 +1954,8 @@ function buildPrompt(
 ): string {
   const task = contextPack.task as Record<string, unknown>;
   const lastHandoff = contextPack.last_handoff as Record<string, unknown> | null;
+  const runtimeNow = new Date().toISOString();
+  const runtimeTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
   let prompt = `You are ${agentName}, a ${roleId} agent in the agent-os system.
 
@@ -1818,6 +1966,8 @@ Task ID: ${task?.id || "Unknown"}
 
 ## Runtime
 Active coding provider: ${activeProvider}
+Current runtime time: ${runtimeNow}
+Runtime timezone: ${runtimeTimezone}
 
 ## Acceptance Criteria
 ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
@@ -1828,17 +1978,44 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 - The working directory contains the task workspace and, when available, a snapshot of the
   repository. Prefer editing the existing project files there instead of scaffolding a
   fresh app unless the task explicitly calls for greenfield work.
+- Keep repository inspection focused on source and config files that matter to the task.
+  Never recursively scan dependency or build-output trees such as node_modules, .next, dist,
+  coverage, .provider-home, browser profiles, or other generated vendor directories.
+  After scaffolding or package installation, inspect only targeted files or use rg/find
+  with explicit pruning so you do not flood the context window with generated files.
+- If rg is unavailable, use find or similar tools with exclusions for generated directories.
+  Do not run broad recursive listings on a newly scaffolded app or dependency tree.
 - Use the MCP tools (task_update, memory_write, event_log, etc.) to interact with the system.
 - When done, update the task state and write a handoff note.
+- If the task blocks on missing input, missing access, or missing services, make the handoff note operator-facing. Use clear sections such as "Required now:", "Needed later:", and "Optional but helpful:". Do not fill the note with internal classification, project IDs, child task IDs, or instructions about what some later checklist should say.
 - If the task produces findings, recommendations, a review, a plan, or research, make the handoff include a concise operator-ready summary of the actual result, not just artifact or workspace paths.
 - Log all side effects via event_log.
 - Write durable facts to memory via memory_write.
 - If you use a shared skill from TASK_BRIEFING.md, call skill_log_use before completion so the system can track reuse and improve ranking over time.
 - If you discover a reusable procedure or materially improve an old one, create or update a shared skill before you finish. If you cannot do that cleanly inside this task, include a "Reusable procedure:" block in the handoff note with Name, Scope, Trigger, optional Tags, and ordered Steps so the supervisor can persist it automatically.
 - Use task_create with depends_on when the work benefits from a staged task graph. You can start implementation now and queue follow-up review or remediation tasks that wait on prerequisite tasks automatically.
+- When you stage multi-step execution, make each task depend on the actual prerequisite task IDs in the chain. Example: planner -> builder -> reviewer. Do not make review or verification tasks depend only on the current planning task if they are supposed to evaluate implementation output.
 - For visual QA, screenshots, layout review, login flows, or browser interaction, use the preinstalled agent-browser workflow. Do not try to install Chromium, Playwright, or other browser runtimes inside the task workspace.
+- When using agent-browser, prefer explicit commands that do work and return, such as: \`agent-browser open <url>\`, \`agent-browser snapshot -i\`, \`agent-browser screenshot <path>\`, and \`agent-browser close\`.
+- Do not launch a bare \`agent-browser\` daemon or a session-only command without an immediate browser action. That can leave the task hanging without evidence or a usable result.
 - Use service_require before credentialed third-party integrations and block if the service is not active yet.
+- When the runtime exposes a service-specific MCP server for an active service connection, do not use service_request for that service. Use the service MCP tools directly. If the needed action is unavailable there, stop and report the blocker instead of probing raw REST endpoints, reverse-engineering undocumented routes, or searching for workaround API calls.
+- If TASK_BRIEFING.md includes service_connections entries, treat those as verified active services for this task. Reuse the non-secret scoped identifiers there, such as location IDs, workspace IDs, project IDs, hostnames, or service URLs, instead of asking the operator to restate them.
+- Do not ask the operator to repeat a scoped identifier that already exists in an active service connection. Only ask for a missing identifier when it is not present in TASK_BRIEFING.md or when live inspection proves the stored value is unusable.
+- If the operator already supplied scoped account identifiers such as a location ID, project ID, or site hostname, reuse those exact identifiers in downstream service requests instead of re-discovering them.
+- When a task already has an active credentialed service connection for the system you need to act in, make a live attempt through the available tool surface before you browse API docs or search the web for examples.
+- Use docs or web search only after a concrete live API attempt fails or the available tool surface proves insufficient for one specific blocker. Keep that research narrowly scoped to the exact blocker instead of doing open-ended API study.
+- Do not spend the first post-build or post-QA phase on GitHub, Vercel, CRM, or media API doc searches when the relevant service connection is already active and the task still needs live execution there.
+- If the task asks for generated images, audio, video, or other media outputs and the relevant services are active in TASK_BRIEFING.md, generate the actual media files. Do not stop at concept notes, prompt starters, or script-only drafts unless the operator explicitly asked for ideation only or the live generation attempt fails.
+- When active media services are already attached, move into live generation early. Do not spend the first phase grepping the repo for examples or writing planning-only briefs before the first real generation attempt.
+- Supplemental campaign briefs, image-prompt notes, or voice scripts do not satisfy a media-generation task on their own. The task is not complete until the requested media files exist in the workspace or a concrete live-service blocker has been proven.
+- When you call service_request for generated media or other large binary outputs, prefer output_path so the control plane writes the file directly into the workspace and returns a small saved_output reference. If body_base64 is returned instead, decode it into a real workspace file with the correct extension and register that file with artifact_put so the operator can open the output directly.
+- When active GitHub or Vercel access is available and the operator asked you to push or deploy but did not name an existing repo or project, default to creating a new repo and a new Vercel project for this initiative instead of blocking only to ask which existing target to reuse.
 - Use public_site_verify for public-facing changes and public_site_route for hostname lifecycle changes; do not mark the task complete without verification evidence.
+- Default operator-facing delivery back to the same channel the request came from unless the operator explicitly asked for a different destination.
+- If a recurring request says "my time" and no stored operator timezone is available, use the runtime timezone above as the default assumption and state that assumption in the handoff instead of blocking just to ask.
+- If the operator explicitly asked you to set up a recurring schedule or automation, treat that as authorization to enable it once the real blockers are resolved. Do not leave it in draft or disabled state just to reconfirm the same source channel or the timezone assumption you already stated.
+- For recurring automations originating from admin_chat or telegram, use that same source channel as the default delivery target for future runs unless the operator explicitly asks for a different destination.
 `;
 
   if (lastHandoff) {

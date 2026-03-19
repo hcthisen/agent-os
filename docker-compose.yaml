@@ -38,6 +38,7 @@ services:
     command: ["docker-entrypoint.sh", "postgres", "-c", "listen_addresses=*"]
     environment:
       POSTGRES_DB: agent_os
+      TZ: ${AGENT_OS_TIMEZONE:-Europe/Copenhagen}
     volumes:
       - db-data:/var/lib/postgresql/data
       - config:/config:ro
@@ -70,6 +71,7 @@ services:
       API_EXTERNAL_URL: ${ADMIN_PUBLIC_URL:-http://admin}
     volumes:
       - config:/config:ro
+      - workspaces:/app/workspaces:ro
     networks:
       - agent-net
 
@@ -169,6 +171,7 @@ services:
     command: ["node", "apps/supervisor/dist/index.js"]
     environment:
       ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-}
+      AGENT_OS_TIMEZONE: ${AGENT_OS_TIMEZONE:-Europe/Copenhagen}
       CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
       POSTGREST_URL: http://rest:3000
       MCP_CONFIG_PATH: /app/mcp-config.json
@@ -181,6 +184,7 @@ services:
       PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-}
       ROOT_DOMAIN: ${ROOT_DOMAIN:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TZ: ${AGENT_OS_TIMEZONE:-Europe/Copenhagen}
     volumes:
       - config:/config:ro
       - provider-home:/home/node
@@ -238,11 +242,13 @@ services:
       ADMIN_PASS: ${ADMIN_PASS:-}
       ADMIN_USER: ${ADMIN_USER:-}
       ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-}
+      AGENT_OS_TIMEZONE: ${AGENT_OS_TIMEZONE:-Europe/Copenhagen}
       ENV_OVERRIDE_KEYS: "ADMIN_USER ADMIN_PASS"
       PORT: 80
       POSTGREST_URL: http://rest:3000
       SUPERVISOR_HEALTH_URL: http://supervisor:3001/health
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TZ: ${AGENT_OS_TIMEZONE:-Europe/Copenhagen}
     volumes:
       - config:/config:ro
     networks:
