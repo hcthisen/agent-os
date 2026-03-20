@@ -574,6 +574,10 @@ async function maybeNotifyOperatorTaskStarted(
   task: QueueTaskRow,
   launchRole: string
 ): Promise<void> {
+  if (launchRole === "reviewer") {
+    return;
+  }
+
   const rootTask = await findRootTaskById(task.id);
   if (
     !rootTask ||

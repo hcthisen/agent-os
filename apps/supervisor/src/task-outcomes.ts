@@ -911,6 +911,30 @@ function formatCompletionMessage(
   return `${prefix} ${simplifyTitle(task.title)} is complete.${rootSuffix}`;
 }
 
+function pickBestLiveUrl(text: string): string | null {
+  const urls = [...text.matchAll(/https?:\/\/[^\s)]+/gi)].map((m) =>
+    m[0].replace(/[`.,;:!?'"]+$/, "")
+  );
+  if (!urls.length) return null;
+
+  // Prefer deployment/live-site URLs over source-control URLs
+  const deployUrl = urls.find(
+    (u) =>
+      /\.(vercel\.app|netlify\.app|pages\.dev|railway\.app|fly\.dev|render\.com|herokuapp\.com)\b/i.test(
+        u
+      ) ||
+      (/^https?:\/\/(?!github\.com|gitlab\.com|bitbucket\.org)/i.test(u) &&
+        !/\/(repos?|pulls?|issues?|commits?|tree|blob)\b/i.test(u))
+  );
+
+  // Fall back to first non-source-control URL, then any URL
+  const nonRepoUrl = urls.find(
+    (u) => !/^https?:\/\/(github\.com|gitlab\.com|bitbucket\.org)/i.test(u)
+  );
+
+  return deployUrl || nonRepoUrl || urls[0];
+}
+
 function summarizeOutcome(
   task: Pick<CompletedTask, "objective" | "title">,
   note: string | null,
@@ -924,14 +948,15 @@ function summarizeOutcome(
   const compact = note.replace(/\s+/g, " ").trim();
   const changed = extractSection(compact, "What changed:");
   const blocked = extractSection(compact, "What is blocked:");
-  const liveUrlMatch = compact.match(/https?:\/\/[^\s)]+/i);
+  const liveUrl = pickBestLiveUrl(compact);
   const publishedLiveMatch = compact.match(
     /public site .*?(rebuilt|published).*?live at (https?:\/\/[^\s)]+)/i
   );
   const hasDryRunExample = /\bdry-?run example\b/i.test(compact);
 
   if (publishedLiveMatch) {
-    return `The public site is rebuilt and live at ${publishedLiveMatch[2]}.`;
+    const bestPublishedUrl = pickBestLiveUrl(publishedLiveMatch[0]) || publishedLiveMatch[2];
+    return `The public site is rebuilt and live at ${bestPublishedUrl}.`;
   }
 
   if (changed) {
@@ -943,8 +968,8 @@ function summarizeOutcome(
       toSingleSentence(changed),
       role || ""
     );
-    if (liveUrlMatch && !cleaned.includes(liveUrlMatch[0])) {
-      return trimSentence(`${cleaned} Live at ${liveUrlMatch[0]}.`);
+    if (liveUrl && !cleaned.includes(liveUrl)) {
+      return trimSentence(`${cleaned} Live at ${liveUrl}.`);
     }
 
     return trimSentence(cleaned);
@@ -963,8 +988,8 @@ function summarizeOutcome(
     return trimSentence(`Completed, but still blocked by ${toSingleSentence(blocked)}`);
   }
 
-  if (liveUrlMatch) {
-    return `Live at ${liveUrlMatch[0]}.`;
+  if (liveUrl) {
+    return `Live at ${liveUrl}.`;
   }
 
   return trimSentence(toSingleSentence(compact));
@@ -1629,6 +1654,7 @@ export const taskOutcomeTestHooks = {
   looksLikeRequirementsChecklist,
   normalizeArtifactSummary,
   pickBestCompletionCandidate,
+  pickBestLiveUrl,
   shouldSendInterimProgressUpdate,
   summarizeArtifactDocument,
   shouldPreferArtifactSummary,

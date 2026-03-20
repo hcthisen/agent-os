@@ -610,6 +610,46 @@ test("relay root progress is allowed when the relay note already contains a requ
   );
 });
 
+test("summarizeOutcome prefers Vercel deployment URL over GitHub repo URL", () => {
+  const task = {
+    objective: "Build demo and deploy",
+    title: "Build Mr. Rooter Plumbing 2-page demo and deploy",
+  };
+  const note = [
+    "Completed.",
+    "What changed: Created repository at https://github.com/TestScaleByTech/mr-rooter-demo",
+    "and deployed to https://mr-rooter-demo.vercel.app/.",
+  ].join(" ");
+
+  const outcome = taskOutcomeTestHooks.summarizeOutcome(task, note, "builder", null);
+  assert.match(String(outcome), /vercel\.app/i);
+  assert.doesNotMatch(String(outcome), /github\.com/i);
+});
+
+test("pickBestLiveUrl prefers deployment URLs over repo URLs", () => {
+  const text =
+    "Created repo at https://github.com/org/repo and deployed to https://my-app.vercel.app/ successfully.";
+  const url = taskOutcomeTestHooks.pickBestLiveUrl(text);
+  assert.equal(url, "https://my-app.vercel.app/");
+});
+
+test("pickBestLiveUrl falls back to non-repo URL when no known deploy host", () => {
+  const text =
+    "Repo: https://github.com/org/repo. Live: https://custom-domain.com/site.";
+  const url = taskOutcomeTestHooks.pickBestLiveUrl(text);
+  assert.equal(url, "https://custom-domain.com/site");
+});
+
+test("pickBestLiveUrl returns repo URL if nothing else is available", () => {
+  const text = "Created https://github.com/org/repo.";
+  const url = taskOutcomeTestHooks.pickBestLiveUrl(text);
+  assert.equal(url, "https://github.com/org/repo");
+});
+
+test("pickBestLiveUrl returns null for empty text", () => {
+  assert.equal(taskOutcomeTestHooks.pickBestLiveUrl("No URLs here"), null);
+});
+
 test("completed sage tasks do not emit synthesized interim progress updates", () => {
   const sageTask = {
     assigned_role: "sage",

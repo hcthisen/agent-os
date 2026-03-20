@@ -627,9 +627,11 @@ async function handleProcessExit(
     // The agent should have already updated state via MCP tools.
     // If task is still in 'running', move to 'in_review' as a fallback.
     if (task?.state === "running") {
-      const fallbackState = shouldAutoReviewOnSuccess(active.roleId)
-        ? "in_review"
-        : "completed";
+      let fallbackState: "completed" | "in_review" = "completed";
+      if (shouldAutoReviewOnSuccess(active.roleId)) {
+        const evidence = await hasCompletionEvidence(active.taskId);
+        fallbackState = evidence ? "completed" : "in_review";
+      }
       const { error: fallbackError } = await db
         .from("tasks")
         .update({
@@ -1187,6 +1189,24 @@ function shouldAutoReviewOnSuccess(roleId: string): boolean {
   return roleId !== "relay" && roleId !== "reviewer" && roleId !== "sentinel";
 }
 
+async function hasCompletionEvidence(taskId: string): Promise<boolean> {
+  const db = getDb();
+
+  const { count: artifactCount } = await db
+    .from("artifacts")
+    .select("id", { count: "exact", head: true })
+    .eq("task_id", taskId);
+
+  if ((artifactCount || 0) > 0) return true;
+
+  const { count: handoffCount } = await db
+    .from("handoffs")
+    .select("id", { count: "exact", head: true })
+    .eq("task_id", taskId);
+
+  return (handoffCount || 0) > 0;
+}
+
 function buildFallbackHandoffNote(
   roleId: string,
   fallbackState: "completed" | "in_review"
@@ -1484,10 +1504,12 @@ export const processManagerTestHooks = {
   buildPerTaskMcpEnv,
   choosePreferredTaskNote,
   extractStructuredProcessOutput,
+  hasCompletionEvidence,
   isProcessAlive,
   isTransientProviderFailureDetail,
   resolveLaunchProviderForTask,
   scoreTaskOperatorNote,
+  shouldAutoReviewOnSuccess,
   shouldReconcileMissingProcess,
   shouldRetryTransientProviderFailure,
 };

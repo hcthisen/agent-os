@@ -18,6 +18,8 @@ interface DeliveryTask {
   id: string;
   last_handoff_note: string | null;
   objective: string | null;
+  parent_task_id?: string | null;
+  state?: string;
   title: string;
   updated_at: string;
 }
@@ -236,10 +238,12 @@ async function buildDeliveryBundle(args: {
     artifactRefs,
     evidenceImages,
     html: buildDeliveryHtmlDocument({
+      artifacts: args.artifacts,
       artifactRefs,
       evidenceImages,
       primaryArtifact,
       reportHtml,
+      requestTasks: args.requestTasks,
       selectedTask: args.selectedTask,
       summary: derivedSummary,
       title,
@@ -750,15 +754,157 @@ function buildPlainTextDelivery(args: {
   return trimToLength(lines.filter(Boolean).join("\n"), MAX_SOURCE_CHARS);
 }
 
+function extractDeliveryUrls(
+  requestTasks: DeliveryTask[],
+  artifacts: DeliveryArtifactRow[]
+): { deployUrls: string[]; repoUrls: string[] } {
+  const allUrls = new Set<string>();
+
+  for (const task of requestTasks) {
+    for (const match of String(task.last_handoff_note || "").matchAll(/https?:\/\/[^\s)]+/gi)) {
+      allUrls.add(match[0].replace(/[`.,;:!?'"]+$/, ""));
+    }
+  }
+  for (const artifact of artifacts) {
+    if (artifact.external_url) {
+      allUrls.add(artifact.external_url);
+    }
+  }
+
+  const deploySet = new Set<string>();
+  const repoSet = new Set<string>();
+
+  for (const url of allUrls) {
+    // Normalize: strip trailing slash for dedup, keep original for display
+    const normalized = url.replace(/\/+$/, "");
+    if (/^https?:\/\/(github\.com|gitlab\.com|bitbucket\.org)/i.test(url)) {
+      if (!/\/(pulls?|issues?|commits?|actions|settings)\b/i.test(url)) {
+        repoSet.add(normalized);
+      }
+    } else if (
+      /\.(vercel\.app|netlify\.app|pages\.dev|railway\.app|fly\.dev|render\.com|herokuapp\.com)\b/i.test(url) ||
+      !/\.(png|jpe?g|gif|svg|webp|pdf)\b/i.test(url.split("?")[0])
+    ) {
+      deploySet.add(normalized);
+    }
+  }
+
+  return { deployUrls: [...deploySet], repoUrls: [...repoSet] };
+}
+
+function buildAgentTimelineHtml(requestTasks: DeliveryTask[]): string {
+  if (!requestTasks.length) return "";
+
+  const roleIcons: Record<string, string> = {
+    relay: "\u{1F4E8}",
+    sage: "\u{1F9E0}",
+    builder: "\u{1F528}",
+    reviewer: "\u{2705}",
+    architect: "\u{1F3D7}",
+    sentinel: "\u{1F6E1}",
+  };
+
+  // Sort chronologically (oldest first)
+  const sorted = [...requestTasks].sort(
+    (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
+  );
+
+  // Build parent->children map for nesting
+  const childrenMap = new Map<string, DeliveryTask[]>();
+  const roots: DeliveryTask[] = [];
+  const taskIds = new Set(sorted.map((t) => t.id));
+
+  for (const task of sorted) {
+    if (task.parent_task_id && taskIds.has(task.parent_task_id)) {
+      const siblings = childrenMap.get(task.parent_task_id) || [];
+      siblings.push(task);
+      childrenMap.set(task.parent_task_id, siblings);
+    } else {
+      roots.push(task);
+    }
+  }
+
+  const renderEntry = (task: DeliveryTask, depth: number): string => {
+    const icon = roleIcons[task.assigned_role] || "\u{2699}";
+    const role = escapeHtml(task.assigned_role);
+    const title = escapeHtml(trimToLength(task.title, 80));
+    const fullNote = String(task.last_handoff_note || "").replace(/\s+/g, " ").trim();
+    const shortNote = summarizeHandoff(task.last_handoff_note);
+    const needsExpand = fullNote.length > 220 && shortNote;
+    const noteHtml = shortNote
+      ? needsExpand
+        ? `<p class="timeline-note">${escapeHtml(trimToLength(shortNote, 200))}</p><details class="timeline-details"><summary>More</summary><p class="timeline-note-full">${escapeHtml(fullNote)}</p></details>`
+        : `<p class="timeline-note">${escapeHtml(trimToLength(shortNote, 200))}</p>`
+      : "";
+    const completedAt = task.completed_at || task.updated_at;
+    const duration = formatDuration(task.updated_at, completedAt);
+    const durationHtml = duration ? `<span class="duration">${escapeHtml(duration)}</span>` : "";
+    const depthClass = depth > 0 ? ` timeline-nested` : "";
+
+    const children = childrenMap.get(task.id) || [];
+    const childrenHtml = children.map((child) => renderEntry(child, depth + 1)).join("\n");
+
+    return `<li class="timeline-entry${depthClass}">
+        <span class="role-badge">${icon} ${role}</span>
+        <strong>${title}</strong>
+        ${durationHtml}
+        ${noteHtml}
+        ${childrenHtml ? `<ol class="timeline timeline-children">${childrenHtml}</ol>` : ""}
+      </li>`;
+  };
+
+  return roots.map((task) => renderEntry(task, 0)).join("\n");
+}
+
+function formatDuration(startIso: string, endIso: string): string {
+  const startMs = new Date(startIso).getTime();
+  const endMs = new Date(endIso).getTime();
+  if (!startMs || !endMs || endMs <= startMs) return "";
+
+  const diffMs = endMs - startMs;
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
 function buildDeliveryHtmlDocument(args: {
+  artifacts: DeliveryArtifactRow[];
   artifactRefs: DeliveryArtifactReference[];
   evidenceImages: DeliveryEvidenceImage[];
   primaryArtifact: DeliveryArtifactRow | null;
   reportHtml: string;
+  requestTasks: DeliveryTask[];
   selectedTask: DeliveryTask;
   summary: string;
   title: string;
 }): string {
+  const { deployUrls, repoUrls } = extractDeliveryUrls(args.requestTasks, args.artifacts);
+
+  const resultLinksHtml = (deployUrls.length || repoUrls.length)
+    ? `<div class="result-links">${deployUrls
+        .slice(0, 1)
+        .map(
+          (u) =>
+            `<a href="${escapeHtmlAttribute(u)}" class="result-link primary" target="_blank" rel="noreferrer">Live Site \u2192</a>`
+        )
+        .join("")}${repoUrls
+        .slice(0, 1)
+        .map(
+          (u) =>
+            `<a href="${escapeHtmlAttribute(u)}" class="result-link" target="_blank" rel="noreferrer">Source Code \u2192</a>`
+        )
+        .join("")}</div>`
+    : "";
+
+  const timelineEntriesHtml = buildAgentTimelineHtml(args.requestTasks);
+  const timelineHtml = timelineEntriesHtml
+    ? `<section class="card"><h2>Execution Timeline</h2><ol class="timeline">${timelineEntriesHtml}</ol></section>`
+    : "";
+
   const screenshotEvidenceHtml = args.evidenceImages.length
     ? `<section class="card"><h2>Screenshot Evidence</h2><div class="evidence-grid">${args.evidenceImages
         .map((image) => {
@@ -798,11 +944,27 @@ function buildDeliveryHtmlDocument(args: {
         .join("")}</ul></section>`
     : "";
 
-  const sourceMeta = args.primaryArtifact
-    ? `<p class="source-meta">Primary source: ${escapeHtml(args.primaryArtifact.name)}</p>`
-    : "";
   const completedAt =
     args.selectedTask.completed_at || args.selectedTask.updated_at || new Date().toISOString();
+  const taskCount = args.requestTasks.length;
+  const firstTask = [...args.requestTasks].sort(
+    (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
+  )[0];
+  const totalDuration = firstTask
+    ? formatDuration(firstTask.updated_at, completedAt)
+    : "";
+  const metaParts = [
+    `Completed ${escapeHtml(new Date(completedAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }))} UTC`,
+    taskCount > 1 ? `${taskCount} tasks` : "",
+    totalDuration ? totalDuration : "",
+  ].filter(Boolean);
+
+  const conciseSummary = summarizeHandoff(args.selectedTask.last_handoff_note) || args.summary;
+  const fullHandoff = String(args.selectedTask.last_handoff_note || "").replace(/\s+/g, " ").trim();
+  const summaryNeedsExpand = fullHandoff.length > 400 && conciseSummary.length < fullHandoff.length;
+  const summaryExpandHtml = summaryNeedsExpand
+    ? `<details class="summary-details"><summary>More</summary><p class="summary-full">${escapeHtml(fullHandoff)}</p></details>`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -855,10 +1017,34 @@ function buildDeliveryHtmlDocument(args: {
         font-size: clamp(2rem, 4vw, 3rem);
         margin-top: 8px;
       }
-      .summary {
-        font-size: 1.08rem;
-        color: var(--text);
-        margin: 18px 0 0;
+      .result-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }
+      .result-link {
+        display: inline-block;
+        padding: 10px 20px;
+        border-radius: 10px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        text-decoration: none;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--accent);
+        transition: background 0.15s, box-shadow 0.15s;
+      }
+      .result-link:hover {
+        box-shadow: 0 4px 12px rgba(44, 110, 73, 0.15);
+      }
+      .result-link.primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      .result-link.primary:hover {
+        background: #245a3b;
       }
       .meta {
         margin-top: 14px;
@@ -872,6 +1058,90 @@ function buildDeliveryHtmlDocument(args: {
         padding: 24px;
         margin-top: 22px;
         box-shadow: 0 10px 28px rgba(58, 49, 34, 0.06);
+      }
+      .card .summary-text {
+        font-size: 1.08rem;
+        line-height: 1.6;
+        margin: 0;
+      }
+      .timeline {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        position: relative;
+      }
+      .timeline::before {
+        content: "";
+        position: absolute;
+        left: 14px;
+        top: 8px;
+        bottom: 8px;
+        width: 2px;
+        background: var(--line);
+      }
+      .timeline-entry {
+        position: relative;
+        padding: 10px 0 10px 40px;
+      }
+      .timeline-entry + .timeline-entry {
+        border-top: 1px dashed var(--line);
+      }
+      .role-badge {
+        display: inline-block;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--accent);
+        margin-right: 6px;
+      }
+      .duration {
+        display: inline-block;
+        font-size: 0.82rem;
+        color: var(--muted);
+        margin-left: 8px;
+        font-style: italic;
+      }
+      .timeline-note {
+        margin: 4px 0 0;
+        font-size: 0.92rem;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .timeline-nested {
+        padding-left: 64px;
+      }
+      .timeline-children {
+        list-style: none;
+        padding: 0;
+        margin: 8px 0 0;
+      }
+      .timeline-children::before {
+        left: 14px;
+      }
+      .timeline-details,
+      .summary-details {
+        margin-top: 6px;
+      }
+      .timeline-details summary,
+      .summary-details summary {
+        cursor: pointer;
+        color: var(--accent);
+        font-size: 0.88rem;
+        font-weight: 600;
+        user-select: none;
+      }
+      .timeline-details summary:hover,
+      .summary-details summary:hover {
+        text-decoration: underline;
+      }
+      .timeline-note-full,
+      .summary-full {
+        margin: 6px 0 0;
+        font-size: 0.92rem;
+        color: var(--text);
+        line-height: 1.6;
+        white-space: pre-wrap;
       }
       .report-body p, .report-body li {
         font-size: 1rem;
@@ -941,14 +1211,15 @@ function buildDeliveryHtmlDocument(args: {
       <section class="hero">
         <div class="eyebrow">Agent Result</div>
         <h1>${escapeHtml(args.title)}</h1>
-        <p class="summary">${escapeHtml(args.summary)}</p>
-        <p class="meta">Completed ${escapeHtml(new Date(completedAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }))} UTC</p>
-        ${sourceMeta}
+        ${resultLinksHtml}
+        <p class="meta">${metaParts.join(" \u00B7 ")}</p>
       </section>
       <section class="card">
-        <h2>Full Result</h2>
-        <div class="report-body">${args.reportHtml}</div>
+        <h2>Summary</h2>
+        <p class="summary-text">${escapeHtml(conciseSummary)}</p>
+        ${summaryExpandHtml}
       </section>
+      ${timelineHtml}
       ${screenshotEvidenceHtml}
       ${evidenceHtml}
     </main>
@@ -1252,6 +1523,7 @@ async function upsertDeliveryArtifact(
 
 export const resultDeliveryTestHooks = {
   buildOperatorResultLink,
+  extractDeliveryUrls,
   extractInlineImageReferences,
   renderMarkdownishToHtml,
   shouldPublishRichResultPage,

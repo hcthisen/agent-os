@@ -1552,8 +1552,9 @@ async function prepareRelayTaskRouting(message) {
   const teachMode = detectRelayTeachMode(content);
   const missingRequestedServices = await loadRelayRequestedServiceNeeds(content);
   const requirementsWalkthrough =
-    looksLikeRequirementsWalkthroughRequest(content) ||
-    missingRequestedServices.length > 0;
+    !teachMode &&
+    (looksLikeRequirementsWalkthroughRequest(content) ||
+      missingRequestedServices.length > 0);
   const recurringAutomationSetup = looksLikeRecurringAutomationSetup(content);
   const history = await loadRecentConversationMessages(message);
   const matchedSkills = await loadRelayMatchedSkills(content);
@@ -1824,7 +1825,7 @@ async function loadRelayRequestedServiceNeeds(content) {
 
   const requestedServices = [];
   const activeServices = await loadActiveRelayServiceNames();
-  const requestsImageAssets = looksLikeMediaProductionRequest(normalized);
+  const requestsImageAssets = shouldRequireImageServiceNow(normalized);
   const requestsVoiceAssets =
     /\b(voiceover|voice-over|voice over|audio|spoken|narration|narrator)\b/i.test(
       normalized
@@ -1864,6 +1865,32 @@ function looksLikeMediaProductionRequest(content) {
     /\b(asset pack|campaign|ad|promo|prepare|create|generate|need|want)\b/i.test(
       normalized
     )
+  );
+}
+
+function looksLikeOptionalVisualSupportRequest(content) {
+  const normalized = normalizeString(content);
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\bif (?:it )?(?:helps|helpful|useful|needed)\b[^.!?\n]{0,160}\b(?:generate|create|use)\b[^.!?\n]{0,120}\b(?:replacement\s+)?(?:visuals?|images?|graphics?)\b/i.test(
+      normalized
+    ) ||
+    /\byou (?:can|could)\s+also\b[^.!?\n]{0,160}\b(?:generate|create|use)\b[^.!?\n]{0,120}\b(?:replacement\s+)?(?:visuals?|images?|graphics?)\b/i.test(
+      normalized
+    ) ||
+    /\boptional\b[^.!?\n]{0,120}\b(?:visuals?|images?|graphics?)\b/i.test(
+      normalized
+    )
+  );
+}
+
+function shouldRequireImageServiceNow(content) {
+  return (
+    looksLikeMediaProductionRequest(content) &&
+    !looksLikeOptionalVisualSupportRequest(content)
   );
 }
 

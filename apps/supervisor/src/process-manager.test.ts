@@ -307,3 +307,12 @@ test("codex config includes remote MCP servers with env-backed auth headers", ()
     /"locationId" = "AGENT_OS_REMOTE_MCP_GOHIGHLEVEL_LOCATION_ID"/
   );
 });
+
+test("builder and sage require auto-review, relay and reviewer skip it", () => {
+  assert.equal(processManagerTestHooks.shouldAutoReviewOnSuccess("builder"), true);
+  assert.equal(processManagerTestHooks.shouldAutoReviewOnSuccess("sage"), true);
+  assert.equal(processManagerTestHooks.shouldAutoReviewOnSuccess("architect"), true);
+  assert.equal(processManagerTestHooks.shouldAutoReviewOnSuccess("relay"), false);
+  assert.equal(processManagerTestHooks.shouldAutoReviewOnSuccess("reviewer"), false);
+  assert.equal(processManagerTestHooks.shouldAutoReviewOnSuccess("sentinel"), false);
+});
