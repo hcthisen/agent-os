@@ -239,6 +239,40 @@ test("prompts require actual media generation when active services are available
     prompt,
     /Do not spend the first post-build or post-QA phase on GitHub, Vercel, CRM, or media API doc searches/i
   );
+  assert.match(
+    prompt,
+    /Git operations in this runtime are non-interactive/i
+  );
+  assert.match(
+    prompt,
+    /If a plain `git push` cannot authenticate immediately, stop that path and use the active GitHub service connection through API calls/i
+  );
+  assert.match(
+    prompt,
+    /upload the full source tree recursively/i
+  );
+  assert.match(
+    prompt,
+    /important nested source paths are visible on the target branch/i
+  );
+  assert.match(
+    prompt,
+    /If you start a local preview server such as `serve`, `next dev`, or `vite` for QA, stop it once the screenshots and checks are done/i
+  );
+  assert.match(
+    prompt,
+    /use the active Vercel service connection to create the project and send a complete deployment payload/i
+  );
+  assert.match(
+    prompt,
+    /prefer deploying that local output directly to Vercel instead of blocking on GitHub repo visibility/i
+  );
+  assert.match(prompt, /POST \/v2\/files/i);
+  assert.match(prompt, /POST \/v13\/deployments/i);
+  assert.match(
+    prompt,
+    /incorrect_git_source_info.*not the final answer/i
+  );
 });
 
 test("codex config includes remote MCP servers with env-backed auth headers", () => {

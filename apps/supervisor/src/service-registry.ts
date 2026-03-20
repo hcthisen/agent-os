@@ -54,6 +54,8 @@ const DEFAULT_SERVICE_USAGE_HINTS: Record<string, string[]> = {
   github: [
     "Use service_request with service_name 'github'. The control plane already knows the default GitHub API base URL and injects bearer auth.",
     "When the operator asked for a fresh repo and no existing repo target was specified, attempt the live repository creation and upload flow before browsing API docs or searching the web for examples.",
+    "If you upload source through the GitHub API, publish the full directory tree recursively. Do not stop after README.md or only root-level config files when the real app lives in nested directories.",
+    "After a GitHub API upload, verify that the important nested source paths exist on the target branch before claiming delivery is complete. For a Next.js site, that usually includes app pages, components, public assets, and other nested project files.",
     "Only fall back to narrowly scoped docs research after a concrete live API attempt fails or a specific response shape is still unclear.",
   ],
   gohighlevel: [
@@ -63,6 +65,9 @@ const DEFAULT_SERVICE_USAGE_HINTS: Record<string, string[]> = {
   vercel: [
     "Use service_request with service_name 'vercel'. The control plane already knows the default Vercel API base URL and injects bearer auth.",
     "When the operator asked for deployment and no existing project target was specified, attempt the live project/deployment flow before browsing API docs or searching the web for examples.",
+    "If GitHub repo linkage is unavailable but the built site already exists locally, do not stop at a gitSource blocker. Use Vercel's direct deployment flow instead of requiring repo visibility.",
+    "For a direct Vercel deployment, upload local files with POST /v2/files using the required digest headers, then create the deployment with POST /v13/deployments and a complete files payload that points at the uploaded content.",
+    "When a verified static export exists locally, prefer deploying that built output directly over asking the operator to repair GitHub integration first.",
     "Only fall back to narrowly scoped docs research after a concrete live API attempt fails or a specific response shape is still unclear.",
   ],
 };

@@ -94,6 +94,26 @@ Trigger: When work is scheduled to recur, the operator repeats the same request,
 Steps: 1. Use a shared skill for repeatable procedures and proven workflows; use semantic memory for durable facts, preferences, and one-line rules. 2. Create or update a skill when the work will recur through a schedule, when the operator asks for the same kind of result again, or when a hard task required retries or iteration before you found the successful procedure. 3. Capture the successful workflow as a trigger plus ordered steps, including research, preparation, execution, and verification stages when those stages are part of getting the result right. 4. Choose the narrowest scope that still fits the reuse pattern: task, project, role, or company. 5. Save the skill and confirm back exactly what was stored so the operator can correct it immediately if needed.
 Tags: skill, training, memory, workflow',
     ARRAY['skill', 'training', 'memory', 'workflow']::text[]
+  ),
+  (
+    'skill:fresh-github-vercel-delivery',
+    'Fresh GitHub And Vercel Delivery',
+    'Publish a local web app from the correct app root into a fresh GitHub repo and a live Vercel deployment when those service connections are active.',
+    'When a task asks to push a built website or app to GitHub and deploy it on Vercel from a local workspace, especially when the repo/project does not exist yet.',
+    '[
+      {"order": 1, "instruction": "Identify the real app root or built output directory first. Do not publish the monorepo root or a placeholder folder when the actual app lives in a nested site directory.", "tool_hint": "shell", "required": true},
+      {"order": 2, "instruction": "Create or reuse the GitHub repo through the active service connection, then upload the full recursive source tree from the chosen app root while excluding generated directories such as node_modules, .next, dist artifacts that should not live in source control, and other transient build output.", "tool_hint": "service_request", "required": true},
+      {"order": 3, "instruction": "Verify the remote GitHub tree before moving on. If nested source paths such as app pages, components, public assets, or other expected runtime files are missing, treat GitHub delivery as incomplete and fix that before deployment.", "tool_hint": "service_request", "required": true},
+      {"order": 4, "instruction": "Create or reuse the Vercel project through the active service connection. If Git-based deployment is unavailable or returns a repo-visibility blocker while the local build already exists, switch to direct deployment from the local build output instead of stopping at the gitSource error.", "tool_hint": "service_request", "required": true},
+      {"order": 5, "instruction": "Wait for the live deployment URL, verify the deployed site, and only then hand back the GitHub repo, the live Vercel URL, and any concrete remaining blockers.", "tool_hint": "public_site_verify", "required": true}
+    ]'::jsonb,
+    'Skill: Fresh GitHub And Vercel Delivery
+Slug: fresh-github-vercel-delivery
+Description: Publish a local web app from the correct app root into a fresh GitHub repo and a live Vercel deployment when those service connections are active.
+Trigger: When a task asks to push a built website or app to GitHub and deploy it on Vercel from a local workspace, especially when the repo/project does not exist yet.
+Steps: 1. Identify the real app root or built output directory first. Do not publish the monorepo root or a placeholder folder when the actual app lives in a nested site directory. 2. Create or reuse the GitHub repo through the active service connection, then upload the full recursive source tree from the chosen app root while excluding generated directories such as node_modules, .next, dist artifacts that should not live in source control, and other transient build output. 3. Verify the remote GitHub tree before moving on. If nested source paths such as app pages, components, public assets, or other expected runtime files are missing, treat GitHub delivery as incomplete and fix that before deployment. 4. Create or reuse the Vercel project through the active service connection. If Git-based deployment is unavailable or returns a repo-visibility blocker while the local build already exists, switch to direct deployment from the local build output instead of stopping at the gitSource error. 5. Wait for the live deployment URL, verify the deployed site, and only then hand back the GitHub repo, the live Vercel URL, and any concrete remaining blockers.
+Tags: skill, github, vercel, deploy, website',
+    ARRAY['skill', 'github', 'vercel', 'deploy', 'website']::text[]
   );
 
 CREATE TEMP TABLE _existing_active_skill_versions AS

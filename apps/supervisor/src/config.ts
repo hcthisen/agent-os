@@ -43,9 +43,9 @@ export const config = {
   processInactivityTimeoutMs: parseInt(
     process.env.PROCESS_INACTIVITY_TIMEOUT_MS ||
       process.env.PROCESS_TIMEOUT_MS ||
-      "1800000",
+      "300000",
     10
-  ), // 30 min inactivity timeout default
+  ), // 5 min inactivity timeout default
   maxRunDurationMs: parseInt(process.env.MAX_RUN_DURATION_MS || "3600000", 10),
   workspaceCleanupHours: parseInt(process.env.WORKSPACE_CLEANUP_HOURS || "24", 10),
   taskNotificationCooldownMs: parseInt(

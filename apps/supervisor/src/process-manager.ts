@@ -1226,6 +1226,9 @@ function buildLaunchSpec(input: BuildLaunchSpecInput): {
     AGENT_ID: input.agentId,
     ...buildProviderAuthEnv(input.activeProvider, input.homeDir),
     ...input.mcpProcessEnv,
+    GCM_INTERACTIVE: "never",
+    GH_PROMPT_DISABLED: "1",
+    GIT_TERMINAL_PROMPT: "0",
     MCP_CONFIG_PATH: input.mcpConfigPath,
     HOME: input.homeDir,
     PUBLIC_LIVE_DIR: config.publicLiveDir,
@@ -1998,6 +2001,7 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 - For visual QA, screenshots, layout review, login flows, or browser interaction, use the preinstalled agent-browser workflow. Do not try to install Chromium, Playwright, or other browser runtimes inside the task workspace.
 - When using agent-browser, prefer explicit commands that do work and return, such as: \`agent-browser open <url>\`, \`agent-browser snapshot -i\`, \`agent-browser screenshot <path>\`, and \`agent-browser close\`.
 - Do not launch a bare \`agent-browser\` daemon or a session-only command without an immediate browser action. That can leave the task hanging without evidence or a usable result.
+- If you start a local preview server such as \`serve\`, \`next dev\`, or \`vite\` for QA, stop it once the screenshots and checks are done. Do not leave a long-running preview process alive while you move into GitHub or deployment work.
 - Use service_require before credentialed third-party integrations and block if the service is not active yet.
 - When the runtime exposes a service-specific MCP server for an active service connection, do not use service_request for that service. Use the service MCP tools directly. If the needed action is unavailable there, stop and report the blocker instead of probing raw REST endpoints, reverse-engineering undocumented routes, or searching for workaround API calls.
 - If TASK_BRIEFING.md includes service_connections entries, treat those as verified active services for this task. Reuse the non-secret scoped identifiers there, such as location IDs, workspace IDs, project IDs, hostnames, or service URLs, instead of asking the operator to restate them.
@@ -2006,6 +2010,14 @@ ${JSON.stringify(task?.acceptance_criteria || [], null, 2)}
 - When a task already has an active credentialed service connection for the system you need to act in, make a live attempt through the available tool surface before you browse API docs or search the web for examples.
 - Use docs or web search only after a concrete live API attempt fails or the available tool surface proves insufficient for one specific blocker. Keep that research narrowly scoped to the exact blocker instead of doing open-ended API study.
 - Do not spend the first post-build or post-QA phase on GitHub, Vercel, CRM, or media API doc searches when the relevant service connection is already active and the task still needs live execution there.
+- Git operations in this runtime are non-interactive. Never wait on username, password, browser, or device-code prompts during \`git push\`, \`gh auth\`, or similar commands.
+- If a plain \`git push\` cannot authenticate immediately, stop that path and use the active GitHub service connection through API calls instead of hanging on git transport. Upload the actual source via GitHub API endpoints when needed; do not leave the task blocked on local git credentials when GitHub API access is already active.
+- When you publish through the GitHub API instead of raw git transport, upload the full source tree recursively. Do not stop after \`README.md\` or root-level config files when the actual app lives in nested directories.
+- After a GitHub API upload, verify that the important nested source paths are visible on the target branch before you mark GitHub delivery complete. If the live repo is missing key app/pages/components directories, treat the publish as incomplete and fix it before moving on.
+- If Vercel deployment through repo linkage is not immediately available, use the active Vercel service connection to create the project and send a complete deployment payload or other supported API-based fallback. Do not stop at a placeholder deployment attempt once the full site source already exists locally.
+- When a verified local build or static export already exists, prefer deploying that local output directly to Vercel instead of blocking on GitHub repo visibility.
+- For direct Vercel deployment, use the supported file-upload flow: upload the local files with \`POST /v2/files\` using the required digest headers, then create the deployment with \`POST /v13/deployments\` and a complete \`files\` payload that points at the uploaded content.
+- A repo-visibility error such as \`incorrect_git_source_info\` is not the final answer when the built site already exists locally. Switch to the direct file deployment path before reporting a blocker.
 - If the task asks for generated images, audio, video, or other media outputs and the relevant services are active in TASK_BRIEFING.md, generate the actual media files. Do not stop at concept notes, prompt starters, or script-only drafts unless the operator explicitly asked for ideation only or the live generation attempt fails.
 - When active media services are already attached, move into live generation early. Do not spend the first phase grepping the repo for examples or writing planning-only briefs before the first real generation attempt.
 - Supplemental campaign briefs, image-prompt notes, or voice scripts do not satisfy a media-generation task on their own. The task is not complete until the requested media files exist in the workspace or a concrete live-service blocker has been proven.

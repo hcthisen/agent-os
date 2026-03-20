@@ -66,3 +66,47 @@ test("toSanitizedServiceConnectionHint fills default base URLs and usage hints f
     usage_hints: serviceRegistryTestHooks.DEFAULT_SERVICE_USAGE_HINTS.github,
   });
 });
+
+test("vercel usage hints describe the direct deployment fallback when repo linkage is unavailable", () => {
+  const hint = serviceRegistryTestHooks.toSanitizedServiceConnectionHint({
+    auth_type: "api_key",
+    base_url: null,
+    credential: "token: vercel_test_value",
+    error_message: null,
+    id: "svc-3",
+    service_name: "vercel",
+    status: "active",
+    updated_at: "2026-03-19T00:00:00Z",
+  });
+
+  assert.equal(hint?.base_url, serviceRegistryTestHooks.DEFAULT_SERVICE_BASE_URL_HINTS.vercel);
+  assert.ok(
+    hint?.usage_hints?.some((line) => /direct deployment flow/i.test(line))
+  );
+  assert.ok(
+    hint?.usage_hints?.some((line) => /POST \/v2\/files/i.test(line))
+  );
+  assert.ok(
+    hint?.usage_hints?.some((line) => /POST \/v13\/deployments/i.test(line))
+  );
+});
+
+test("github usage hints require recursive source upload and nested-path verification", () => {
+  const hint = serviceRegistryTestHooks.toSanitizedServiceConnectionHint({
+    auth_type: "api_key",
+    base_url: null,
+    credential: "token: ghp_test_value",
+    error_message: null,
+    id: "svc-4",
+    service_name: "github",
+    status: "active",
+    updated_at: "2026-03-19T00:00:00Z",
+  });
+
+  assert.ok(
+    hint?.usage_hints?.some((line) => /full directory tree recursively/i.test(line))
+  );
+  assert.ok(
+    hint?.usage_hints?.some((line) => /important nested source paths exist/i.test(line))
+  );
+});

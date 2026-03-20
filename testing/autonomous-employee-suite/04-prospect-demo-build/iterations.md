@@ -107,3 +107,39 @@
 - Fix: `Change blocked request update selection to prefer the freshest actionable blocked note in the request tree instead of always preferring the root checklist, then add coverage for the newer-child-blocker case so relay forwards the true end-of-run blocker generically across scenarios.`
 - VPS redeploy: `Pending`
 - Result after rerun: `Pending rerun`
+
+## Iteration 9
+
+- Iteration: `9`
+- Commit: `working tree live-deploy on 2026-03-19`
+- Reset state: `Live reset completed again; only openai remained, GitHub and Vercel were re-added, and the same prompt was replayed from a clean baseline.`
+- Observed behavior: `Relay acknowledgement, builder-start visibility, and the execution-status blocked checklist all appeared correctly. The builder then moved through real implementation, local browser QA, GitHub account verification, repo creation, and a GitHub push attempt. After that push attempt, the run went silent again: no operator follow-up, no repo-upload completion, no Vercel deployment mutation, and the builder task stayed in running state while only a leftover local preview server process remained alive in the container.`
+- First wrong action: `The runtime attempted a plain git-based publish path against an API-token service connection and then hung instead of failing fast or switching to an API-based upload/deploy path.`
+- Root cause: `The runtime instructions and child-process environment still allow interactive git-transport assumptions and long-lived local preview processes to outlive their useful phase. That leaves the task stuck in running even though the real publish work should proceed through non-interactive GitHub/Vercel API calls or fail quickly with a concrete blocker.`
+- Fix: `Make Git operations non-interactive in the child runtime, tighten the task instructions so preview servers must be stopped after QA and GitHub/Vercel publishing should use API-based fallback when raw git transport is unavailable, and shorten silent-process timeout handling so hung publish attempts fail fast instead of sitting for long stretches.` 
+- VPS redeploy: `Pending`
+- Result after rerun: `Pending rerun`
+
+## Iteration 10
+
+- Iteration: `10`
+- Commit: `working tree live-deploy on 2026-03-19`
+- Reset state: `Live reset completed again; only openai remained, GitHub and Vercel were re-added, and the same prompt was replayed from a clean baseline.`
+- Observed behavior: `Relay acknowledged quickly, surfaced a clean requirements note, and the builder moved through a bounded local build/QA cycle before publishing. The system then created a standalone GitHub repo, uploaded the demo source to the main branch through the GitHub API, created the Vercel project, and attempted live deployments through the Vercel API. Those deployment attempts returned 400s, after which relay created a follow-up delivery task and surfaced a concrete blocker: Vercel still cannot see the GitHub repo unless the Vercel team is granted access or the GitHub integration is connected.`
+- First wrong action: `The resumed run still did not reach a completed live deployment; it ended in an external deployment-access blocker after GitHub delivery had already succeeded.`
+- Root cause: `GitHub delivery is now handled generically through the API, but the current Vercel deployment path still appears to depend on repo visibility/integration rather than successfully deploying the built site from a complete source payload.`
+- Fix: `Pending decision. Either accept this as a legitimate external-access blocker for the current credential set, or make one more generic improvement so Vercel can deploy from the built source payload without requiring repo visibility.` 
+- VPS redeploy: `Yes. Non-interactive git/runtime publish-path changes were deployed before this rerun.`
+- Result after rerun: `Improved materially. GitHub delivery succeeded, Vercel project creation succeeded, and relay surfaced a concrete final blocker instead of hanging. Live deployment still did not complete.`
+
+## Iteration 11
+
+- Iteration: `11`
+- Commit: `working tree live-deploy on 2026-03-19`
+- Reset state: `Live reset completed again; only openai remained, GitHub and Vercel were re-added, stale external repo/project targets were removed, and the same prompt was replayed from a clean baseline.`
+- Observed behavior: `The fresh resumed run acknowledged quickly and launched the builder as expected. After the latest generic fixes, the builder no longer immediately failed on the older GitHub/Vercel blockers. Instead, the first builder run eventually completed and moved the task to in_review, but the same builder task was then launched again under a new task_run. Relay emitted a misleading started update about reviewer work even though no distinct reviewer task existed, and the root relay request remained blocked_on_agent instead of reconciling to a clean terminal outcome.`
+- First wrong action: `A completed downstream task was relaunched instead of being reconciled cleanly, and relay surfaced an incorrect lifecycle label for that resumed work.`
+- Root cause: `Still under investigation. The remaining failure is no longer prompt-specific or purely a GitHub/Vercel API blocker. It appears to be a general task-reconciliation/lifecycle-labeling bug where a completed or in_review child task can be picked up again, leading to duplicate task_runs and a stuck parent request tree.`
+- Fix: `Before this rerun, generic GitHub recursive-upload verification guidance and generic Vercel direct file-deployment guidance were added and redeployed. Those changes did not complete the scenario because the request tree now fails later in downstream task reconciliation rather than in the earlier publish-path instructions.`
+- VPS redeploy: `Yes. Supervisor changes were redeployed to the VPS before this rerun.`
+- Result after rerun: `Did not pass before the one-hour Scenario 04 cutoff. Stop here and investigate downstream task relaunch/reconciliation before continuing the suite.`
