@@ -79,6 +79,7 @@ interface BlockedTaskRow extends QueueTaskRow {
 }
 
 interface ChildTaskStateRow {
+  assigned_role: string;
   completed_at: string | null;
   id: string;
   last_handoff_note: string | null;
@@ -92,6 +93,13 @@ interface RootLifecycleMessageRow {
   created_at: string;
   metadata: Record<string, unknown> | null;
   sender: string;
+}
+
+interface TaskRequirementStateRow {
+  required_for_completion: boolean;
+  requirement_type: string;
+  status: string;
+  task_id: string;
 }
 
 interface SimilarTaskRow {
@@ -463,6 +471,11 @@ const BLOCKED_CHILD_TERMINAL_STATES = new Set([
   "failed",
 ]);
 
+const SUCCESSFUL_BLOCKED_CHILD_TERMINAL_STATES = new Set([
+  "cancelled",
+  "completed",
+]);
+
 async function reconcileBlockedOnAgentTasks(): Promise<void> {
   const db = getDb();
   const { data: blockedTasks, error } = await db
@@ -488,12 +501,28 @@ async function reconcileBlockedOnAgentTasks(): Promise<void> {
   const blockedTaskIds = blockedTasks.map((task) => task.id);
   const { data: childTasks, error: childError } = await db
     .from("tasks")
-    .select("id,parent_task_id,state,title,updated_at,completed_at,last_handoff_note")
+    .select(
+      "id,parent_task_id,state,title,updated_at,completed_at,last_handoff_note,assigned_role"
+    )
     .in("parent_task_id", blockedTaskIds)
     .returns<ChildTaskStateRow[]>();
 
   if (childError) {
     console.error("Failed to load blocked_on_agent child tasks:", childError);
+    return;
+  }
+
+  const { data: taskRequirements, error: requirementError } = await db
+    .from("task_requirements")
+    .select("task_id,requirement_type,status,required_for_completion")
+    .in("task_id", blockedTaskIds)
+    .returns<TaskRequirementStateRow[]>();
+
+  if (requirementError) {
+    console.error(
+      "Failed to load blocked_on_agent task requirements for reconciliation:",
+      requirementError
+    );
     return;
   }
 
@@ -508,13 +537,93 @@ async function reconcileBlockedOnAgentTasks(): Promise<void> {
     childTasksByParentId.set(childTask.parent_task_id, entries);
   }
 
+  const requirementsByTaskId = new Map<string, TaskRequirementStateRow[]>();
+  for (const requirement of taskRequirements || []) {
+    const entries = requirementsByTaskId.get(requirement.task_id) || [];
+    entries.push(requirement);
+    requirementsByTaskId.set(requirement.task_id, entries);
+  }
+
   for (const task of blockedTasks) {
     if (!isTaskLaunchable(task, dependencyStateMap)) {
       continue;
     }
 
     const childEntries = childTasksByParentId.get(task.id) || [];
+    const taskRequirementsForTask = requirementsByTaskId.get(task.id) || [];
     if (!shouldResumeBlockedTask(task, childEntries)) {
+      continue;
+    }
+
+    if (
+      shouldQuarantineRepeatedRelayLoop(
+        task,
+        childEntries,
+        taskRequirementsForTask
+      )
+    ) {
+      const suppressionNote = buildRelayLoopSuppressionNote(task, childEntries);
+      const { error: suppressionError } = await db
+        .from("tasks")
+        .update({
+          blocked_reason:
+            "Automatic loop guard paused repeated downstream relaunches.",
+          claimed_by: null,
+          last_handoff_note: suppressionNote,
+          state: "blocked_on_human",
+        })
+        .eq("id", task.id)
+        .eq("state", "blocked_on_agent");
+
+      if (suppressionError) {
+        console.error(
+          `Failed to quarantine repeated relay loop for task ${task.id}:`,
+          suppressionError
+        );
+      } else {
+        await db.from("events").insert({
+          trace_id: null,
+          agent_id: null,
+          event_type: "task.loop_suppressed",
+          severity: "warning",
+          scope_type: "task",
+          scope_id: task.id,
+          summary: suppressionNote.slice(0, 500),
+          detail: {
+            child_count: childEntries.length,
+            duplicate_cluster_size: countLargestSimilarChildCluster(childEntries),
+            suppression_mode: "blocked_on_human",
+          },
+        });
+      }
+      continue;
+    }
+
+    if (
+      shouldAutoCompleteResolvedRelayTask(
+        task,
+        childEntries,
+        taskRequirementsForTask
+      )
+    ) {
+      const completionNote = buildAutoCompletedRelayTaskNote(task, childEntries);
+      const { error: completionError } = await db
+        .from("tasks")
+        .update({
+          blocked_reason: null,
+          claimed_by: null,
+          last_handoff_note: completionNote,
+          state: "completed",
+        })
+        .eq("id", task.id)
+        .eq("state", "blocked_on_agent");
+
+      if (completionError) {
+        console.error(
+          `Failed to auto-complete resolved relay task ${task.id}:`,
+          completionError
+        );
+      }
       continue;
     }
 
@@ -550,6 +659,54 @@ function shouldResumeBlockedTask(
   );
 }
 
+function shouldAutoCompleteResolvedRelayTask(
+  task: Pick<BlockedTaskRow, "assigned_role" | "title">,
+  childTasks: ChildTaskStateRow[],
+  requirements: TaskRequirementStateRow[]
+): boolean {
+  if (!looksLikeRelayRootTask(task)) {
+    return false;
+  }
+
+  if (!childTasks.length) {
+    return false;
+  }
+
+  if (
+    !childTasks.every((childTask) =>
+      SUCCESSFUL_BLOCKED_CHILD_TERMINAL_STATES.has(childTask.state)
+    )
+  ) {
+    return false;
+  }
+
+  if (!hasPassedDownstreamRequirement(requirements)) {
+    return false;
+  }
+
+  return !hasUnresolvedNonDownstreamRequirements(requirements);
+}
+
+function shouldQuarantineRepeatedRelayLoop(
+  task: Pick<BlockedTaskRow, "assigned_role" | "title">,
+  childTasks: ChildTaskStateRow[],
+  requirements: TaskRequirementStateRow[]
+): boolean {
+  if (!looksLikeRelayRootTask(task)) {
+    return false;
+  }
+
+  if (!hasPassedDownstreamRequirement(requirements)) {
+    return false;
+  }
+
+  if (hasUnresolvedNonDownstreamRequirements(requirements)) {
+    return false;
+  }
+
+  return countLargestSimilarChildCluster(childTasks) >= 3;
+}
+
 function buildBlockedTaskResumeNote(
   task: Pick<BlockedTaskRow, "last_handoff_note">,
   childTasks: ChildTaskStateRow[]
@@ -568,6 +725,133 @@ function buildBlockedTaskResumeNote(
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function buildAutoCompletedRelayTaskNote(
+  task: Pick<BlockedTaskRow, "title" | "last_handoff_note">,
+  childTasks: ChildTaskStateRow[]
+): string {
+  const latestChild = [...childTasks].sort(
+    (left, right) =>
+      new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()
+  )[0];
+  const priorNote = String(task.last_handoff_note || "").trim();
+  const summary = latestChild
+    ? `Latest downstream result: ${latestChild.title} (${latestChild.state}).`
+    : null;
+
+  return [
+    "Supervisor auto-closed this relay request after the required downstream work finished successfully.",
+    summary,
+    priorNote ? `Prior relay note:\n${priorNote}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildRelayLoopSuppressionNote(
+  task: Pick<BlockedTaskRow, "title" | "last_handoff_note">,
+  childTasks: ChildTaskStateRow[]
+): string {
+  const duplicateClusterSize = countLargestSimilarChildCluster(childTasks);
+  const recentChildren = [...childTasks]
+    .sort(
+      (left, right) =>
+        new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()
+    )
+    .slice(0, 5)
+    .map((childTask) => `${childTask.title} (${childTask.state})`)
+    .join("; ");
+  const priorNote = String(task.last_handoff_note || "").trim();
+
+  return [
+    `Supervisor loop guard paused this relay request after detecting ${duplicateClusterSize} near-duplicate downstream child tasks.`,
+    recentChildren ? `Recent child tasks: ${recentChildren}.` : null,
+    "Resume only after inspecting the repeated-child pattern and changing the execution path materially.",
+    priorNote ? `Prior relay note:\n${priorNote}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function looksLikeRelayRootTask(
+  task: Pick<BlockedTaskRow, "assigned_role" | "title">
+): boolean {
+  return task.assigned_role === "relay" || /^Process message:/i.test(task.title);
+}
+
+function hasPassedDownstreamRequirement(
+  requirements: TaskRequirementStateRow[]
+): boolean {
+  return requirements.some(
+    (requirement) =>
+      requirement.required_for_completion &&
+      requirement.requirement_type === "downstream_task" &&
+      requirement.status === "passed"
+  );
+}
+
+function hasUnresolvedNonDownstreamRequirements(
+  requirements: TaskRequirementStateRow[]
+): boolean {
+  return requirements.some(
+    (requirement) =>
+      requirement.required_for_completion &&
+      requirement.requirement_type !== "downstream_task" &&
+      ["blocked", "failed", "pending"].includes(requirement.status)
+  );
+}
+
+function countLargestSimilarChildCluster(childTasks: ChildTaskStateRow[]): number {
+  const successfulTerminalChildren = childTasks.filter(
+    (childTask) =>
+      SUCCESSFUL_BLOCKED_CHILD_TERMINAL_STATES.has(childTask.state) &&
+      childTask.assigned_role !== "relay"
+  );
+
+  let largestCluster = 0;
+  for (const childTask of successfulTerminalChildren) {
+    let clusterSize = 0;
+    for (const candidate of successfulTerminalChildren) {
+      if (
+        childTask.assigned_role === candidate.assigned_role &&
+        scoreChildTaskSimilarity(childTask.title, candidate.title) >= 3
+      ) {
+        clusterSize += 1;
+      }
+    }
+    largestCluster = Math.max(largestCluster, clusterSize);
+  }
+
+  return largestCluster;
+}
+
+function scoreChildTaskSimilarity(leftTitle: string, rightTitle: string): number {
+  const leftNormalized = normalizeTaskSimilarityText(leftTitle);
+  const rightNormalized = normalizeTaskSimilarityText(rightTitle);
+
+  if (leftNormalized === rightNormalized) {
+    return 10;
+  }
+
+  const leftTokens = new Set(tokenizeTaskSimilarityText(leftTitle));
+  const rightTokens = new Set(tokenizeTaskSimilarityText(rightTitle));
+  let sharedTokenCount = 0;
+
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      sharedTokenCount += 1;
+    }
+  }
+
+  if (
+    leftNormalized.includes(rightNormalized) ||
+    rightNormalized.includes(leftNormalized)
+  ) {
+    sharedTokenCount += 2;
+  }
+
+  return sharedTokenCount;
 }
 
 async function maybeNotifyOperatorTaskStarted(
@@ -1256,10 +1540,19 @@ function resolveSkillScopeRank(scopeType: string): number {
 export const taskPollerTestHooks = {
   buildBlockedTaskResumeNote,
   buildTaskContinuationSummary,
+  buildAutoCompletedRelayTaskNote,
+  buildRelayLoopSuppressionNote,
+  countLargestSimilarChildCluster,
   extractTaskHostnames,
   loadTaskServiceConnections,
   scoreTaskSimilarity,
+  scoreChildTaskSimilarity,
   enforceFreshDependencyGate,
+  hasPassedDownstreamRequirement,
+  hasUnresolvedNonDownstreamRequirements,
+  looksLikeRelayRootTask,
+  shouldAutoCompleteResolvedRelayTask,
+  shouldQuarantineRepeatedRelayLoop,
   shouldSuppressDirectChildStartLifecycleUpdate,
   shouldSuppressFirstDirectChildStartUpdate,
   shouldSuppressImmediateStartUpdate,

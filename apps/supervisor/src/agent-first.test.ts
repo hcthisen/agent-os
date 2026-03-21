@@ -224,6 +224,7 @@ test("blocked_on_agent tasks resume once all child tasks are terminal", () => {
       { state: "blocked_on_agent" },
       [
         {
+          assigned_role: "architect",
           completed_at: "2026-03-19T06:24:23.473535+00:00",
           id: "child-1",
           last_handoff_note: null,
@@ -244,6 +245,7 @@ test("blocked_on_agent tasks stay parked while any child task is still active", 
       { state: "blocked_on_agent" },
       [
         {
+          assigned_role: "architect",
           completed_at: null,
           id: "child-1",
           last_handoff_note: null,
@@ -434,4 +436,126 @@ test("task continuation summary pushes adaptation and skill evolution", () => {
   assert.match(String(summary.adaptation_guidance || ""), /materially different approach/i);
   assert.match(String(summary.adaptation_guidance || ""), /persistent initiative/i);
   assert.match(String(summary.skill_evolution_directive || ""), /shared skill/i);
+});
+
+test("resolved relay roots auto-complete once downstream work passes cleanly", () => {
+  assert.equal(
+    taskPollerTestHooks.shouldAutoCompleteResolvedRelayTask(
+      {
+        assigned_role: "relay",
+        title: "Process message: Please update the live workflow...",
+      },
+      [
+        {
+          assigned_role: "builder",
+          completed_at: "2026-03-20T21:08:48.619803+00:00",
+          id: "child-1",
+          last_handoff_note: "Implemented the requested workflow change.",
+          parent_task_id: "relay-root",
+          state: "completed",
+          title: "Enforce Hans joke rating gate before next send",
+          updated_at: "2026-03-20T21:08:48.619803+00:00",
+        },
+      ],
+      [
+        {
+          required_for_completion: true,
+          requirement_type: "downstream_task",
+          status: "passed",
+          task_id: "relay-root",
+        },
+      ]
+    ),
+    true
+  );
+});
+
+test("relay roots with unresolved non-downstream requirements stay open", () => {
+  assert.equal(
+    taskPollerTestHooks.shouldAutoCompleteResolvedRelayTask(
+      {
+        assigned_role: "relay",
+        title: "Process message: Inspect and stop the loop...",
+      },
+      [
+        {
+          assigned_role: "builder",
+          completed_at: "2026-03-20T21:08:48.619803+00:00",
+          id: "child-1",
+          last_handoff_note: "Investigated the loop.",
+          parent_task_id: "relay-root",
+          state: "completed",
+          title: "Stop duplicate Telegram sends in Hans hourly cat-joke workflow",
+          updated_at: "2026-03-20T21:08:48.619803+00:00",
+        },
+      ],
+      [
+        {
+          required_for_completion: true,
+          requirement_type: "downstream_task",
+          status: "passed",
+          task_id: "relay-root",
+        },
+        {
+          required_for_completion: true,
+          requirement_type: "service_active",
+          status: "blocked",
+          task_id: "relay-root",
+        },
+      ]
+    ),
+    false
+  );
+});
+
+test("repeated near-duplicate relay children trip the loop guard", () => {
+  assert.equal(
+    taskPollerTestHooks.shouldQuarantineRepeatedRelayLoop(
+      {
+        assigned_role: "relay",
+        title: "Process message: 2...",
+      },
+      [
+        {
+          assigned_role: "builder",
+          completed_at: "2026-03-20T21:05:49.905900+00:00",
+          id: "child-1",
+          last_handoff_note: null,
+          parent_task_id: "relay-root",
+          state: "completed",
+          title: "Incorporate Hans's latest 2 rating into the hourly cat-joke workflow",
+          updated_at: "2026-03-20T21:05:49.905900+00:00",
+        },
+        {
+          assigned_role: "builder",
+          completed_at: "2026-03-20T21:11:51.331040+00:00",
+          id: "child-2",
+          last_handoff_note: null,
+          parent_task_id: "relay-root",
+          state: "completed",
+          title: "Tune next hourly cat joke after Hans rated the latest one 2",
+          updated_at: "2026-03-20T21:11:51.331040+00:00",
+        },
+        {
+          assigned_role: "builder",
+          completed_at: "2026-03-20T21:16:31.475906+00:00",
+          id: "child-3",
+          last_handoff_note: null,
+          parent_task_id: "relay-root",
+          state: "completed",
+          title: "Refine Hans hourly cat joke after rating 2",
+          updated_at: "2026-03-20T21:16:31.475906+00:00",
+        },
+      ],
+      [
+        {
+          required_for_completion: true,
+          requirement_type: "downstream_task",
+          status: "passed",
+          task_id: "relay-root",
+        },
+      ]
+    ),
+    true
+  );
 });
