@@ -21,12 +21,24 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF... \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/hcthisen/agent-os/main/scripts/bootstrap.sh)"
 ```
 
+Or fully automated without a domain/Caddy:
+
+```bash
+AGENT_OS_ADD_DOMAIN=no \
+AGENT_OS_ADMIN_USER=admin \
+AGENT_OS_ADMIN_PASS=supersecretpassword \
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF... \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/hcthisen/agent-os/main/scripts/bootstrap.sh)"
+```
+
 The installer handles everything: Docker, the repo, secrets, systemd, first boot, and optionally domain/TLS setup.
 
 If you answer `no` to domain setup, the installer skips Caddy and keeps the admin app on port `3000`:
 
 - on the same machine: `http://localhost:3000`
 - on a VPS: `http://<server-ip>:3000`
+
+Important: the `curl ... bootstrap.sh` command always downloads the installer from the GitHub branch in the URL. If you are testing installer edits that only exist in a local checkout on the VPS, run `bash scripts/bootstrap.sh` or `bash scripts/install-vps.sh` from that checkout instead of using the remote `curl` command.
 
 ### DNS
 
