@@ -8,6 +8,7 @@
 #   bash scripts/install-vps.sh
 #
 # Non-interactive (via env vars — no prompts):
+#   AGENT_OS_ADD_DOMAIN=yes \
 #   AGENT_OS_DOMAIN=example.com \
 #   AGENT_OS_ADMIN_USER=admin \
 #   AGENT_OS_ADMIN_PASS=supersecretpassword \
@@ -15,6 +16,7 @@
 #     bash scripts/install-vps.sh
 #
 # Optional env vars:
+#   AGENT_OS_ADD_DOMAIN   Enable domain + Caddy (default: prompt)
 #   TELEGRAM_BOT_TOKEN   Telegram bot token (default: none)
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -51,6 +53,60 @@ prompt_nonempty() {
   done
 
   printf '%s' "${value}"
+}
+
+normalize_yes_no() {
+  local raw
+  raw="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+
+  case "${raw}" in
+    y|yes|true|1|on)
+      printf '%s' "true"
+      return 0
+      ;;
+    n|no|false|0|off)
+      printf '%s' "false"
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local default_value="$2"
+  local suffix="[y/n]"
+  local value=""
+  local normalized_default=""
+
+  if [[ -n "${default_value}" ]]; then
+    normalized_default="$(normalize_yes_no "${default_value}")" || {
+      echo "Invalid default yes/no value: ${default_value}" >&2
+      exit 1
+    }
+    if [[ "${normalized_default}" == "true" ]]; then
+      suffix="[Y/n]"
+    else
+      suffix="[y/N]"
+    fi
+  fi
+
+  while true; do
+    read -r -p "${prompt} ${suffix}: " value
+
+    if [[ -z "${value}" && -n "${normalized_default}" ]]; then
+      printf '%s' "${normalized_default}"
+      return 0
+    fi
+
+    if normalized_value="$(normalize_yes_no "${value}")"; then
+      printf '%s' "${normalized_value}"
+      return 0
+    fi
+
+    echo "Please answer yes or no." >&2
+  done
 }
 
 prompt_env_safe_value() {
@@ -131,6 +187,36 @@ normalize_domain() {
   printf '%s' "${raw,,}"
 }
 
+detect_primary_ipv4() {
+  local candidate=""
+
+  if command -v ip >/dev/null 2>&1; then
+    candidate="$(
+      ip route get 1.1.1.1 2>/dev/null | awk '
+        /src/ {
+          for (i = 1; i <= NF; i++) {
+            if ($i == "src") {
+              print $(i + 1)
+              exit
+            }
+          }
+        }
+      '
+    )"
+  fi
+
+  if [[ -z "${candidate}" ]]; then
+    candidate="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  candidate="${candidate%% *}"
+  if [[ "${candidate}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "${candidate}" != 127.* ]]; then
+    printf '%s' "${candidate}"
+  fi
+
+  return 0
+}
+
 # ── OS detection (for Docker install) ────────────────────────────────
 
 require_supported_os() {
@@ -187,19 +273,38 @@ EOF
 write_env_file() {
   local admin_user="$1"
   local admin_pass="$2"
-  local root_domain="$3"
-  local telegram_bot_token="$4"
-  local admin_public_url="https://admin.${root_domain}"
-  local public_site_url="https://${root_domain}"
+  local domain_enabled="$3"
+  local root_domain="$4"
+  local telegram_bot_token="$5"
+  local admin_bind_host="127.0.0.1"
+  local admin_public_url=""
+  local public_site_url=""
+  local caddy_enabled="false"
+  local caddy_site_snippets_dir=""
+  local caddy_data_dir=""
+  local caddy_config_dir=""
+
+  if [[ "${domain_enabled}" == "true" ]]; then
+    admin_public_url="https://admin.${root_domain}"
+    public_site_url="https://${root_domain}"
+    caddy_enabled="true"
+    caddy_site_snippets_dir="${CADDY_ROOT}/sites"
+    caddy_data_dir="${CADDY_ROOT}/data"
+    caddy_config_dir="${CADDY_ROOT}/config"
+  else
+    admin_bind_host="0.0.0.0"
+  fi
 
   cat > "${ENV_FILE}" <<EOF
 ROOT_DOMAIN=${root_domain}
 ADMIN_PUBLIC_URL=${admin_public_url}
 PUBLIC_SITE_URL=${public_site_url}
 ADMIN_LOCAL_PORT=3000
-CADDY_SITE_SNIPPETS_DIR=${CADDY_ROOT}/sites
-CADDY_DATA_DIR=${CADDY_ROOT}/data
-CADDY_CONFIG_DIR=${CADDY_ROOT}/config
+ADMIN_BIND_HOST=${admin_bind_host}
+CADDY_ENABLED=${caddy_enabled}
+CADDY_SITE_SNIPPETS_DIR=${caddy_site_snippets_dir}
+CADDY_DATA_DIR=${caddy_data_dir}
+CADDY_CONFIG_DIR=${caddy_config_dir}
 TELEGRAM_BOT_TOKEN=${telegram_bot_token}
 ADMIN_USER=${admin_user}
 ADMIN_PASS=${admin_pass}
@@ -246,8 +351,10 @@ main() {
   # Resolve config: env vars take priority, then interactive prompts
   admin_user="${AGENT_OS_ADMIN_USER:-}"
   admin_pass="${AGENT_OS_ADMIN_PASS:-}"
+  add_domain="${AGENT_OS_ADD_DOMAIN:-}"
   root_domain="${AGENT_OS_DOMAIN:-}"
   telegram_bot_token="${TELEGRAM_BOT_TOKEN:-}"
+  admin_local_port="3000"
 
   echo "" >&2
   if [[ -z "${admin_user}" ]]; then
@@ -258,37 +365,64 @@ main() {
     admin_pass="$(prompt_password)"
   fi
 
-  if [[ -z "${root_domain}" ]]; then
-    root_domain="$(normalize_domain "$(prompt_nonempty "Root domain pointed at this VPS")")"
+  if [[ -n "${add_domain}" ]]; then
+    add_domain="$(normalize_yes_no "${add_domain}")" || {
+      echo "AGENT_OS_ADD_DOMAIN must be yes or no." >&2
+      exit 1
+    }
+  elif [[ -n "${root_domain}" ]]; then
+    add_domain="true"
   else
-    root_domain="$(normalize_domain "${root_domain}")"
+    add_domain="$(prompt_yes_no "Add domain and HTTPS routing with Caddy" "yes")"
+  fi
+
+  if [[ "${add_domain}" == "true" ]]; then
+    if [[ -z "${root_domain}" ]]; then
+      root_domain="$(normalize_domain "$(prompt_nonempty "Root domain pointed at this VPS")")"
+    else
+      root_domain="$(normalize_domain "${root_domain}")"
+    fi
+  else
+    root_domain=""
   fi
 
   if [[ -z "${telegram_bot_token}" ]]; then
     telegram_bot_token="$(prompt_optional_env_safe_value "Telegram bot token (optional, press Enter to skip)")"
   fi
 
-  if [[ ! "${root_domain}" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
-    echo "Invalid root domain: ${root_domain}" >&2
-    exit 1
+  if [[ "${add_domain}" == "true" ]]; then
+    if [[ ! "${root_domain}" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
+      echo "Invalid root domain: ${root_domain}" >&2
+      exit 1
+    fi
   fi
 
-  ${SUDO} mkdir -p "${CADDY_ROOT}/sites" "${CADDY_ROOT}/data" "${CADDY_ROOT}/config"
-  if [[ ! -f "${CADDY_ROOT}/sites/00-placeholder.caddy" ]]; then
-    cat <<'EOF' | ${SUDO} tee "${CADDY_ROOT}/sites/00-placeholder.caddy" >/dev/null
+  if [[ "${add_domain}" == "true" ]]; then
+    ${SUDO} mkdir -p "${CADDY_ROOT}/sites" "${CADDY_ROOT}/data" "${CADDY_ROOT}/config"
+    if [[ ! -f "${CADDY_ROOT}/sites/00-placeholder.caddy" ]]; then
+      cat <<'EOF' | ${SUDO} tee "${CADDY_ROOT}/sites/00-placeholder.caddy" >/dev/null
 # Additional per-subdomain routes live in this directory.
 # Leave this file in place so the Caddy import glob always resolves.
 EOF
+    fi
   fi
 
-  write_env_file "${admin_user}" "${admin_pass}" "${root_domain}" "${telegram_bot_token}"
+  write_env_file "${admin_user}" "${admin_pass}" "${add_domain}" "${root_domain}" "${telegram_bot_token}"
   install_systemd_unit
 
   echo ""
   echo "Starting Agent-OS stack..."
   AGENT_OS_ENV_FILE="${ENV_FILE}" bash "${ROOT_DIR}/scripts/manage-vps-stack.sh" up
 
-  cat <<EOF
+  local_admin_url="http://localhost:${admin_local_port}"
+  network_ip="$(detect_primary_ipv4)"
+  network_admin_url=""
+  if [[ -n "${network_ip}" ]]; then
+    network_admin_url="http://${network_ip}:${admin_local_port}"
+  fi
+
+  if [[ "${add_domain}" == "true" ]]; then
+    cat <<EOF
 
   ┌─────────────────────────────────────────────────┐
   │            Agent-OS is deploying                 │
@@ -307,6 +441,37 @@ EOF
     bash ${ROOT_DIR}/scripts/manage-vps-stack.sh restart [service]
 
 EOF
+  else
+    cat <<EOF
+
+  ┌─────────────────────────────────────────────────┐
+  │            Agent-OS is deploying                 │
+  └─────────────────────────────────────────────────┘
+
+  Admin (local):   ${local_admin_url}
+EOF
+    if [[ -n "${network_admin_url}" ]]; then
+      cat <<EOF
+  Admin (network): ${network_admin_url}
+EOF
+    fi
+    cat <<EOF
+  Config:          ${ENV_FILE}
+
+  Domain setup: skipped
+  Caddy:        disabled
+
+  On the same machine, open localhost.
+  On a VPS, open the server IP on port ${admin_local_port}.
+
+  Day-2 commands:
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh status
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh logs
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh reload
+    bash ${ROOT_DIR}/scripts/manage-vps-stack.sh restart [service]
+
+EOF
+  fi
 }
 
 main "$@"

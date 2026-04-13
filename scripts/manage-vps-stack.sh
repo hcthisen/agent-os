@@ -3,11 +3,35 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${AGENT_OS_ENV_FILE:-${ROOT_DIR}/.env.vps}"
-COMPOSE_ARGS=(
-  "--env-file" "${ENV_FILE}"
-  "-f" "${ROOT_DIR}/docker-compose.yaml"
-  "-f" "${ROOT_DIR}/docker-compose.vps.yaml"
-)
+
+env_file_value() {
+  local key="$1"
+  awk -F= -v wanted="${key}" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "${ENV_FILE}"
+}
+
+is_truthy() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|true|1|on)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+compose_args() {
+  local args=(
+    "--env-file" "${ENV_FILE}"
+    "-f" "${ROOT_DIR}/docker-compose.yaml"
+    "-f" "${ROOT_DIR}/docker-compose.vps.yaml"
+  )
+
+  if is_truthy "$(env_file_value "CADDY_ENABLED")"; then
+    args+=("--profile" "domain")
+  fi
+
+  printf '%s\n' "${args[@]}"
+}
 
 usage() {
   cat <<'EOF'
@@ -25,7 +49,9 @@ EOF
 }
 
 run_compose() {
-  docker compose "${COMPOSE_ARGS[@]}" "$@"
+  local args=()
+  mapfile -t args < <(compose_args)
+  docker compose "${args[@]}" "$@"
 }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -61,6 +87,10 @@ case "${command_name}" in
     run_compose logs -f --tail=200 "$@"
     ;;
   caddy-reload)
+    if ! is_truthy "$(env_file_value "CADDY_ENABLED")"; then
+      echo "Caddy is disabled for this installation because domain setup was skipped." >&2
+      exit 1
+    fi
     run_compose exec caddy caddy reload --config /etc/caddy/Caddyfile
     ;;
   *)

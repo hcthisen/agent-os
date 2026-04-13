@@ -13,6 +13,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/hcthisen/agent-os/main/s
 Or fully automated (no prompts):
 
 ```bash
+AGENT_OS_ADD_DOMAIN=yes \
 AGENT_OS_DOMAIN=example.com \
 AGENT_OS_ADMIN_USER=admin \
 AGENT_OS_ADMIN_PASS=supersecretpassword \
@@ -20,24 +21,29 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF... \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/hcthisen/agent-os/main/scripts/bootstrap.sh)"
 ```
 
-The installer handles everything: Docker, the repo, secrets, systemd, TLS certificates, and first boot.
+The installer handles everything: Docker, the repo, secrets, systemd, first boot, and optionally domain/TLS setup.
+
+If you answer `no` to domain setup, the installer skips Caddy and keeps the admin app on port `3000`:
+
+- on the same machine: `http://localhost:3000`
+- on a VPS: `http://<server-ip>:3000`
 
 ### DNS
 
-Before installing, point your domain at the VPS:
+Before installing, point your domain at the VPS if you want HTTPS/domain routing:
 
 | Record | Type | Value |
 |--------|------|-------|
 | `example.com` | A | `<VPS IP>` |
 | `*.example.com` | A | `<VPS IP>` |
 
-Caddy auto-provisions HTTPS via Let's Encrypt.
+Caddy auto-provisions HTTPS via Let's Encrypt when domain setup is enabled.
 
 ### What the installer does
 
 1. Installs Docker + Compose (if missing)
 2. Clones the repo to `/opt/agent-os`
-3. Collects config (domain, admin credentials) or reads env vars
+3. Collects config (domain yes/no, admin credentials) or reads env vars
 4. Generates all secrets (Postgres password, JWT, Supabase keys)
 5. Creates a systemd service for auto-start on reboot
 6. Builds and starts the full stack via `docker compose`
@@ -74,7 +80,7 @@ Caddy auto-provisions HTTPS via Let's Encrypt.
 | **Supabase** (Postgres, Auth, Storage, Realtime) | Internal | All durable state |
 | **Supervisor** | Internal | Claims tasks, builds context packs, launches agent CLI processes |
 | **MCP Server** | Internal | Tool interface between agents and DB. Enforces scope and policy |
-| **Admin App** | `admin.domain.com` | Chat, task dashboard, agent config, provider controls |
+| **Admin App** | `admin.domain.com` or `localhost:3000` / `IP:3000` | Chat, task dashboard, agent config, provider controls |
 | **Public Site** | `domain.com` | Optional public surface, managed by agents |
 | **Browser** | Internal | Headless Chromium for auth flows, research, QA |
 | **Caddy** | `80/443` | Reverse proxy, auto TLS |
@@ -116,7 +122,7 @@ Every transition out of `running` requires a structured handoff note. Invalid tr
 
 ### First Login
 
-1. Open `https://admin.your-domain.com`
+1. Open `https://admin.your-domain.com` when domain setup is enabled, otherwise open `http://localhost:3000` or `http://<server-ip>:3000`
 2. Sign in with the credentials from setup
 3. Connect your coding provider (Claude or Codex) via the admin panel
 4. Send your first message — the relay picks it up and the work loop begins
@@ -175,7 +181,8 @@ docker/             Dockerfiles and Caddy config
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AGENT_OS_DOMAIN` | Yes* | Root domain pointed at the VPS |
+| `AGENT_OS_ADD_DOMAIN` | No | `yes` to enable Caddy/domain setup, `no` to run on port `3000` only |
+| `AGENT_OS_DOMAIN` | Yes** | Root domain pointed at the VPS |
 | `AGENT_OS_ADMIN_USER` | Yes* | Admin panel username |
 | `AGENT_OS_ADMIN_PASS` | Yes* | Admin panel password |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot token |
@@ -183,6 +190,8 @@ docker/             Dockerfiles and Caddy config
 | `AGENT_OS_BRANCH` | No | Git branch to deploy (default: `main`) |
 
 \* Prompted interactively if not set.
+
+\** Required only when `AGENT_OS_ADD_DOMAIN=yes`.
 
 ### Auto-Generated Secrets
 
@@ -199,7 +208,7 @@ You never need to manage these manually.
 ## Requirements
 
 - Ubuntu or Debian VPS
-- Domain with A + wildcard A records pointed at the VPS
+- Optional domain with A + wildcard A records pointed at the VPS
 - Docker is installed automatically if missing
 
 ## Documentation

@@ -173,6 +173,7 @@ services:
       ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-}
       AGENT_OS_TIMEZONE: ${AGENT_OS_TIMEZONE:-Europe/Copenhagen}
       CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
+      CADDY_ENABLED: ${CADDY_ENABLED:-true}
       POSTGREST_URL: http://rest:3000
       MCP_CONFIG_PATH: /app/mcp-config.json
       SUPERVISOR_CONTROL_URL: http://127.0.0.1:3001
@@ -213,6 +214,7 @@ services:
     command: ["node", "apps/mcp/dist/index.js"]
     environment:
       CADDY_SITE_SNIPPETS_DIR: ${CADDY_SITE_SNIPPETS_DIR:-}
+      CADDY_ENABLED: ${CADDY_ENABLED:-true}
       POSTGREST_URL: http://rest:3000
       ROOT_DOMAIN: ${ROOT_DOMAIN:-}
       SUPERVISOR_CONTROL_URL: http://supervisor:3001
@@ -237,7 +239,7 @@ services:
     entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
     command: ["node", "/app/server.mjs"]
     ports:
-      - "127.0.0.1:${ADMIN_LOCAL_PORT:-3000}:80"
+      - "${ADMIN_BIND_HOST:-127.0.0.1}:${ADMIN_LOCAL_PORT:-3000}:80"
     environment:
       ADMIN_PASS: ${ADMIN_PASS:-}
       ADMIN_USER: ${ADMIN_USER:-}

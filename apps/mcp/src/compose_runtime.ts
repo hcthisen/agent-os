@@ -64,6 +64,32 @@ export interface ManagedServiceStatus {
   status_reason: string;
 }
 
+function isManagedServiceEnabled(service: ManagedServiceName): boolean {
+  if (service !== "caddy") {
+    return true;
+  }
+
+  return normalizeBooleanEnv("CADDY_ENABLED", true);
+}
+
+function buildDisabledManagedServiceStatus(
+  service: ManagedServiceName
+): ManagedServiceStatus {
+  return {
+    attention_required: false,
+    container_id: null,
+    container_name: null,
+    health: null,
+    ip_addresses: [],
+    lifecycle: SERVICE_LIFECYCLE[service].lifecycle,
+    lifecycle_note: "This service is disabled because domain setup was skipped.",
+    self_target: false,
+    service,
+    state: "disabled",
+    status_reason: "Service is intentionally disabled for no-domain installs.",
+  };
+}
+
 const SERVICE_LIFECYCLE: Record<
   ManagedServiceName,
   { idle_states?: string[]; lifecycle: ManagedServiceLifecycle; note: string }
@@ -166,6 +192,10 @@ export function inspectService(
   runtime: ComposeRuntime,
   service: ManagedServiceName
 ): ManagedServiceStatus {
+  if (!isManagedServiceEnabled(service)) {
+    return buildDisabledManagedServiceStatus(service);
+  }
+
   const lifecycle = SERVICE_LIFECYCLE[service];
   const containerId = runDocker([
     "ps",
@@ -304,4 +334,13 @@ export function runDocker(args: string[]): string {
 
 function normalizeEnv(name: string): string {
   return String(process.env[name] || "").trim();
+}
+
+function normalizeBooleanEnv(name: string, fallback: boolean): boolean {
+  const normalized = normalizeEnv(name).toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  return ["1", "true", "yes", "y", "on"].includes(normalized);
 }

@@ -147,6 +147,32 @@ const SERVICE_LIFECYCLE: Record<
   },
 };
 
+function isManagedServiceEnabled(service: ManagedServiceName): boolean {
+  if (service !== "caddy") {
+    return true;
+  }
+
+  return normalizeBooleanEnv("CADDY_ENABLED", true);
+}
+
+function buildDisabledManagedServiceStatus(
+  service: ManagedServiceName
+): ManagedServiceStatus {
+  return {
+    attention_required: false,
+    container_id: null,
+    container_name: null,
+    health: null,
+    ip_addresses: [],
+    lifecycle: SERVICE_LIFECYCLE[service].lifecycle,
+    lifecycle_note: "This service is disabled because domain setup was skipped.",
+    self_target: false,
+    service,
+    state: "disabled",
+    status_reason: "Service is intentionally disabled for no-domain installs.",
+  };
+}
+
 const DEFAULT_SERVICE_BASE_URLS: Record<string, string> = {
   elevenlabs: "https://api.elevenlabs.io",
   gemini: "https://generativelanguage.googleapis.com",
@@ -184,6 +210,12 @@ export async function handlePublicSiteRouteControl(args: {
   reload?: boolean;
   target_path?: string | null;
 }): Promise<Record<string, unknown>> {
+  if (!isManagedServiceEnabled("caddy")) {
+    throw new Error(
+      "public_site_route requires domain setup; Caddy is disabled for this installation"
+    );
+  }
+
   const action = normalizeRouteAction(args.action);
   const hostname = normalizeHostname(
     args.hostname,
@@ -250,6 +282,12 @@ export async function handleServiceControlControl(args: {
   const results: Array<Record<string, unknown>> = [];
 
   for (const serviceState of serviceStates) {
+    if (serviceState.state === "disabled") {
+      throw new Error(
+        `Service '${serviceState.service}' is disabled because domain setup was skipped`
+      );
+    }
+
     if (!serviceState.container_id) {
       throw new Error(
         `Service '${serviceState.service}' is not running in project '${runtime.project}'`
@@ -1068,6 +1106,10 @@ function inspectServices(
   services: readonly ManagedServiceName[]
 ): ManagedServiceStatus[] {
   return services.map((service) => {
+    if (!isManagedServiceEnabled(service)) {
+      return buildDisabledManagedServiceStatus(service);
+    }
+
     const containerId = findLatestServiceContainerId(runtime, service);
 
     if (!containerId) {
@@ -1319,6 +1361,15 @@ function queueSelfRestart(containerId: string): void {
 
 function normalizeEnv(name: string): string {
   return String(process.env[name] || "").trim();
+}
+
+function normalizeBooleanEnv(name: string, fallback: boolean): boolean {
+  const normalized = normalizeEnv(name).toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  return ["1", "true", "yes", "y", "on"].includes(normalized);
 }
 
 function shouldBlockServiceRequestForService(service: RemoteMcpServiceRow): boolean {

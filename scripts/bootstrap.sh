@@ -6,6 +6,7 @@
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/hcthisen/agent-os/main/scripts/bootstrap.sh)"
 #
 # Fully automated (no prompts):
+#   AGENT_OS_ADD_DOMAIN=yes \
 #   AGENT_OS_DOMAIN=example.com \
 #   AGENT_OS_ADMIN_USER=admin \
 #   AGENT_OS_ADMIN_PASS=supersecretpassword \
@@ -13,6 +14,7 @@
 #     bash -c "$(curl -fsSL https://raw.githubusercontent.com/hcthisen/agent-os/main/scripts/bootstrap.sh)"
 #
 # Optional env vars:
+#   AGENT_OS_ADD_DOMAIN     Enable domain + Caddy      (default: prompt)
 #   AGENT_OS_DIR            Install directory        (default: /opt/agent-os)
 #   AGENT_OS_BRANCH         Git branch to deploy     (default: main)
 #   TELEGRAM_BOT_TOKEN      Telegram bot token       (default: none)

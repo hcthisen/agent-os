@@ -5,6 +5,7 @@ services:
 
   caddy:
     image: caddy:2.10-alpine
+    profiles: ["domain"]
     restart: unless-stopped
     depends_on:
       admin:
@@ -15,7 +16,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      ROOT_DOMAIN: ${ROOT_DOMAIN:?ROOT_DOMAIN is required}
+      ROOT_DOMAIN: ${ROOT_DOMAIN:-}
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${CADDY_SITE_SNIPPETS_DIR:-./docker/caddy/sites}:/etc/caddy/sites
