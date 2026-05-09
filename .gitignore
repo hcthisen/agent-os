@@ -18,10 +18,22 @@ apps/mcp/dist/
 .idea/
 
 # OS
-.DS_Store
 Thumbs.db
 Screenshots/
 .tmp/
 tmp/
 testing/autonomous-employee-suite/SERVICE_KEYS.local.md
 testing/autonomous-employee-suite/SERVICE_KEYS.md
+
+# macOS
+.DS_Store
+.DS
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.apdisk
